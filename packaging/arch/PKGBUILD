@@ -1,0 +1,193 @@
+# Maintainer: Your Name <you at example dot invalid>
+#
+# bastion-mc — hardened Arch Linux packages.
+#
+#   bastion-mc       the launcher (command line; holds the tokens, runs the sandbox)
+#   bastion-mc-gui   optional graphical front end; a separate program that drives the
+#                    launcher through `bastion-mc --events` and never sees a credential
+#
+# TEMPLATE: fill in the three TODOs (maintainer, url, signing key) before publishing.
+#
+# What "hardened" means here, precisely, because a Rust binary is two kinds of code:
+#
+#   Rust objects (the launcher itself and all crates):
+#     PIE, full RELRO, BIND_NOW, non-executable stack, separate code pages, frame pointers,
+#     integer-overflow checks kept in release, panic=abort (no unwinder to hijack),
+#     fat LTO. Stack probes (stack-clash protection) are always on in rustc.
+#     -fstack-protector and CET are NOT available for Rust code on the stable toolchain:
+#     `-C stack-protector` / `-C cf-protection` do not exist there (they are -Z flags), and a
+#     binary linked against the stable standard library cannot be marked IBT/SHSTK
+#     (`-Wl,-z,cet-report=error` fails the link). The nightly recipe is at the bottom.
+#
+#   C objects (AWS-LC, the TLS crypto provider and the only C in the launcher; compiled by
+#   the `cc` crate, which honours CFLAGS; the front end contains no C at all):
+#     -fstack-protector-strong, -fstack-clash-protection, -fcf-protection=full (CET),
+#     -D_FORTIFY_SOURCE=3, -ftrivial-auto-var-init=zero, -fPIE.
+#     (The check script prints how many canary and fortified references the binary has.)
+#
+# check() runs packaging/check-hardening.sh on both linked binaries, so the properties above
+# are verified on every build instead of assumed.
+
+pkgbase=bastion-mc
+pkgname=('bastion-mc' 'bastion-mc-gui')
+pkgver=0.1.0
+pkgrel=1
+arch=('x86_64')
+url='https://example.invalid/you/bastion-mc'   # TODO
+license=('MIT')
+makedepends=(
+  'cargo'
+  'java-environment'     # javac builds the 118-line launch bootstrap from source
+)
+# Nothing else is needed to *build* the front end: its window-system, keyboard and GPU
+# libraries are loaded at run time (see package_bastion-mc-gui).
+# Arch's default `lto` option adds -flto=auto to CFLAGS. GCC LTO bitcode inside the static
+# archives that rustc links makes the final link fail or silently drop objects; Rust-side
+# LTO is enabled in Cargo.toml instead.
+options=('!lto')
+
+# A signed tag: makepkg verifies the signature before a single file is unpacked.
+_srcdir=$pkgbase
+source=("git+${url}.git#tag=v${pkgver}?signed")
+validpgpkeys=('0000000000000000000000000000000000000000')   # TODO: release-signing key fingerprint
+b2sums=('SKIP')   # integrity comes from the signed tag
+# Tarball alternative:
+#   _srcdir=$pkgbase-$pkgver
+#   source=("$pkgbase-$pkgver.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+#   b2sums=('<output of b2sum>')
+
+# Always build with an explicit --target, even though it is the host. Without one, cargo
+# applies RUSTFLAGS to build scripts and proc-macro libraries as well, and the flags below
+# are meant for shipped code only. This is not cosmetic: `-C relocation-model=pie` gives a
+# proc-macro shared object initial-exec TLS, and rustc can then load only a handful of them
+# ("cannot allocate memory in static TLS block", reported as "can't find crate"). The
+# launcher alone stays under that limit; the front end's dependency tree does not.
+_target() { rustc -vV | sed -n 's/^host: //p'; }
+
+prepare() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  # --locked: exactly the dependency versions (and checksums) recorded in Cargo.lock.
+  cargo fetch --locked --target "$(_target)"
+}
+
+build() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+
+  # ---- C objects --------------------------------------------------------------------
+  # makepkg.conf already provides -fstack-clash-protection, -fcf-protection and
+  # -Wp,-D_FORTIFY_SOURCE=3; these lines make the package independent of local overrides.
+  CFLAGS+=' -fstack-protector-strong'
+  CFLAGS+=' -fstack-clash-protection'
+  CFLAGS+=' -fcf-protection=full'
+  CFLAGS+=' -ftrivial-auto-var-init=zero'
+  CFLAGS+=' -fPIE'
+  [[ $CFLAGS == *_FORTIFY_SOURCE* ]] || CFLAGS+=' -D_FORTIFY_SOURCE=3'
+
+  # ---- Rust objects and the final link ------------------------------------------------
+  RUSTFLAGS+=' -C relocation-model=pie'              # PIE
+  RUSTFLAGS+=' -C relro-level=full'                  # full RELRO
+  RUSTFLAGS+=' -C link-arg=-Wl,-z,relro,-z,now'      # … and immediate binding
+  RUSTFLAGS+=' -C link-arg=-Wl,-z,noexecstack'       # NX stack
+  RUSTFLAGS+=' -C link-arg=-Wl,-z,separate-code'     # no executable bytes in data pages
+  RUSTFLAGS+=' -C link-arg=-Wl,--as-needed'
+  RUSTFLAGS+=' -C force-frame-pointers=yes'
+  # Reproducible paths in panic messages and debug info.
+  RUSTFLAGS+=" --remap-path-prefix=$srcdir=/usr/src/debug/$pkgbase"
+
+  export CFLAGS RUSTFLAGS
+  # Always the AWS-LC sources pinned by Cargo.lock, built here with the flags above: never
+  # a copy that happens to be installed on the build host, and no cmake.
+  export AWS_LC_SYS_USE_SYSTEM=0 AWS_LC_SYS_CMAKE_BUILDER=0
+  # --frozen: no network, no lockfile changes. Profile (LTO, panic=abort, overflow checks)
+  # comes from Cargo.toml. --workspace: the launcher and the front end.
+  cargo build --frozen --release --workspace --target "$(_target)"
+}
+
+check() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export AWS_LC_SYS_USE_SYSTEM=0 AWS_LC_SYS_CMAKE_BUILDER=0
+  # Unit tests only. The integration suites start real sandboxes and need user namespaces,
+  # Landlock, bubblewrap and (some) network access, which a clean build chroot lacks; run
+  # `cargo test --workspace` on an installed system for those.
+  # (--target for the same reason as in build(): RUSTFLAGS set there are still exported.)
+  BASTION_ALLOW_NO_KEYRING=1 cargo test --frozen --lib --target "$(_target)"
+  # The event protocol, and the front end's logic and widgets. No display is needed: the
+  # widgets are laid out, clicked and rendered in software (.cargo/config.toml).
+  cargo test --frozen -p bastion-mc-proto --target "$(_target)"
+  cargo test --frozen -p bastion-mc-gui --lib --target "$(_target)"
+  # Fail the build if a binary lacks PIE / full RELRO / NX / W^X segments.
+  packaging/check-hardening.sh "target/$(_target)/release/bastion-mc"
+  packaging/check-hardening.sh "target/$(_target)/release/bastion-mc-gui"
+}
+
+package_bastion-mc() {
+  pkgdesc='Zero-trust Minecraft launcher: BYO-OAuth, signed mod profiles, bubblewrap + Landlock + seccomp sandbox'
+  depends=(
+    'glibc'
+    'gcc-libs'
+    'bubblewrap>=0.11.0'   # --ro-bind-fd, --disable-userns, --size, --args
+    'java-runtime'         # system OpenJDK only; the launcher never downloads a JVM
+  )
+  optdepends=(
+    'bastion-mc-gui: graphical front end'
+    'jre8-openjdk: Minecraft 1.16.5 and older'
+    'jre17-openjdk: Minecraft 1.17 - 1.20.4'
+    'jre21-openjdk: Minecraft 1.20.5 - 1.21.x'
+    'jre-openjdk: current Minecraft releases'
+    'age: encrypted refresh-token vault (hardware keys via age plugins)'
+  )
+  cd "$_srcdir"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc"
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md docs/THREAT_MODEL.md docs/TOKEN_INJECTION.md
+  install -Dm0644 examples/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # Root-owned trust anchors for profile signatures. When this directory contains *.pub
+  # keys, per-user keys are ignored: code running as the user cannot add a signer.
+  install -dm0755 "$pkgdir/etc/bastion-mc/trusted-keys.d"
+}
+
+package_bastion-mc-gui() {
+  pkgdesc='Graphical front end for the bastion-mc launcher (iced; Wayland and X11)'
+  # The binary itself links only glibc. Everything below is opened at run time by winit
+  # and wgpu, which is why the display-server and GPU libraries are optional: one of the
+  # two display stacks is needed, and without a GPU driver rendering falls back to software.
+  depends=(
+    "bastion-mc=$pkgver-$pkgrel"   # the two speak a versioned event protocol
+    'glibc'
+    'gcc-libs'
+    'libxkbcommon'                 # keyboard handling on both display servers
+    'ttf-font'                     # any TrueType font
+  )
+  optdepends=(
+    'wayland: run in a Wayland session'
+    'libx11: run in an X11 session'
+    'libxcursor: run in an X11 session'
+    'libxi: run in an X11 session'
+    'libxkbcommon-x11: run in an X11 session'
+    'vulkan-icd-loader: GPU rendering (with vulkan-radeon, vulkan-intel or nvidia-utils)'
+    'xdg-utils: "Open link" button of the sign-in prompt'
+  )
+  cd "$_srcdir"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc-gui"
+  install -Dm0644 -t "$pkgdir/usr/share/applications/" packaging/arch/bastion-mc-gui.desktop
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# ---------------------------------------------------------------------------------------
+# Nightly recipe for stack protector + CET in the Rust objects as well (NOT tested by the
+# template author, whose machine has the stable toolchain only):
+#
+#   export RUSTUP_TOOLCHAIN=nightly
+#   RUSTFLAGS+=' -Z stack-protector=strong -Z cf-protection=full'
+#   cargo build --frozen --release -Z build-std=std,panic_abort --target x86_64-unknown-linux-gnu
+#
+# `-Z build-std` is what matters: without rebuilding the standard library with the same
+# flags, its objects carry neither canaries nor CET markers. The binary then lands in
+# target/x86_64-unknown-linux-gnu/release/. Note that Linux enforces user-space shadow
+# stacks only when glibc opts the process in, and does not enforce user-space IBT at all.
+# ---------------------------------------------------------------------------------------

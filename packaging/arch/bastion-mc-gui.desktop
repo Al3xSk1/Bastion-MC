@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=bastion-mc
+GenericName=Minecraft Launcher
+Comment=Sandboxed, zero-trust Minecraft launcher
+Exec=bastion-mc-gui
+Icon=applications-games
+Terminal=false
+Categories=Game;
+Keywords=minecraft;launcher;sandbox;
+StartupNotify=true
+StartupWMClass=bastion-mc-gui
