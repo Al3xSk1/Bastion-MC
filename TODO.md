@@ -170,3 +170,160 @@ Done since: credential broker, `servers.dat`/`options.txt` sanitisers.
 - [ ] GUI: show which display protection is active (security context, nested compositor,
       plain X11), and whether the broker is on, next to the Play button. Today that only
       appears as console lines.
+
+## 6. More proposals (2026-11-13, second batch) — not started, with first assessment
+
+Each entry is the idea, what already exists, and the catch I see. "Check" marks a claim I
+haven't verified yet.
+
+### Supply chain of modpacks
+- [ ] **Cross-registry consensus at authoring time** (`profile lock`): compare each jar's
+      SHA-256 against Modrinth, CurseForge and GitHub Releases. Flag jars found on only one
+      source, or uploaded under 48 h ago (freshness quarantine). Opt-in, and only when
+      authoring: the launcher itself still contacts nobody. Catch: CurseForge's API
+      requires an API key (check its terms). A compromised upstream account publishes the
+      same bad hash everywhere it is listed.
+- [ ] **Bytecode capability diff on mod updates.** Parse the class constant pools and diff
+      references to `Runtime`/`ProcessBuilder`, `Unsafe`, sockets and URL connections,
+      reflection, `System.load*`, `MethodHandles`. Point at the exact class. Must recurse
+      into jar-in-jar (Fabric `META-INF/jars`) and flag bundled native libraries. Catch:
+      reflection over built strings, invokedynamic and class loading from bytes hide
+      capabilities from a static scan. It's a signal for review, not proof.
+
+### Anti-fingerprinting
+- [ ] Hostname and MAC address: largely done for `filtered` and `none` network modes. The
+      UTS hostname is a fixed `bastion`, the same for every user, and `/etc/machine-id` is
+      random per launch. The private netns holds only `lo`, so there is no hardware MAC to
+      see. `open` mode shares the host's interfaces; document it, or refuse it for
+      fingerprint-sensitive instances. Add a test that `NetworkInterface` enumeration
+      inside the sandbox shows only loopback.
+- [ ] Hardware normalisation: CPU count via cpuset or affinity in the scope; a synthetic
+      `/proc/cpuinfo` and `/proc/meminfo` bound over the real ones (check that bwrap allows
+      this on a fresh procfs); JVM properties are already ours. Catch: the OpenGL/Vulkan
+      renderer string comes from the real driver through `/dev/dri` and can't be normalised
+      by mounts. Telemetry carrying hardware info is already refused by the broker's
+      defaults.
+
+### Physical presence
+- [ ] **Security-key dead man's switch:** watch udev, through a netlink socket opened
+      before self-confinement, for removal of a configured key. On removal, kill the
+      sandbox, drop the broker's token and exit. Catch: the confined launcher cannot run
+      `loginctl lock-session`, so locking needs D-Bus (`org.freedesktop.login1`) set up
+      before confinement. Killing the game does **not** revoke the minted Minecraft token
+      at Mojang. With the broker, though, the token never left the launcher, so it dies
+      with the process.
+
+### Binary and kernel hardening
+- [ ] **Shadow stack (CET) for the launcher:** a nightly-only release profile with
+      `-Z cf-protection`. Every linked object must be marked, including AWS-LC's assembly,
+      and glibc's tunables must enable it at run time. Check whether user-space IBT is
+      supported by the kernel at all (I believe only shadow stacks are). MTE is ARM-only
+      and irrelevant on x86.
+- [ ] **Seccomp user notification:** limited value here. The kernel documentation warns it
+      must not be used to decide security policy based on pointer arguments (paths,
+      sockaddrs) because of TOCTOU races. Landlock already enforces paths and TCP ports.
+      Possible use: logging or tripwire decisions on syscalls whose arguments are plain
+      integers.
+
+### Zero-credential mode
+- [ ] **`--spectator` / burner launch:** demo mode already mints no token. Add one flag
+      that also forces `network.mode = "none"`, a throwaway copy of the instance (nothing
+      persisted back), and no broker. Meant for replays, untrusted maps and resource packs.
+      Catch: full (non-demo) play without a session would sidestep Mojang's ownership
+      check. Allow it only for an account verified as owning the game at its last sign-in,
+      and pass only a placeholder token.
+
+### Secrets in memory
+- [ ] **`memfd_secret` for the refresh token and the session token:** this removes those
+      pages from the kernel's direct map, which protects against `/proc/kcore` reads and
+      kernel bugs that leak through the direct map. Correction to the proposal: it does
+      **not** stop root or kernel modules outright, cold boot, or DMA without an IOMMU (the
+      pages are ordinary cleartext RAM). Check: secretmem may be disabled by default and
+      need `secretmem.enable=1`; fall back to the current mlock + wipe. Copies inside
+      rustls/hyper buffers stay outside our control.
+
+### Network metadata
+- [ ] **Padding auth traffic:** low value. The observer already sees the destination
+      hosts (IP and SNI) of every sign-in step, and rustls offers no TLS record-padding
+      control (check). Not planned unless that changes.
+- [ ] **Tor/SOCKS5 upstream for launcher-side traffic:** route sign-in (and, for full
+      effect, the broker's upstream calls) through a local SOCKS5 proxy, resolving names on
+      the proxy. Pins and TLS 1.3 stay end to end. Catch: Microsoft may challenge or block
+      Tor exits. Multiplayer servers still see your real IP, so only Microsoft/Mojang's
+      logs are decoupled.
+
+### Exfiltration through allowed endpoints (J13)
+- [ ] Skin/cape/profile uploads from the sandbox are already refused: the broker denies
+      every state-changing request that isn't on its allowlist. Add explicit regression
+      tests for `POST/PUT/DELETE /minecraft/profile/skins|capes|name`.
+- [ ] **Packet-rate tripwire on game connections:** after login the Minecraft stream is
+      encrypted, so the relay sees only sizes and timing. Inspecting payloads needs the
+      login-protocol proxy (§4.2). Expect false positives (chunk loading, resource packs).
+      Covert channels inside chat or movement to an allowlisted server can't be closed by
+      the launcher; record that in the threat model.
+
+### Build attestation
+- [ ] `cargo auditable build` in the PKGBUILD, which embeds the dependency list in the
+      binary. This joins the reproducible/vendored build items in §5: `--frozen --offline`,
+      `SOURCE_DATE_EPOCH`, then compare hashes from two independent builds.
+
+### Frozen runtime
+- [ ] **Verified, immutable `/usr` and JVM for the sandbox (EROFS or composefs + signed
+      digest):** mounting EROFS isn't allowed in a user namespace, so this needs a root
+      part, against the unprivileged design. A pacman hook could build the image after each
+      transaction, with a systemd mount unit. Cheaper partial step: copy the JVM home into
+      the verified store (fs-verity) and bind it by descriptor. Note: pacman replaces files
+      by rename, so open or mapped libraries keep their old version; the real risk is a
+      mixed-version set of later `open`s mid-session.
+
+## 7. Security companion mod for Fabric instances (proposal 2026-11-13) — not started
+
+**Idea:** a small Fabric mod, added to every Fabric instance by the launcher, that talks to
+the launcher. Risky actions in the game would need a second factor (one-time password,
+hardware-key touch, or phone confirmation) before they happen: installing or accepting
+resource packs, and other concerning actions.
+
+**The design constraint that decides everything:** the mod runs inside the same JVM as the
+mods it is meant to guard against. Any other mod can patch it (Mixin), call around it
+(reflection), fake its prompts, or read an OTP as it is typed into the game window. So:
+- **Enforcement lives in the launcher, outside the sandbox.** The mod is only the
+  in-game *interface*: it announces "the game wants X", and shows "waiting for approval"
+  and the result. If a hostile mod disables it, the action is still blocked, because the
+  launcher never received an approval.
+- **The second factor is never entered inside the game.** Use a launcher or GUI prompt,
+  a security-key touch, or a phone. A TOTP secret kept on this machine is readable by the
+  same user it guards against (see §4.5), so it only adds friction. Hardware-backed
+  factors (FIDO2 user presence, §4.1) are the meaningful ones.
+
+### What the launcher can actually gate
+- [ ] **Server resource packs:** the download goes through the relay. Hold the connection
+      (or refuse it) until approved, and record the pack's hash. Approved packs are cached
+      in the verified store and served from there afterwards.
+- [ ] **Local resource packs and shaders:** `resourcepacks/` is writable by the game today.
+      Make it read-only in the sandbox, add packs through a launcher import command with
+      approval and hashing, and verify them at launch, like `mods/`.
+- [ ] **Joining a server not on the allowlist:** a request to extend the session's
+      allowlist, with approval; persistent additions need the signed allowlist (§4.5).
+- [ ] **Account-affecting requests through the broker** (friends, settings, reports,
+      anything currently refused by default): approve per request instead of only
+      per config switch.
+- [ ] **Clickable chat links:** the game can't open them inside the sandbox. Forward
+      them to the launcher, which shows the full URL and opens it only after confirmation.
+
+### Mod ↔ launcher channel
+- [ ] One UNIX socket bound into the sandbox (Landlock `unix_sockets`), a small
+      line-based protocol. Every message from the mod is **untrusted**: sanitised,
+      length-limited, rate-limited, and never able to approve anything itself.
+- [ ] Prompts are shown by the launcher side: a desktop notification, the GUI, or the
+      terminal. They name exactly what will happen (host, pack hash, server).
+- [ ] Optional for MVP: the mod's in-game screens. Without the mod the system still works;
+      blocked actions just fail with a launcher-side message.
+
+### Shipping the mod
+- [ ] Build it from source in this repository, like `BastionBootstrap.java`, with no
+      dependency beyond Fabric Loader (no Fabric API). Hash it at build time and bind it
+      into the sandbox by descriptor, outside the signed `mods/` set, so curated manifests
+      stay exactly as signed.
+- [ ] Maintenance cost: Mixin targets change with Minecraft versions, so it needs a
+      version matrix and tests per supported release. Vanilla instances can't load mods,
+      so there the launcher-side gates apply without the in-game interface.
