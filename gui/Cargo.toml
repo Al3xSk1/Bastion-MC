@@ -1,0 +1,25 @@
+[package]
+name = "bastion-mc-gui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Graphical front end for the bastion-mc launcher"
+license = "MIT"
+publish = false
+
+[dependencies]
+bastion-mc-proto = { path = "../crates/proto" }
+# wgpu with a software (tiny-skia) fallback, both display servers, tokio as the executor.
+# Not enabled on purpose: `linux-theme-detection` (the theme is always dark, and it would add
+# a D-Bus client), `thread-pool` (tokio runs the tasks), image/svg/markdown widgets.
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "tokio", "x11", "wayland"] }
+tokio = { version = "1.54", default-features = false, features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+
+[dev-dependencies]
+# Headless UI tests: drives `view`/`update` without a display server and renders in software.
+iced_test = "0.14.0"
+png = "0.18.1"
+tokio = { version = "1.54", default-features = false, features = ["rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"
