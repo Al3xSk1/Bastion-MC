@@ -1,0 +1,762 @@
+//! Launcher configuration (`$XDG_CONFIG_HOME/bastion-mc/config.toml`) and per-instance
+//! settings (`instances/<id>/instance.toml`).
+//!
+//! Every table uses `deny_unknown_fields`: a mistyped security option is a hard error, never a
+//! silently ignored line. Neither file can express arbitrary JVM arguments or commands — the
+//! only place code-affecting options may come from is a *signed* profile manifest.
+
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
+    path::{Path, PathBuf},
+};
+
+use serde::Deserialize;
+
+use crate::{
+    error::{Error, Result},
+    paths::Paths,
+    util,
+};
+
+pub const DEFAULT_GAME_PORT: u16 = 25565;
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+
+// ---------------------------------------------------------------- top level
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub auth: AuthConfig,
+    pub tls: TlsConfig,
+    pub java: JavaConfig,
+    pub sandbox: SandboxConfig,
+    pub network: NetworkConfig,
+    pub downloads: DownloadsConfig,
+    pub launcher: LauncherConfig,
+}
+
+impl Config {
+    /// A missing file means defaults; an unreadable, foreign-owned or malformed file is fatal.
+    pub fn load(paths: &Paths) -> Result<Self> {
+        let file = paths.config_file();
+        if !file.exists() {
+            let cfg = Config::default();
+            cfg.validate()?;
+            return Ok(cfg);
+        }
+        util::require_private(&file)?;
+        let raw = util::read_small_file(&file, MAX_CONFIG_BYTES)?;
+        let text = String::from_utf8(raw).map_err(|_| Error::Config(format!("{} is not UTF-8", file.display())))?;
+        let cfg: Config = toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(id) = &self.auth.client_id {
+            validate_client_id(id)?;
+        }
+        for host in self.tls.pins.keys() {
+            normalize_host(host.trim_start_matches('.'))?;
+        }
+        for pins in self.tls.pins.values() {
+            for pin in pins {
+                crate::net::tls::parse_pin(pin)?;
+            }
+        }
+        if !(512..=262_144).contains(&self.java.memory_mb) {
+            return Err(Error::Config("java.memory_mb must be between 512 and 262144".into()));
+        }
+        if let Some(home) = &self.java.home
+            && !home.is_absolute()
+        {
+            return Err(Error::Config("java.home must be an absolute path".into()));
+        }
+        for d in &self.network.service_domains {
+            normalize_host(d)?;
+        }
+        for s in &self.network.servers {
+            s.to_rule()?;
+        }
+        for endpoint in &self.network.broker.extra_token_endpoints {
+            crate::egress::broker::parse_endpoint(endpoint)?;
+        }
+        for h in &self.downloads.extra_hosts {
+            normalize_host(h)?;
+        }
+        if !(1..=32).contains(&self.downloads.parallel) {
+            return Err(Error::Config("downloads.parallel must be between 1 and 32".into()));
+        }
+        for name in self.sandbox.persist_files.iter().chain(&self.sandbox.extra_rw_dirs) {
+            crate::paths::validate_file_name(name)
+                .map_err(|e| Error::Config(format!("sandbox persist/rw entry: {e}")))?;
+        }
+        for name in &self.sandbox.persist_files {
+            // Nothing crosses from the game to the instance as raw bytes: a persisted file
+            // is parsed and written out again, so its format has to be one the launcher knows.
+            if crate::persist::kind_of(name).is_none() {
+                return Err(Error::Config(format!(
+                    "sandbox.persist_files: {name:?} has no known format (supported: servers.dat, options*.txt, \
+                     other *.txt, *.dat / *.nbt as NBT, *.json). Files the game should keep as they are belong \
+                     in a directory listed under extra_rw_dirs."
+                )));
+            }
+        }
+        for p in &self.sandbox.exec_allow {
+            if !p.is_absolute() {
+                return Err(Error::Config("sandbox.exec_allow entries must be absolute paths".into()));
+            }
+        }
+        if !(64..=65_536).contains(&self.sandbox.tmp_size_mb) {
+            return Err(Error::Config("sandbox.tmp_size_mb must be between 64 and 65536".into()));
+        }
+        if !(64..=1_000_000).contains(&self.sandbox.tasks_max) {
+            return Err(Error::Config("sandbox.tasks_max must be between 64 and 1000000".into()));
+        }
+        // These become gamescope's command line. `--` is where the launcher puts the one
+        // program gamescope starts; an entry must not be able to move that.
+        let args = &self.sandbox.nested_compositor_args;
+        if args.len() > 64
+            || args.iter().any(|a| a.is_empty() || a.len() > 256 || a == "--" || a.chars().any(char::is_control))
+        {
+            return Err(Error::Config(
+                "sandbox.nested_compositor_args: at most 64 non-empty options of at most 256 characters, without \
+                 control characters, and none of them `--`"
+                    .into(),
+            ));
+        }
+        if let Some(limit) = self.sandbox.memory_max_mb
+            && u64::from(limit) < u64::from(self.java.memory_mb) + 512
+        {
+            return Err(Error::Config(
+                "sandbox.memory_max_mb must leave at least 512 MiB above java.memory_mb (the JVM needs memory \
+                 beyond its heap)"
+                    .into(),
+            ));
+        }
+        if self.auth.token_store == TokenStore::Age {
+            let age = &self.auth.age;
+            if age.recipients_file.is_none() || age.identity_file.is_none() {
+                return Err(Error::Config(
+                    "auth.token_store = \"age\" requires auth.age.recipients_file and auth.age.identity_file".into(),
+                ));
+            }
+            for p in
+                [Some(&age.program), age.recipients_file.as_ref(), age.identity_file.as_ref()].into_iter().flatten()
+            {
+                if !p.is_absolute() {
+                    return Err(Error::Config("auth.age paths must be absolute".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- auth
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Application (client) ID of YOUR OWN Azure app registration. There is no built-in ID.
+    pub client_id: Option<String>,
+    pub flow: AuthFlow,
+    pub token_store: TokenStore,
+    /// Accept accounts whose licence comes from Xbox Game Pass (not listed by the store
+    /// entitlement endpoint). Off by default: the entitlement check is then strict.
+    pub allow_game_pass: bool,
+    pub age: AgeConfig,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        AuthConfig {
+            client_id: None,
+            flow: AuthFlow::Pkce,
+            token_store: TokenStore::Keyutils,
+            allow_game_pass: false,
+            age: AgeConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthFlow {
+    /// Authorization Code + PKCE with a loopback redirect on an ephemeral port.
+    Pkce,
+    /// Device Code flow (no local listener; needs "Allow public client flows" on the app).
+    Device,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenStore {
+    /// Kernel keyring: RAM only, gone at reboot.
+    Keyutils,
+    /// File encrypted by the external `age` tool (hardware keys via age plugins).
+    Age,
+    /// Never persist a refresh token; log in on every launch.
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgeConfig {
+    pub program: PathBuf,
+    pub recipients_file: Option<PathBuf>,
+    pub identity_file: Option<PathBuf>,
+}
+
+impl Default for AgeConfig {
+    fn default() -> Self {
+        AgeConfig { program: PathBuf::from("/usr/bin/age"), recipients_file: None, identity_file: None }
+    }
+}
+
+fn validate_client_id(id: &str) -> Result<()> {
+    let b = id.as_bytes();
+    let shape_ok = b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    if shape_ok {
+        Ok(())
+    } else {
+        Err(Error::Config("auth.client_id must be an Azure application (client) ID in UUID form".into()))
+    }
+}
+
+// ---------------------------------------------------------------- tls
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfig {
+    /// Pin Microsoft/Mojang hosts to the root and intermediate keys they are known to use
+    /// (see `net::tls::MICROSOFT_PINS`). On by default.
+    pub builtin_pins: bool,
+    /// host (exact) or ".suffix" -> list of "sha256/<base64 SPKI hash>". A connection to a
+    /// pinned host succeeds only if a certificate in the *validated* chain matches. An entry
+    /// here replaces the built-in pins for the same pattern.
+    pub pins: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        TlsConfig { builtin_pins: true, pins: BTreeMap::new() }
+    }
+}
+
+// ---------------------------------------------------------------- java
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JavaConfig {
+    #[serde(rename = "match")]
+    pub matching: JavaMatch,
+    /// Explicit JVM home. Must still be a root-owned installation under /usr/lib/jvm.
+    pub home: Option<PathBuf>,
+    pub memory_mb: u32,
+    /// Leave `false` unless a mod genuinely needs java.io.ObjectInputStream.
+    pub allow_serialization: bool,
+}
+
+impl Default for JavaConfig {
+    fn default() -> Self {
+        JavaConfig { matching: JavaMatch::Exact, home: None, memory_mb: 4096, allow_serialization: false }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JavaMatch {
+    /// Use exactly the Java feature release the game version declares.
+    Exact,
+    /// Allow the lowest installed release that is at least the declared one.
+    Newer,
+}
+
+// ---------------------------------------------------------------- sandbox
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    pub display: DisplayPref,
+    /// X11 has no client isolation: a compromised game can log keys and inject input into
+    /// every other X client, which is a sandbox escape. Must be opted into explicitly.
+    pub allow_x11: bool,
+    pub audio: AudioPref,
+    /// Expose the audio socket even when the sound server lets clients load modules into it
+    /// (classic PulseAudio, or pipewire-pulse with `pulse.allow-module-loading`). That is
+    /// code execution outside the sandbox; leave this off.
+    pub allow_pulse_module_loading: bool,
+    pub gpu: bool,
+    pub seccomp: SeccompMode,
+    /// Kill the JVM (SIGSYS) on syscalls that only an exploit would issue.
+    pub tripwire: bool,
+    pub expose_timezone: bool,
+    /// Extra executables the JVM may `execve` (default: only the JVM itself).
+    pub exec_allow: Vec<PathBuf>,
+    /// Extra syscall names to allow, for drivers the built-in allowlist does not cover.
+    pub extra_syscalls: Vec<String>,
+    /// Files in the game root that the launcher carries into the session and back out again.
+    /// They are never copied: each is parsed against a strict grammar for its kind and
+    /// re-encoded (see `persist`), in both directions.
+    pub persist_files: Vec<String>,
+    /// Additional instance sub-directories mounted read-write.
+    pub extra_rw_dirs: Vec<String>,
+    pub tmp_size_mb: u32,
+    /// Resource limits through a transient systemd scope (memory, no swap, task count).
+    pub cgroup: CgroupMode,
+    /// Memory ceiling for the whole sandbox, in MiB. Default: twice the JVM heap, plus the
+    /// sandbox's tmpfs, plus 1 GiB — a bound on runaway use, not a tuning knob.
+    pub memory_max_mb: Option<u32>,
+    /// Most threads and processes the sandbox may have at once.
+    pub tasks_max: u32,
+    /// On Wayland: give the game a socket of its own that the compositor knows to be a
+    /// sandbox (`wp_security_context_v1`), so that it withholds screen capture, input
+    /// injection and the other interfaces meant for trusted desktop components.
+    pub wayland_security_context: IsolationMode,
+    /// On X11: run the game inside a nested compositor (gamescope), so that it talks to a
+    /// display server of its own instead of the session's, which has no client isolation.
+    pub nested_compositor: IsolationMode,
+    /// Extra options for gamescope, e.g. `["-W", "1920", "-H", "1080", "-f"]`.
+    pub nested_compositor_args: Vec<String>,
+    /// Test support, deliberately not settable from a configuration file: directories
+    /// layered over `/usr` in the nested compositor's sandbox, so that the tests can run a
+    /// gamescope that is not installed. Programs found in a layer skip the root-ownership
+    /// check that installed ones must pass.
+    #[serde(skip)]
+    pub nested_compositor_layers: Vec<PathBuf>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        SandboxConfig {
+            display: DisplayPref::Auto,
+            allow_x11: false,
+            audio: AudioPref::Pulse,
+            allow_pulse_module_loading: false,
+            gpu: true,
+            seccomp: SeccompMode::Enforce,
+            tripwire: true,
+            expose_timezone: false,
+            exec_allow: Vec::new(),
+            extra_syscalls: Vec::new(),
+            persist_files: vec!["options.txt".into(), "servers.dat".into()],
+            extra_rw_dirs: Vec::new(),
+            tmp_size_mb: 1024,
+            cgroup: CgroupMode::Auto,
+            memory_max_mb: None,
+            tasks_max: 4096,
+            wayland_security_context: IsolationMode::Auto,
+            nested_compositor: IsolationMode::Auto,
+            nested_compositor_args: Vec::new(),
+            nested_compositor_layers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CgroupMode {
+    /// Use a systemd scope when the user manager can provide one; say so when it cannot.
+    Auto,
+    /// Refuse to launch without limits.
+    Require,
+    Off,
+}
+
+/// How to treat a protection that depends on what the desktop session offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolationMode {
+    /// Use it where the session supports it; say so plainly where it does not.
+    Auto,
+    /// Refuse to launch without it.
+    Require,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayPref {
+    Auto,
+    Wayland,
+    X11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioPref {
+    Pulse,
+    Alsa,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeccompMode {
+    Enforce,
+    /// Diagnostics only: forbidden syscalls are logged by the kernel and then ALLOWED.
+    Log,
+}
+
+// ---------------------------------------------------------------- network
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    pub mode: NetworkMode,
+    /// Registrable domains of Mojang services; any sub-domain is reachable on 443 only.
+    pub service_domains: Vec<String>,
+    pub servers: Vec<ServerEntry>,
+    /// Serve `http://textures.minecraft.net/texture/<hash>` by fetching it over HTTPS.
+    pub texture_gateway: bool,
+    /// Keep the access token in the launcher and authenticate requests on the game's behalf.
+    pub broker: BrokerConfig,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        NetworkConfig {
+            mode: NetworkMode::Filtered,
+            service_domains: vec!["minecraft.net".into(), "mojang.com".into(), "minecraftservices.com".into()],
+            servers: Vec::new(),
+            texture_gateway: true,
+            broker: BrokerConfig::default(),
+        }
+    }
+}
+
+/// The credential broker (filtered network mode). The game is handed a placeholder instead
+/// of the access token; each switch below decides whether the launcher will attach the real
+/// one to a class of requests. Profile, skin, cape and name changes are never allowed from
+/// the game, whatever is set here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrokerConfig {
+    pub enabled: bool,
+    /// Prove your identity to a game server you connect to (online-mode multiplayer).
+    pub join: bool,
+    /// Fetch the chat-signing key pair (servers that enforce secure chat need it).
+    pub chat_signing: bool,
+    /// Read your privileges, ban status and block list.
+    pub account_read: bool,
+    /// Friends list, friend requests, presence.
+    pub friends: bool,
+    /// Change account preferences (profanity filter, who may send friend requests).
+    pub settings: bool,
+    /// Send player reports.
+    pub reports: bool,
+    /// Send telemetry.
+    pub telemetry: bool,
+    /// Further `"METHOD host/path"` endpoints that get the credential (for game versions
+    /// newer than this launcher). Hosts under mojang.com / minecraftservices.com only.
+    pub extra_token_endpoints: Vec<String>,
+}
+
+impl Default for BrokerConfig {
+    fn default() -> Self {
+        BrokerConfig {
+            enabled: true,
+            join: true,
+            chat_signing: true,
+            account_read: true,
+            friends: false,
+            settings: false,
+            reports: false,
+            telemetry: false,
+            extra_token_endpoints: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkMode {
+    /// Private network namespace; the only way out is the launcher's allowlisting relay.
+    Filtered,
+    /// Host network namespace (no egress control, host loopback services reachable).
+    Open,
+    /// Private, empty network namespace.
+    None,
+}
+
+/// `"host"`, `"host:port"`, `"203.0.113.7:25570"` or a table with `allow_private`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ServerEntry {
+    Short(String),
+    Full {
+        host: String,
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        allow_private: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HostSpec {
+    Name(String),
+    Ip(Ipv4Addr),
+}
+
+impl std::fmt::Display for HostSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostSpec::Name(n) => f.write_str(n),
+            HostSpec::Ip(ip) => write!(f, "{ip}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRule {
+    pub host: HostSpec,
+    pub port: u16,
+    /// `true` when the port was written out; an implicit port means "25565, or whatever the
+    /// server's `_minecraft._tcp` SRV record says".
+    pub explicit_port: bool,
+    /// Permit destinations in private/loopback/link-local ranges (LAN servers).
+    pub allow_private: bool,
+}
+
+impl ServerEntry {
+    pub fn to_rule(&self) -> Result<ServerRule> {
+        match self {
+            ServerEntry::Short(s) => parse_server(s, false),
+            ServerEntry::Full { host, port, allow_private } => {
+                let mut rule = parse_server(host, *allow_private)?;
+                if let Some(p) = port {
+                    if rule.explicit_port && rule.port != *p {
+                        return Err(Error::Config(format!("server {host:?}: port given twice with different values")));
+                    }
+                    rule.port = *p;
+                    rule.explicit_port = true;
+                }
+                Ok(rule)
+            }
+        }
+    }
+}
+
+/// Parse `host[:port]`. IPv6 literals are rejected: the filtered network only speaks IPv4
+/// inside the sandbox (names may still resolve to IPv6 on the host side).
+pub fn parse_server(spec: &str, allow_private: bool) -> Result<ServerRule> {
+    let spec = spec.trim();
+    if spec.starts_with('[') || spec.matches(':').count() > 1 {
+        return Err(Error::Config(format!(
+            "server {spec:?}: IPv6 literals are not supported; use a host name (it may resolve to IPv6)"
+        )));
+    }
+    let (host, port, explicit_port) = match spec.rsplit_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p
+                .parse()
+                .ok()
+                .filter(|p| *p != 0)
+                .ok_or_else(|| Error::Config(format!("server {spec:?}: bad port")))?;
+            (h, port, true)
+        }
+        None => (spec, DEFAULT_GAME_PORT, false),
+    };
+    let host = match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => HostSpec::Ip(ip),
+        Ok(IpAddr::V6(_)) => return Err(Error::Config(format!("server {spec:?}: IPv6 literals are not supported"))),
+        Err(_) => HostSpec::Name(normalize_host(host)?),
+    };
+    Ok(ServerRule { host, port, explicit_port, allow_private })
+}
+
+/// Lower-case, strip one trailing dot, and insist on plain LDH host-name syntax.
+pub fn normalize_host(host: &str) -> Result<String> {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    };
+    if h.is_empty() || h.len() > 253 || !h.split('.').all(label_ok) {
+        return Err(Error::Config(format!("invalid host name {host:?}")));
+    }
+    Ok(h)
+}
+
+// ---------------------------------------------------------------- downloads
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DownloadsConfig {
+    /// Additional HTTPS hosts the launcher itself may download from (e.g. a private maven).
+    pub extra_hosts: Vec<String>,
+    /// Re-hash every asset object on every launch (a few seconds).
+    pub verify_assets_on_launch: bool,
+    pub parallel: usize,
+}
+
+impl Default for DownloadsConfig {
+    fn default() -> Self {
+        DownloadsConfig { extra_hosts: Vec::new(), verify_assets_on_launch: true, parallel: 8 }
+    }
+}
+
+// ---------------------------------------------------------------- the launcher itself
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LauncherConfig {
+    /// Confine the launcher process itself (Landlock, all threads) once the game is running:
+    /// "auto" (when the kernel can), "require", "off".
+    pub confine: ConfineMode,
+}
+
+impl Default for LauncherConfig {
+    fn default() -> Self {
+        LauncherConfig { confine: ConfineMode::Auto }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfineMode {
+    Auto,
+    Require,
+    Off,
+}
+
+// ---------------------------------------------------------------- per-instance
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstanceConfig {
+    /// Game version of a vanilla instance. Curated instances take it from the signed manifest.
+    pub minecraft: Option<String>,
+    pub memory_mb: Option<u32>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub network: InstanceNetwork,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstanceNetwork {
+    pub mode: Option<NetworkMode>,
+    /// Added to the global server allowlist for this instance only.
+    pub servers: Vec<ServerEntry>,
+}
+
+impl InstanceConfig {
+    pub fn load(instance_dir: &Path) -> Result<Self> {
+        let file = instance_dir.join("instance.toml");
+        if !file.exists() {
+            return Ok(InstanceConfig::default());
+        }
+        util::require_private(&file)?;
+        let raw = util::read_small_file(&file, MAX_CONFIG_BYTES)?;
+        let text = String::from_utf8(raw).map_err(|_| Error::Config(format!("{} is not UTF-8", file.display())))?;
+        let cfg: InstanceConfig =
+            toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))?;
+        if let Some(m) = cfg.memory_mb
+            && !(512..=262_144).contains(&m)
+        {
+            return Err(Error::Config("instance memory_mb must be between 512 and 262144".into()));
+        }
+        if let Some(v) = &cfg.minecraft {
+            validate_version_id(v)?;
+        }
+        for s in &cfg.network.servers {
+            s.to_rule()?;
+        }
+        Ok(cfg)
+    }
+}
+
+/// Mojang version ids become directory names; keep them to a boring alphabet.
+pub fn validate_version_id(id: &str) -> Result<()> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('.')
+        && !id.contains("..")
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b' '));
+    if ok { Ok(()) } else { Err(Error::Config(format!("invalid Minecraft version id {id:?}"))) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_the_strict_ones() {
+        let c = Config::default();
+        assert_eq!(c.network.mode, NetworkMode::Filtered);
+        assert!(!c.sandbox.allow_x11);
+        assert_eq!(c.sandbox.seccomp, SeccompMode::Enforce);
+        assert!(c.sandbox.tripwire);
+        assert!(!c.java.allow_serialization);
+        assert_eq!(c.java.matching, JavaMatch::Exact);
+        assert!(c.auth.client_id.is_none(), "there must be no built-in client id");
+        assert!(c.downloads.verify_assets_on_launch);
+        assert_eq!(c.sandbox.cgroup, CgroupMode::Auto);
+        assert_eq!(c.launcher.confine, ConfineMode::Auto);
+        let b = &c.network.broker;
+        assert!(b.enabled && b.join && b.chat_signing && b.account_read, "what playing needs");
+        assert!(!b.friends && !b.settings && !b.reports && !b.telemetry, "what it does not");
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn unknown_keys_are_errors() {
+        assert!(toml::from_str::<Config>("[sandbox]\nallow_x11 = true\n").is_ok());
+        assert!(toml::from_str::<Config>("[sandbox]\nalow_x11 = true\n").is_err());
+        assert!(toml::from_str::<Config>("[sandbx]\n").is_err());
+        assert!(toml::from_str::<InstanceConfig>("jvm_args = [\"-javaagent:x\"]\n").is_err());
+    }
+
+    #[test]
+    fn persisted_files_need_a_known_format() {
+        let mut c = Config::default();
+        c.sandbox.persist_files = vec!["options.txt".into(), "servers.dat".into(), "hotbar.nbt".into()];
+        c.validate().unwrap();
+        for bad in ["launcher_profiles", "mod.jar", "state.bin"] {
+            c.sandbox.persist_files = vec![bad.into()];
+            assert!(matches!(c.validate(), Err(Error::Config(m)) if m.contains("no known format")), "{bad}");
+        }
+    }
+
+    #[test]
+    fn client_id_shape() {
+        assert!(validate_client_id("01234567-89ab-cdef-0123-456789abcdef").is_ok());
+        assert!(validate_client_id("not-a-uuid").is_err());
+        assert!(validate_client_id("0123456789abcdef0123456789abcdef0123").is_err());
+    }
+
+    #[test]
+    fn server_specs() {
+        let r = parse_server("Play.Example.COM.", false).unwrap();
+        assert_eq!(r.host, HostSpec::Name("play.example.com".into()));
+        assert_eq!((r.port, r.explicit_port), (25565, false));
+        let r = parse_server("203.0.113.7:25570", false).unwrap();
+        assert_eq!(r.host, HostSpec::Ip(Ipv4Addr::new(203, 0, 113, 7)));
+        assert_eq!((r.port, r.explicit_port), (25570, true));
+        for bad in ["[::1]:25565", "::1", "host:0", "host:99999", "bad host", "", "a..b", "-x.example"] {
+            assert!(parse_server(bad, false).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn server_entry_forms() {
+        let c: NetworkConfig = toml::from_str(
+            "servers = [\"mc.example.org\", { host = \"lan.box\", port = 25570, allow_private = true }]\n",
+        )
+        .unwrap();
+        let rules: Vec<_> = c.servers.iter().map(|s| s.to_rule().unwrap()).collect();
+        assert_eq!(rules[0].port, 25565);
+        assert!(rules[1].allow_private && rules[1].port == 25570 && rules[1].explicit_port);
+    }
+}
