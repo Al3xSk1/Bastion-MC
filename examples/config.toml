@@ -1,0 +1,58 @@
+# bastion-mc configuration — copy to ~/.config/bastion-mc/config.toml (mode 0600).
+# Every value shown is the default unless marked otherwise. Unknown keys are errors.
+
+[auth]
+# REQUIRED for signing in. The Application (client) ID of YOUR OWN Azure app registration.
+# There is no built-in ID. See README.md, "Your own OAuth application".
+# client_id = "00000000-0000-0000-0000-000000000000"
+flow = "pkce"              # "pkce" (browser + loopback redirect) | "device" (code on another device)
+token_store = "keyutils"   # "keyutils" (kernel keyring, RAM only) | "age" | "none"
+allow_game_pass = false    # accept accounts licensed through Xbox Game Pass
+
+# [auth.age]               # only for token_store = "age"
+# program = "/usr/bin/age"
+# recipients_file = "/home/you/.config/bastion-mc/age-recipients.txt"
+# identity_file = "/home/you/.config/bastion-mc/age-identity.txt"   # e.g. an age-plugin-yubikey stub
+
+[tls]
+# Pin Microsoft/Mojang hosts to the root and intermediate keys those services chain to
+# (built into the launcher). Turn off only if Microsoft has moved to a new root and the
+# launcher has not caught up yet.
+builtin_pins = true
+# Additional SPKI pins. Key: exact host, or ".suffix". A pinned host is accepted only if a
+# certificate in the chain that actually validated carries one of these keys. An entry here
+# replaces the built-in pins for the same pattern.
+# [tls.pins]
+# "piston-meta.mojang.com" = ["sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
+
+[java]
+match = "exact"            # "exact": the Java release the game declares | "newer": lowest installed release >= it
+memory_mb = 4096
+allow_serialization = false
+# home = "/usr/lib/jvm/java-21-openjdk"   # must be a root-owned runtime under /usr/lib/jvm
+
+[sandbox]
+display = "auto"           # "auto" | "wayland" | "x11"
+allow_x11 = false          # X11 has no client isolation; enabling it accepts a sandbox-escape path
+audio = "pulse"            # "pulse" | "alsa" | "none"
+allow_pulse_module_loading = false   # expose the audio socket even if the sound server lets clients load modules into it
+gpu = true
+seccomp = "enforce"        # "enforce" | "log" (diagnostics only: violations are logged, then allowed)
+tripwire = true            # SIGSYS-kill on exploit-only syscalls (ptrace, bpf, mount, …)
+expose_timezone = false
+exec_allow = []            # extra executables the JVM may execve (absolute paths)
+extra_syscalls = []        # extra syscall names for the allowlist
+persist_files = ["options.txt", "servers.dat"]   # copied back by the launcher after exit
+extra_rw_dirs = []         # e.g. ["screenshots"]
+tmp_size_mb = 1024
+
+[network]
+mode = "filtered"          # "filtered" | "open" | "none"
+service_domains = ["minecraft.net", "mojang.com", "minecraftservices.com"]
+texture_gateway = true
+servers = []               # e.g. ["play.example.org", "203.0.113.7:25570", { host = "lan-box", allow_private = true }]
+
+[downloads]
+extra_hosts = []
+verify_assets_on_launch = true
+parallel = 8
