@@ -1,0 +1,5 @@
+[env]
+# The headless UI tests (gui/src/view.rs) render in software: the result does not depend on
+# the machine's GPU, and no GPU driver is loaded into the test process. This only affects
+# `iced_test`; the application itself picks its renderer at run time (see `ICED_BACKEND`).
+ICED_TEST_BACKEND = "tiny-skia"

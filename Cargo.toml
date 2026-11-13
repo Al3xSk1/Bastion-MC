@@ -1,0 +1,80 @@
+[package]
+name = "bastion-mc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Zero-trust Minecraft launcher for Arch Linux: BYO-OAuth, signed mod profiles, bubblewrap + Landlock + seccomp sandbox"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+# `cargo build` / `cargo test` at the root still mean "the launcher". The graphical front end
+# is a separate package (and a separate process at run time) so that none of its dependencies
+# are ever linked into the binary that handles tokens:  cargo build -p bastion-mc-gui
+[workspace]
+members = [".", "crates/proto", "gui"]
+resolver = "3"
+
+[lib]
+name = "bastion_mc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bastion-mc"
+path = "src/main.rs"
+
+# Dependency policy: every crate here is either (a) required by the mandated stack, or
+# (b) a small, single-purpose crate with no build-time network/codegen surprises.
+# rustls is built WITHOUT the `tls12` feature: TLS 1.2 is not merely disabled, it is not compiled in.
+# No system OpenSSL, no native-tls, no HTTP/2, no compression codecs, no proxy support, no cookie jar.
+# Crypto provider: aws-lc-rs, because it is the rustls provider with the hybrid post-quantum key
+# exchange (X25519MLKEM768), offered first on every launcher connection. It is the only C code linked.
+[dependencies]
+tokio = { version = "1.54", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "process"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
+rustls-webpki = { version = "0.103.17", default-features = false, features = ["aws-lc-rs", "std"] }
+hyper = { version = "1.12", default-features = false, features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = "0.1.5"
+bytes = "1.12"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }
+zeroize = "1.9"
+nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "uio", "mman", "resource", "user", "sched", "ioctl", "dir", "poll"] }
+libc = "0.2.191"
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+keyring-core = "1.0.1"
+linux-keyutils-keyring-store = "1.0.0"
+ed25519-dalek = "3.0.0"
+sha1 = "0.11"
+sha2 = "0.11.1"
+base64 = "0.23.1"
+getrandom = "0.4.3"
+subtle = "2.6"
+lexopt = "0.3.2"
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+thiserror = "2.0.21"
+# Wire protocol shared with front ends (serde types only, no logic).
+bastion-mc-proto = { path = "crates/proto" }
+# The credential broker's per-launch certificate authority (ECDSA P-256, in memory only).
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+time = { version = "0.3.55", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"          # no unwinding machinery to abuse; a panic in the sandbox init must never "continue"
+overflow-checks = true   # integer overflow traps in release too
+debug-assertions = false
+strip = "none"           # makepkg splits debug info itself
+
+[profile.dev]
+overflow-checks = true
