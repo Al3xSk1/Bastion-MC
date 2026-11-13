@@ -327,3 +327,60 @@ mods it is meant to guard against. Any other mod can patch it (Mixin), call arou
 - [ ] Maintenance cost: Mixin targets change with Minecraft versions, so it needs a
       version matrix and tests per supported release. Vanilla instances can't load mods,
       so there the launcher-side gates apply without the in-game interface.
+
+## 8. Emergency scram & account-recovery runbook (proposal 2026-11-13) — not started
+
+**Idea:** an offline emergency guide built into the binary (`bastion-mc wiki scram`, and a
+tab in the GUI), plus a `scram` command and an evidence export. Someone who suspects a
+compromise gets verified Microsoft and Minecraft links without searching the web and
+landing on phishing pages.
+
+### Content (`docs/SCRAM_RUNBOOK.md`, embedded with `include_str!`)
+- [ ] **Phase 1, local containment:** run `bastion-mc scram`. If this machine itself may be
+      compromised, stop using it for recovery: use a clean device (a phone on mobile data,
+      a hardware key). This warning has to come first and be prominent, because a
+      compromised session can also show a tampered GUI or browser.
+- [ ] **Phase 2, cloud lockdown:** sign out everywhere; rotate the recovery code; review
+      and remove app consents (fake "verification" apps are a common way attackers stay
+      in); remove exposed sign-in aliases; replace SMS and e-mail proofs with security
+      keys or passkeys.
+- [ ] **Phase 3, escalation:** Microsoft's account recovery form, and Minecraft support.
+      Say what to have ready: order or transaction ID, creation details, history of
+      usernames and capes.
+- [ ] **Exact URLs: still to be collected and verified.** The proposal as pasted contains
+      only bare domains (`https://live.com`, `https://microsoft.com`,
+      `https://minecraft.net`); the specific page paths were lost. Take each URL from
+      Microsoft's and Mojang's own current help pages, not from memory. For every link,
+      record the date it was checked and the source page.
+- [ ] **State plainly what each step does and doesn't do.** "Sign out everywhere" ends
+      refresh tokens, but an already-minted Minecraft access token stays valid until it
+      expires (~24 h), and Microsoft may take a while to apply the sign-out (check how long).
+      `bastion-mc scram` only clears local copies; it revokes nothing at Microsoft.
+
+### `bastion-mc scram` (CLI and a GUI button)
+- [ ] Stop any running sandbox (SIGKILL through the scope), end the broker and drop the
+      session token, remove the refresh token from the keyring, delete the age vault files
+      and per-account identity records, and print what was removed.
+- [ ] Be honest about deletion: on SSDs and copy-on-write filesystems (btrfs) "shredding" a
+      file doesn't guarantee its old blocks are gone. The real protection is that the vault
+      is encrypted and the token gets revoked server-side, so say that in the output
+      instead of claiming a secure wipe.
+- [ ] Needs a way to reach a launcher that's running a game: a control socket or the
+      existing stop channel. And confirmation, so it can't be triggered by accident; but
+      no password, since it only ever removes things.
+
+### Links opened from the guide
+- [ ] An **exact-URL allowlist** compiled into the binary, rather than a domain allowlist:
+      only the specific verified pages can be opened, through the same opener path the GUI
+      uses for sign-in links (G3). Add a test that every link in the embedded runbook is on
+      it and that nothing else passes.
+- [ ] Also make the runbook readable away from this machine: a copy in the repository and
+      in the package docs, and an option to print it or show it as QR codes for a phone.
+
+### `bastion-mc export-proofs` (evidence for support)
+- [ ] A plain-text bundle (mode 0600) with the account UUID, recorded usernames, profile
+      canary snapshots (cape IDs, skin hashes, with dates; depends on §4.3), and the
+      timestamps of sign-ins and launches. No tokens, and a test asserting that.
+- [ ] Don't collect new metadata for it. The launcher doesn't know your public IP, and
+      keeping IP or hardware history would itself become something worth stealing. Let the
+      user add order or transaction IDs by hand.
