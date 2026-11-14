@@ -94,9 +94,19 @@ mode = "filtered"          # "filtered" | "open" | "none"
 service_domains = ["minecraft.net", "mojang.com", "minecraftservices.com"]
 texture_gateway = true
 servers = []               # e.g. ["play.example.org", "203.0.113.7:25570", { host = "lan-box", allow_private = true }]
-# Send the LAUNCHER's own traffic (sign-in, downloads, what the broker forwards to Mojang)
-# through a SOCKS5 proxy that also resolves the names, e.g. Tor. The game's connections to
-# multiplayer servers are not affected.
+# Voice chat (Simple Voice Chat and similar mods send UDP to a port of the game server): name
+# that port in the server's rule, e.g.
+#   servers = [{ host = "play.example.org", voice = 24454 }]       # or: udp = [24454, 24455]
+# The launcher then relays datagrams to that port of that server — only while a game
+# connection to it is open, only to the address that connection uses, at most 1400 bytes
+# each and at a voice-sized rate. Ports from 1024 up, at most 4 per server. A rule without
+# `voice`/`udp` allows no UDP, and there is no switch that allows it for all servers.
+# Send everything that goes to Microsoft and Mojang through a SOCKS5 proxy that also
+# resolves the names, e.g. Tor: sign-in, downloads, and while the game runs what the broker
+# forwards, skin textures and the game's own HTTPS connections to Mojang's services.
+# NOT proxied: connections to multiplayer servers, the lookup of their names (your resolver
+# sees those), and UDP voice. Those come from your address. (With mode = "open" nothing the
+# game sends is proxied: it then connects to Mojang directly, too.)
 # launcher_proxy = "socks5h://127.0.0.1:9050"
 
 # Credential broker (filtered mode): the game is given a placeholder instead of the access

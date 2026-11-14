@@ -497,10 +497,9 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // 2–3. Files present and verified.
     let http = http_client(cfg)?;
     if let Some(proxy) = http.socks5() {
-        say(&format!(
-            "network: the launcher's own connections (sign-in, downloads, credential broker) go through the SOCKS5 \
-             proxy at {proxy}; the game's connections to multiplayer servers do not"
-        ));
+        // What the proxy carries depends on what stands between the game and the network.
+        let mode = if opts.burner { NetworkMode::None } else { inst.config.network.mode.unwrap_or(cfg.network.mode) };
+        say(&egress::describe_proxy(proxy, mode));
     }
     let prepared = prepare(paths, cfg, &http, &inst, opts.repair, reporter).await?;
     let installed = &prepared.installed;
@@ -779,10 +778,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // so even with the host's network namespace there is no reason to reach an abstract
     // socket outside the sandbox.
     landlock.scope_abstract_unix = true;
-    // UDP: the launcher's DNS responder is the only thing a datagram can reach in filtered
-    // mode, and nothing at all in offline mode. (Landlock ABI 10; see `restrict_udp`.)
+    // UDP: in filtered mode a datagram can reach the launcher's DNS responder and, only if
+    // a server rule names UDP ports (voice chat), the launcher's relay sockets on exactly
+    // those ports; nothing at all in offline mode. (Landlock ABI 10; see `restrict_udp`.)
     landlock.udp_send = match mode {
-        NetworkMode::Filtered => Some(vec![53]),
+        NetworkMode::Filtered => Some(policy.as_ref().map_or_else(|| vec![53], egress::Policy::sandbox_udp_ports)),
         NetworkMode::None => Some(Vec::new()),
         NetworkMode::Open => None,
     };
@@ -1346,6 +1346,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         let count = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
         let (brokered, credentialed, answered) =
             (count(&e.stats.brokered), count(&e.stats.credentialed), count(&e.stats.broker_refused));
+        let (udp_flows, udp_relayed, udp_refused) =
+            (count(&e.stats.udp_flows), count(&e.stats.udp_relayed), count(&e.stats.udp_refused));
         e.shutdown();
         log.line(
             Source::Launcher,
@@ -1353,6 +1355,14 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 "egress summary: {relayed} connection(s) relayed, {denied} denied, {refused} name lookup(s) refused"
             ),
         );
+        if udp_flows + udp_relayed + udp_refused > 0 {
+            log.line(
+                Source::Launcher,
+                &format!(
+                    "egress summary, UDP: {udp_relayed} datagram(s) relayed in {udp_flows} flow(s), {udp_refused} refused"
+                ),
+            );
+        }
         if broker_on {
             log.line(
                 Source::Launcher,

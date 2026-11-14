@@ -499,10 +499,16 @@ pub struct NetworkConfig {
     pub texture_gateway: bool,
     /// Keep the access token in the launcher and authenticate requests on the game's behalf.
     pub broker: BrokerConfig,
-    /// `socks5h://IP:PORT`: send everything the *launcher* itself sends — sign-in,
-    /// downloads, and what the credential broker forwards to Mojang — through this SOCKS5
-    /// proxy (Tor, for instance), which also resolves the names. Connections the game
-    /// makes to multiplayer servers are not affected: they still come from your address.
+    /// `socks5h://IP:PORT`: a SOCKS5 proxy (Tor, for instance) that carries, and resolves
+    /// the names for, everything that goes to Microsoft or Mojang: sign-in, downloads, and
+    /// while the game runs what the credential broker forwards, the texture gateway's
+    /// fetches, and the game's own HTTPS connections to Mojang service domains that the
+    /// relay passes through.
+    ///
+    /// Not through the proxy, by design: connections to multiplayer servers, the lookups of
+    /// their names and SRV records (the local resolver sees them), and relayed UDP (voice
+    /// chat). Those come from your address. And with `mode = "open"` nothing the game sends
+    /// is the launcher's to route: the game then reaches Mojang directly as well.
     pub launcher_proxy: Option<String>,
 }
 
@@ -587,18 +593,98 @@ pub enum NetworkMode {
     None,
 }
 
-/// `"host"`, `"host:port"`, `"203.0.113.7:25570"` or a table with `allow_private`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// `"host"`, `"host:port"`, `"203.0.113.7:25570"`, or a table:
+/// `{ host = "play.example.org", port = 25565, allow_private = false, voice = 24454 }`.
+///
+/// `voice` (one port) and `udp` (a list) name UDP ports **of that server** to which the
+/// launcher relays datagrams — what voice-chat mods need. Without them a rule allows no UDP
+/// at all, and there is no way to allow UDP globally. See `egress::udp` for the conditions
+/// under which such a datagram is relayed.
+///
+/// A table with a key that is not listed here is an error, like everywhere else in this
+/// file: `Deserialize` is written out below because the derived untagged form would
+/// silently ignore a mistyped key.
+#[derive(Debug, Clone)]
 pub enum ServerEntry {
     Short(String),
     Full {
         host: String,
-        #[serde(default)]
         port: Option<u16>,
-        #[serde(default)]
         allow_private: bool,
+        /// One UDP port of this server (Simple Voice Chat's default is 24454).
+        voice: Option<u16>,
+        /// UDP ports of this server; `voice = N` is the same as `udp = [N]`.
+        udp: Vec<u16>,
     },
+}
+
+/// The table form of a server entry, as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerTable {
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    allow_private: bool,
+    #[serde(default)]
+    voice: Option<u16>,
+    #[serde(default)]
+    udp: Vec<u16>,
+}
+
+impl<'de> Deserialize<'de> for ServerEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = ServerEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a server: \"host\", \"host:port\", or a table { host = \"…\", port = …, allow_private = …, \
+                     voice = …, udp = […] }",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<ServerEntry, E> {
+                Ok(ServerEntry::Short(text.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> std::result::Result<ServerEntry, A::Error> {
+                let ServerTable { host, port, allow_private, voice, udp } =
+                    ServerTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(ServerEntry::Full { host, port, allow_private, voice, udp })
+            }
+        }
+        deserializer.deserialize_any(Entry)
+    }
+}
+
+/// Most UDP ports one server rule may name. A voice-chat mod uses one.
+pub const MAX_UDP_PORTS_PER_SERVER: usize = 4;
+/// Lowest UDP port a server rule may name. Below it lie the well-known services (DNS, NTP,
+/// SNMP, …): no voice server listens there, the sandbox's own DNS port is among them, and a
+/// relay that could be pointed at them would be a way to talk to infrastructure on the
+/// server's address rather than to a game.
+pub const MIN_UDP_PORT: u16 = 1024;
+
+/// The UDP ports of one rule: sorted, without duplicates, few, and none of them privileged.
+fn udp_ports(host: &str, ports: impl Iterator<Item = u16>) -> Result<Vec<u16>> {
+    let mut ports: Vec<u16> = ports.collect();
+    ports.sort_unstable();
+    ports.dedup();
+    if let Some(low) = ports.iter().find(|p| **p < MIN_UDP_PORT) {
+        return Err(Error::Config(format!(
+            "server {host:?}: UDP port {low} cannot be allowlisted; only ports from {MIN_UDP_PORT} up are relayed"
+        )));
+    }
+    if ports.len() > MAX_UDP_PORTS_PER_SERVER {
+        return Err(Error::Config(format!(
+            "server {host:?}: {} UDP ports named; at most {MAX_UDP_PORTS_PER_SERVER} per server",
+            ports.len()
+        )));
+    }
+    Ok(ports)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -625,21 +711,28 @@ pub struct ServerRule {
     pub explicit_port: bool,
     /// Permit destinations in private/loopback/link-local ranges (LAN servers).
     pub allow_private: bool,
+    /// UDP ports of this server to which datagrams are relayed (sorted, no duplicates).
+    /// Empty — the default, and the only possibility for the short forms — means no UDP.
+    pub udp: Vec<u16>,
 }
 
 impl ServerEntry {
     pub fn to_rule(&self) -> Result<ServerRule> {
         match self {
             ServerEntry::Short(s) => parse_server(s, false),
-            ServerEntry::Full { host, port, allow_private } => {
+            ServerEntry::Full { host, port, allow_private, voice, udp } => {
                 let mut rule = parse_server(host, *allow_private)?;
                 if let Some(p) = port {
+                    if *p == 0 {
+                        return Err(Error::Config(format!("server {host:?}: bad port")));
+                    }
                     if rule.explicit_port && rule.port != *p {
                         return Err(Error::Config(format!("server {host:?}: port given twice with different values")));
                     }
                     rule.port = *p;
                     rule.explicit_port = true;
                 }
+                rule.udp = udp_ports(host, voice.iter().chain(udp).copied())?;
                 Ok(rule)
             }
         }
@@ -671,7 +764,7 @@ pub fn parse_server(spec: &str, allow_private: bool) -> Result<ServerRule> {
         Ok(IpAddr::V6(_)) => return Err(Error::Config(format!("server {spec:?}: IPv6 literals are not supported"))),
         Err(_) => HostSpec::Name(normalize_host(host)?),
     };
-    Ok(ServerRule { host, port, explicit_port, allow_private })
+    Ok(ServerRule { host, port, explicit_port, allow_private, udp: Vec::new() })
 }
 
 /// Lower-case, strip one trailing dot, and insist on plain LDH host-name syntax.
@@ -843,6 +936,7 @@ mod tests {
             "tasks_max",
             "cpu_quota_percent",
             "launcher_proxy",
+            "voice = ",
             "extra_token_endpoints",
             "[auth.age.accounts.",
         ] {
@@ -927,5 +1021,119 @@ mod tests {
         let rules: Vec<_> = c.servers.iter().map(|s| s.to_rule().unwrap()).collect();
         assert_eq!(rules[0].port, 25565);
         assert!(rules[1].allow_private && rules[1].port == 25570 && rules[1].explicit_port);
+    }
+
+    fn rules(text: &str) -> Result<Vec<ServerRule>> {
+        let net: NetworkConfig = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
+        net.servers.iter().map(ServerEntry::to_rule).collect()
+    }
+
+    #[test]
+    fn a_server_rule_can_name_udp_ports() {
+        let r = rules(
+            r#"servers = [
+                "plain.example.org",
+                { host = "play.example.org", voice = 24454 },
+                { host = "lan.box", port = 25570, allow_private = true, udp = [24455, 24454, 24455] },
+                { host = "both.example.org", voice = 24454, udp = [30000] },
+                { host = "none.example.org", udp = [] },
+                { host = "edges.example.org", udp = [1024, 65535] },
+                { host = "four.example.org", voice = 1024, udp = [1024, 1025, 1026, 1027] },
+            ]"#,
+        )
+        .unwrap();
+        assert!(r[0].udp.is_empty(), "the short form allows no UDP");
+        assert_eq!(r[1].udp, [24454]);
+        assert_eq!((r[1].port, r[1].explicit_port, r[1].allow_private), (25565, false, false), "nothing else changes");
+        assert_eq!(r[2].udp, [24454, 24455], "sorted, each port once");
+        assert!(r[2].allow_private && r[2].port == 25570);
+        assert_eq!(r[3].udp, [24454, 30000], "`voice` is one more entry of `udp`");
+        assert!(r[4].udp.is_empty());
+        assert_eq!(r[5].udp, [1024, 65535], "the lowest and the highest port that can be named");
+        assert_eq!(r[6].udp.len(), MAX_UDP_PORTS_PER_SERVER, "a port named twice counts once");
+        // What `--join` produces, and every short form: never any UDP.
+        assert!(parse_server("play.example.org:25565", true).unwrap().udp.is_empty());
+        assert!(ServerEntry::Short("203.0.113.7:25570".into()).to_rule().unwrap().udp.is_empty());
+    }
+
+    #[test]
+    fn hostile_and_mistaken_udp_rules_are_errors() {
+        for bad in [
+            r#"servers = [{ host = "a.example", voice = 0 }]"#,
+            r#"servers = [{ host = "a.example", voice = 53 }]"#, // the sandbox's own DNS port
+            r#"servers = [{ host = "a.example", voice = 123 }]"#,
+            r#"servers = [{ host = "a.example", voice = 1023 }]"#,
+            r#"servers = [{ host = "a.example", udp = [24454, 161] }]"#,
+            r#"servers = [{ host = "a.example", voice = 65536 }]"#,
+            r#"servers = [{ host = "a.example", voice = -1 }]"#,
+            r#"servers = [{ host = "a.example", voice = 99999999999999999999 }]"#,
+            r#"servers = [{ host = "a.example", voice = "24454" }]"#,
+            r#"servers = [{ host = "a.example", voice = 24454.0 }]"#,
+            r#"servers = [{ host = "a.example", voice = [24454] }]"#,
+            r#"servers = [{ host = "a.example", voice = true }]"#,
+            r#"servers = [{ host = "a.example", udp = 24454 }]"#,
+            r#"servers = [{ host = "a.example", udp = "all" }]"#,
+            r#"servers = [{ host = "a.example", udp = ["*"] }]"#,
+            r#"servers = [{ host = "a.example", udp = ["24454"] }]"#,
+            r#"servers = [{ host = "a.example", udp = [[24454]] }]"#,
+            r#"servers = [{ host = "a.example", udp = [{ port = 24454 }] }]"#,
+            r#"servers = [{ host = "a.example", udp = [1024, 1025, 1026, 1027, 1028] }]"#, // more than four
+            r#"servers = [{ host = "a.example", voice = 1028, udp = [1024, 1025, 1026, 1027] }]"#,
+            // A mistyped key is an error. It used to be dropped without a word, which for
+            // these keys would have meant "no voice" and for `allow_private` a silent refusal.
+            r#"servers = [{ host = "a.example", vioce = 24454 }]"#,
+            r#"servers = [{ host = "a.example", UDP = [24454] }]"#,
+            r#"servers = [{ host = "a.example", alow_private = true }]"#,
+            r#"servers = [{ host = "a.example", voice = 24454, voice = 24455 }]"#,
+            r#"servers = [{ voice = 24454 }]"#, // no host
+            r#"servers = [{ host = "", voice = 24454 }]"#,
+            r#"servers = [{ host = "a.example", port = 0, voice = 24454 }]"#,
+            r#"servers = [{ host = "a.example:25565", port = 25570 }]"#,
+            r#"servers = [{ host = "127.64.0.5 ", voice = 24454, port = 70000 }]"#,
+            r#"servers = [24454]"#,
+            r#"servers = [["a.example"]]"#,
+            r#"servers = [true]"#,
+            // There is no way to allow UDP other than in a server's own rule.
+            r#"udp = [24454]"#,
+            r#"voice = 24454"#,
+            r#"servers = ["a.example"]
+               udp = true"#,
+        ] {
+            assert!(rules(bad).is_err(), "{bad}");
+        }
+        // The message says what is wrong.
+        let typo = rules(r#"servers = [{ host = "a.example", vioce = 24454 }]"#).unwrap_err().to_string();
+        assert!(typo.contains("vioce") && typo.contains("voice"), "{typo}");
+        let low = rules(r#"servers = [{ host = "a.example", voice = 53 }]"#).unwrap_err().to_string();
+        assert!(low.contains("UDP port 53") && low.contains("1024"), "{low}");
+        let many = rules(r#"servers = [{ host = "a.example", udp = [1024, 1025, 1026, 1027, 1028] }]"#).unwrap_err();
+        assert!(many.to_string().contains("at most 4"), "{many}");
+        let shape = rules("servers = [24454]").unwrap_err().to_string();
+        assert!(shape.contains("a server"), "{shape}");
+    }
+
+    #[test]
+    fn an_instance_takes_the_same_server_rules_and_checks_them_when_it_is_loaded() {
+        let dir = std::env::temp_dir()
+            .join(format!("bastion-inst-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        crate::util::create_private_dir_all(&dir).unwrap();
+        let write = |text: &str| crate::util::write_atomic(&dir.join("instance.toml"), text.as_bytes(), 0o600).unwrap();
+
+        write("[network]\nservers = [\"plain.example.org\", { host = \"play.example.org\", voice = 24454 }]\n");
+        let cfg = InstanceConfig::load(&dir).unwrap();
+        let rules: Vec<_> = cfg.network.servers.iter().map(|s| s.to_rule().unwrap()).collect();
+        assert!(rules[0].udp.is_empty());
+        assert_eq!(rules[1].udp, [24454]);
+
+        for bad in [
+            "[network]\nservers = [{ host = \"play.example.org\", voice = 53 }]\n",
+            "[network]\nservers = [{ host = \"play.example.org\", voic = 24454 }]\n",
+            "[network]\nservers = [{ host = \"play.example.org\", udp = [1, 2, 3, 4, 5] }]\n",
+            "[network]\nudp = [24454]\n",
+        ] {
+            write(bad);
+            assert!(matches!(InstanceConfig::load(&dir), Err(Error::Config(_))), "{bad}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

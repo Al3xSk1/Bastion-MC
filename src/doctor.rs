@@ -309,7 +309,11 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
     if abi >= landlock::MIN_KERNEL_ABI {
         r.ok("Landlock", format!("ABI {abi} (minimum {})", landlock::MIN_KERNEL_ABI));
         if abi >= landlock::UDP_ABI {
-            r.ok("Landlock UDP rules", "the sandbox can send datagrams only to the launcher's DNS port");
+            r.ok(
+                "Landlock UDP rules",
+                "the sandbox can send datagrams only to the launcher's DNS port and to UDP ports that a server rule \
+                 names (voice chat)",
+            );
         } else {
             r.info(
                 "Landlock UDP rules",

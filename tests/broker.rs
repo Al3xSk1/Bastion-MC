@@ -677,7 +677,13 @@ async fn a_sandboxed_jvm_holding_only_the_placeholder() {
         Broker::new(authority, &BrokerConfig::default(), &to_upstream, PLACEHOLDER.into(), Some(credential)).unwrap();
 
     let net = NetworkConfig {
-        servers: vec![ServerEntry::Full { host: "127.0.0.1".into(), port: Some(game_port), allow_private: true }],
+        servers: vec![ServerEntry::Full {
+            host: "127.0.0.1".into(),
+            port: Some(game_port),
+            allow_private: true,
+            voice: None,
+            udp: vec![],
+        }],
         ..Default::default()
     };
     let policy = egress::Policy::new(&net, &InstanceNetwork::default(), None).unwrap();

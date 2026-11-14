@@ -1,0 +1,55 @@
+Fix for the pre-existing flake broker::a_sandboxed_jvm_holding_only_the_placeholder
+(join_warm = 403 instead of 204). For the integrator; NOT applied on this branch, because
+tests/broker.rs and tests/java/BrokerProbe.java belong to the broker work of this round.
+Apply after merging with: git apply docs/notes/broker-test-race.patch
+
+Cause: BrokerProbe opens the game connection and asks for the join at once. new Socket()
+returns when the kernel has queued the connection at the relay's listener, which can be
+before the relay has accepted it, connected to the server and registered it
+(gate.opened in egress::relay_game). The fix lets the stand-in game server echo and the
+probe wait (at most 15 s) for the echo, which can only come back once the relay splices,
+i.e. after the registration. A real client cannot hit the race: it joins only after the
+server has answered through the connection.
+
+Verified (fourth engineer, see voice-chat-progress.md section 6.2): with a 1 s delay
+injected before gate.opened, the test failed 4 of 4 runs without this patch and passed
+4 of 4 with it; without the delay, 40 of 40 runs passed with the patch.
+
+diff --git a/tests/broker.rs b/tests/broker.rs
+index 2014cf4..4149860 100644
+--- a/tests/broker.rs
++++ b/tests/broker.rs
+@@ -508,7 +508,13 @@ async fn a_sandboxed_jvm_holding_only_the_placeholder() {
+             std::thread::spawn(move || {
+                 let mut stream = stream;
+                 let mut buf = [0u8; 64];
+-                while matches!(std::io::Read::read(&mut stream, &mut buf), Ok(n) if n > 0) {}
++                // Echoes: an echo can only arrive once the relay has connected and is
++                // splicing, which is after it has registered the game connection.
++                while let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
++                    if n == 0 || std::io::Write::write_all(&mut stream, &buf[..n]).is_err() {
++                        break;
++                    }
++                }
+             });
+         }
+     });
+diff --git a/tests/java/BrokerProbe.java b/tests/java/BrokerProbe.java
+index 7fa12c3..796b138 100644
+--- a/tests/java/BrokerProbe.java
++++ b/tests/java/BrokerProbe.java
+@@ -68,6 +68,14 @@ public final class BrokerProbe {
+         System.out.println("join_cold=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
+         try (Socket game = new Socket("127.0.0.1", gamePort)) {
+             game.getOutputStream().write(1);
++            // Wait for the server's echo: a real client asks for a join only after the
++            // server has answered through this connection, never right after connecting.
++            // (new Socket returns once the kernel has queued the connection at the relay's
++            // listener; the echo comes back only after the relay has connected to the
++            // server and registered the connection.) Bounded, so that a relay that never
++            // splices ends the probe with an exception instead of a hang.
++            game.setSoTimeout(15000);
++            game.getInputStream().read();
+             System.out.println("join_warm=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
+             System.out.println("join_again=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
+         }

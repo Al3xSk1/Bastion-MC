@@ -522,7 +522,12 @@ show("resolve", attempt(lambda: socket.getaddrinfo("example.com", 443)))
 async fn filtered_network_delivers_only_to_launcher_held_sockets() {
     use std::net::{Ipv4Addr, TcpListener, UdpSocket};
     let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
-    let ns = NetnsSpec { tcp_ports: vec![443, 25565], dns: true, local_addrs: vec![Ipv4Addr::new(203, 0, 113, 7)] };
+    let ns = NetnsSpec {
+        tcp_ports: vec![443, 25565],
+        dns: true,
+        local_addrs: vec![Ipv4Addr::new(203, 0, 113, 7)],
+        ..Default::default()
+    };
     let mut base = sandbox::base(&BaseOptions {
         tmp_size_mb: 64,
         jvm: None,
@@ -1075,7 +1080,7 @@ async fn resource_limits_work_with_the_filtered_network_helper() {
     if !scopes_available().await {
         return;
     }
-    let ns = NetnsSpec { tcp_ports: vec![443], dns: true, local_addrs: vec![] };
+    let ns = NetnsSpec { tcp_ports: vec![443], dns: true, ..Default::default() };
     let body = r#"
 show("interfaces", ",".join(sorted(l.split(":")[0].strip() for l in open("/proc/net/dev").read().splitlines()[2:])))
 "#;

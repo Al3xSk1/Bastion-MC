@@ -12,7 +12,7 @@
 
 use crate::{
     auth::minecraft,
-    egress::{broker, dns, sni},
+    egress::{broker, dns, sni, udp},
     persist::{self, Kind},
     profile::zipdir as zip_directory,
     sandbox::{display, wayland},
@@ -133,6 +133,16 @@ pub fn zipdir(data: &[u8]) {
     zip_directory::fuzz(data);
 }
 
+/// The datagram relay's decisions (`egress::udp`). Not a parser — the relay never looks
+/// into a datagram — but the same kind of exposure: which datagrams arrive, from which
+/// source to which destination, how large, how fast and in what order relative to game
+/// connections opening and closing is all the game's choice. Whatever the script, a
+/// datagram is relayed only to the address of a game connection that is open at that
+/// moment, under a rule that names the port, within the size, rate and flow limits.
+pub fn udp(data: &[u8]) {
+    udp::fuzz_table(data);
+}
+
 /// A harness: arbitrary bytes in, a panic if a property does not hold.
 pub type Harness = fn(&[u8]);
 
@@ -146,4 +156,5 @@ pub const ALL: &[(&str, Harness)] = &[
     ("wayland", wayland),
     ("profile", profile),
     ("zipdir", zipdir),
+    ("udp", udp),
 ];

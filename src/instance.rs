@@ -174,7 +174,7 @@ pub fn create(paths: &Paths, id: &str, minecraft: Option<&str>) -> Result<PathBu
         validate_version_id(v)?;
         text.push_str(&format!("minecraft = \"{v}\"\n"));
     }
-    text.push_str("# memory_mb = 4096\n# width = 1280\n# height = 720\n\n[network]\n# mode = \"filtered\"\n# servers = [\"play.example.org\", \"203.0.113.7:25570\"]\n");
+    text.push_str("# memory_mb = 4096\n# width = 1280\n# height = 720\n\n[network]\n# mode = \"filtered\"\n# servers = [\"play.example.org\", \"203.0.113.7:25570\"]\n# voice chat: name the server's UDP port in its rule, e.g. servers = [{ host = \"play.example.org\", voice = 24454 }]\n");
     util::write_atomic(&dir.join("instance.toml"), text.as_bytes(), 0o600)?;
     Ok(dir)
 }

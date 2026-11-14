@@ -4,10 +4,13 @@ Every parser that reads bytes the launcher does not control has a harness in
 `src/fuzzing.rs`: the settings sanitisers (NBT, `options.txt`, text, JSON), the TLS
 ClientHello reader, the DNS responder, the credential broker's request classification and
 join body, the Xauthority reducer, the Wayland event reader, Mojang's profile reply and
-skin PNG files, and the zip directory reader behind `pack import`. Each harness also checks
-properties (a sanitiser's output is a fixed point; a forwarded join is byte for byte the
-broker's own object; an archive the strict zip reader accepts is listed identically by a
-second zip implementation; …), not only "does not crash".
+skin PNG files, and the zip directory reader behind `pack import` — and, although it parses
+nothing, the datagram relay's decision table (`udp`: scripts of game connections, datagrams
+and time). Each harness also checks properties (a sanitiser's output is a fixed point; a
+forwarded join is byte for byte the broker's own object; an archive the strict zip reader
+accepts is listed identically by a second zip implementation; a datagram is relayed only to
+the address of an open game connection under a rule that names the port; …), not only
+"does not crash".
 
 Two ways to run them:
 

@@ -64,6 +64,12 @@ fn http() -> HttpClient {
 }
 
 async fn run(net: NetworkConfig, body: &str) -> Run {
+    run_with(net, http(), body).await
+}
+
+/// `launcher`: the client the relay uses for what it sends itself (and whose proxy setting it
+/// follows for what it passes through).
+async fn run_with(net: NetworkConfig, launcher: HttpClient, body: &str) -> Run {
     let policy = egress::Policy::new(&net, &InstanceNetwork::default(), None).unwrap();
     let ns = policy.netns_spec();
     let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
@@ -101,7 +107,7 @@ async fn run(net: NetworkConfig, body: &str) -> Run {
         policy,
         &ns,
         std::mem::take(&mut running.egress),
-        http(),
+        launcher,
         Arc::new(move |l| sink.lock().unwrap().push(l)),
         egress::SrvTargets::new(),
         None,
@@ -205,7 +211,13 @@ show("not_allowlisted", talk({other}))
 
     // Allowed, with the explicit opt-in for a non-public destination.
     let net = NetworkConfig {
-        servers: vec![ServerEntry::Full { host: "127.0.0.1".into(), port: Some(port), allow_private: true }],
+        servers: vec![ServerEntry::Full {
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            allow_private: true,
+            voice: None,
+            udp: vec![],
+        }],
         ..Default::default()
     };
     let r = run(net, &body).await;
@@ -217,7 +229,13 @@ show("not_allowlisted", talk({other}))
 
     // Same rule without `allow_private`: the relay refuses to dial a loopback/LAN address.
     let net = NetworkConfig {
-        servers: vec![ServerEntry::Full { host: "127.0.0.1".into(), port: Some(port), allow_private: false }],
+        servers: vec![ServerEntry::Full {
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            allow_private: false,
+            voice: None,
+            udp: vec![],
+        }],
         ..Default::default()
     };
     let r = run(net, &body).await;
@@ -265,6 +283,107 @@ show("unassigned_fake_ip", raw(b"x") if False else attempt(lambda: socket.create
     assert!(r.logged("not a TLS ClientHello"), "log: {:?}", r.log);
     assert!(r.logged("never handed out by the resolver"), "log: {:?}", r.log);
     assert!(!r.logged("ALLOW"), "nothing may have been relayed: {:?}", r.log);
+}
+
+// The stand-in SOCKS5 proxy is shared with the HTTPS client's tests.
+#[path = "support/socks5.rs"]
+mod socks5;
+
+/// `network.launcher_proxy` promises that what goes to Mojang goes through the proxy. That
+/// includes the connections the relay only passes through: the game's own TLS to a Mojang
+/// service domain, of which the relay sees the ClientHello and nothing else (review finding
+/// B-M3: these were resolved here and dialled directly).
+#[tokio::test(flavor = "multi_thread")]
+async fn pass_through_service_connections_go_through_the_socks5_proxy_which_resolves_the_name() {
+    // Stands in for the Mojang service: answers whatever arrives with a marker.
+    let service = TcpListener::bind("127.0.0.1:0").unwrap();
+    let service_addr = service.local_addr().unwrap();
+    let received = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let record = received.clone();
+    std::thread::spawn(move || {
+        for conn in service.incoming() {
+            let Ok(mut conn) = conn else { break };
+            let mut buf = [0u8; 4096];
+            let n = conn.read(&mut buf).unwrap_or(0);
+            record.lock().unwrap().push(buf[..n].to_vec());
+            let _ = conn.write_all(b"REACHED-THROUGH-THE-PROXY");
+        }
+    });
+    let (proxy, asked) = socks5::socks5_proxy(service_addr, false).await;
+
+    // A service domain under `.invalid`, which by definition resolves nowhere: had the relay
+    // looked the name up itself, the connection could not have been made at all.
+    let net = NetworkConfig {
+        service_domains: vec!["relay-test.invalid".into()],
+        texture_gateway: false,
+        ..Default::default()
+    };
+    let body = r#"
+ip = socket.getaddrinfo("svc.relay-test.invalid", 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+def hello(sni):
+    # A real TLS ClientHello for that name, as bytes.
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = ctx.wrap_bio(incoming, outgoing, server_hostname=sni)
+    try: tls.do_handshake()
+    except ssl.SSLWantReadError: pass
+    return outgoing.read()
+def talk(sni):
+    try:
+        s = socket.create_connection((ip, 443), timeout=10); s.sendall(hello(sni))
+        data = s.recv(64)
+        return data.decode() if data else "closed-without-data"
+    except OSError as e:
+        return "closed-without-data"
+show("service", talk("svc.relay-test.invalid"))
+show("other_name", talk("other.relay-test.invalid"))
+"#;
+    let r = run_with(net.clone(), http().with_socks5(Some(proxy)), body).await;
+    assert_eq!(r.code, Some(0), "stderr: {}\nlog: {:?}", r.stderr, r.log);
+    assert_eq!(r.line("service"), "REACHED-THROUGH-THE-PROXY", "log: {:?}", r.log);
+    // The proxy was handed the name, as text, for port 443 — once: the connection whose
+    // ClientHello named another host was refused before the proxy heard of it.
+    assert_eq!(asked.lock().unwrap().as_slice(), ["svc.relay-test.invalid:443"]);
+    assert_eq!(r.line("other_name"), "closed-without-data");
+    assert!(r.logged("does not match the resolved name"), "log: {:?}", r.log);
+    // What arrived at the service is the game's ClientHello, untouched: TLS stays end to end.
+    let hellos = received.lock().unwrap().clone();
+    assert_eq!(hellos.len(), 1);
+    assert_eq!(hellos[0][0], 0x16, "a TLS handshake record");
+    assert!(hellos[0].windows(22).any(|w| w == b"svc.relay-test.invalid"), "with the server name in it");
+    assert!(
+        r.logged(&format!("ALLOW svc.relay-test.invalid:443 tls, SNI verified → the SOCKS5 proxy at {proxy}")),
+        "log: {:?}",
+        r.log
+    );
+
+    // A proxy that refuses, or is not there: the connection fails. It is never retried directly.
+    let (refusing, refused) = socks5::socks5_proxy(service_addr, true).await;
+    let r = run_with(net.clone(), http().with_socks5(Some(refusing)), body).await;
+    assert_eq!(r.line("service"), "closed-without-data");
+    assert_eq!(refused.lock().unwrap().len(), 1);
+    assert!(r.logged("the SOCKS5 proxy could not connect"), "log: {:?}", r.log);
+    assert!(!r.logged("ALLOW"), "log: {:?}", r.log);
+    let gone = {
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        unused.local_addr().unwrap()
+    };
+    let r = run_with(net.clone(), http().with_socks5(Some(gone)), body).await;
+    assert_eq!(r.line("service"), "closed-without-data");
+    assert!(r.logged("cannot connect"), "log: {:?}", r.log);
+    assert!(!r.logged("ALLOW"), "log: {:?}", r.log);
+
+    // The control — without a proxy the relay has to resolve the name itself, and for this
+    // one that cannot work — asks the system resolver, so it runs with the network tests.
+    if std::env::var_os("BASTION_NET_TESTS").is_some() {
+        let r = run(net, body).await;
+        assert_eq!(r.line("service"), "closed-without-data");
+        assert!(r.logged("DNS failure"), "log: {:?}", r.log);
+    }
+    // Whatever else happened above, the first proxy was asked for that one connection only,
+    // and the service saw nothing that did not come through a proxy.
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert_eq!(received.lock().unwrap().len(), 1);
 }
 
 fn net_tests_enabled() -> bool {

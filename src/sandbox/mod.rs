@@ -150,8 +150,8 @@ pub struct Running {
     pub child: tokio::process::Child,
     /// Our end of the socketpair connected to the sandboxed program's stdin.
     pub channel: UnixStream,
-    /// Sockets created inside the private network namespace: DNS first (if requested), then
-    /// one TCP listener per requested port, in order.
+    /// Sockets created inside the private network namespace, in the order (and of the kinds)
+    /// that [`NetnsSpec::sockets`] gives; each was checked against it.
     pub egress: Vec<OwnedFd>,
     /// bubblewrap's `--json-status-fd` stream (`child-pid`, later `exit-code`).
     status: Option<File>,
@@ -399,7 +399,7 @@ pub fn spawn(spec: SandboxSpec, launcher_exe: &Path) -> Result<Running> {
             helper_args.extend(bwrap_argv.iter().cloned());
             inherit.push(spec_fd);
             inherit.push(ctrl_theirs.into());
-            ctrl_parent = Some((ctrl_ours, ns.socket_count()));
+            ctrl_parent = Some((ctrl_ours, ns.sockets()));
             // With a scope in between, the helper is executed by systemd-run, not by a fork
             // of this process: "/proc/self/exe" would then name systemd-run. An inherited
             // descriptor names the same file wherever it is opened from.
@@ -457,7 +457,14 @@ pub fn spawn(spec: SandboxSpec, launcher_exe: &Path) -> Result<Running> {
     drop(inherit); // the child has its own copies now
 
     let egress = match ctrl_parent {
-        Some((ctrl, expected)) => netns::recv_fds(ctrl.as_fd(), expected, Duration::from_secs(20))?,
+        Some((ctrl, roles)) => {
+            let sockets = netns::recv_fds(ctrl.as_fd(), roles.len(), Duration::from_secs(20))?;
+            // Position is all that says which socket is which; check it against the kernel.
+            for (socket, role) in sockets.iter().zip(roles) {
+                netns::check_socket(socket.as_fd(), role)?;
+            }
+            sockets
+        }
         None => Vec::new(),
     };
     // Keep close-on-exec on everything we hold.

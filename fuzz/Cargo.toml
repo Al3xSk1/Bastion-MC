@@ -73,3 +73,10 @@ path = "fuzz_targets/zipdir.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "udp"
+path = "fuzz_targets/udp.rs"
+test = false
+doc = false
+bench = false

@@ -123,42 +123,10 @@ fn client(trusted: &[&Authority], pins: &[(&str, Vec<String>)], addr: SocketAddr
 
 const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
 
-/// A SOCKS5 proxy that records what it was asked to connect to and then connects to
-/// `upstream` whatever the name was.
-async fn socks5_proxy(upstream: SocketAddr, refuse: bool) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let asked: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-    let log = asked.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut client, _)) = listener.accept().await else { break };
-            let log = log.clone();
-            tokio::spawn(async move {
-                let mut greeting = [0u8; 3];
-                client.read_exact(&mut greeting).await.unwrap();
-                assert_eq!(greeting, [5, 1, 0], "version 5, one method, no authentication");
-                client.write_all(&[5, 0]).await.unwrap();
-                let mut head = [0u8; 5];
-                client.read_exact(&mut head).await.unwrap();
-                assert_eq!(&head[..4], &[5, 1, 0, 3], "CONNECT to a domain name: the proxy resolves");
-                let mut name = vec![0u8; head[4] as usize + 2];
-                client.read_exact(&mut name).await.unwrap();
-                let port = u16::from_be_bytes([name[name.len() - 2], name[name.len() - 1]]);
-                name.truncate(name.len() - 2);
-                log.lock().unwrap().push(format!("{}:{port}", String::from_utf8(name).unwrap()));
-                if refuse {
-                    client.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
-                    return;
-                }
-                let mut server = tokio::net::TcpStream::connect(upstream).await.unwrap();
-                client.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0x1f, 0x90]).await.unwrap();
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-            });
-        }
-    });
-    (addr, asked)
-}
+// The stand-in SOCKS5 proxy is shared with the egress relay's tests.
+#[path = "support/socks5.rs"]
+mod socks5;
+use socks5::socks5_proxy;
 
 #[tokio::test]
 async fn a_socks5_proxy_carries_the_connection_and_resolves_the_name() {

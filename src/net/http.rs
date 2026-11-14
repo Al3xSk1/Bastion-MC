@@ -112,11 +112,11 @@ pub struct HttpClient {
     socks5: Option<SocketAddr>,
 }
 
-/// Open a tunnel to `host:443` through the SOCKS5 proxy on `stream` (RFC 1928, no
+/// Open a tunnel to `host:port` through the SOCKS5 proxy on `stream` (RFC 1928, no
 /// authentication, CONNECT, address type "domain name"). The name is sent to the proxy as
 /// it is: this process does not resolve it, so nothing about the destination is visible to
 /// the local resolver or the local network.
-async fn socks5_connect(stream: &mut TcpStream, host: &str) -> std::result::Result<(), String> {
+async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> std::result::Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let name = host.as_bytes();
     if name.is_empty() || name.len() > 255 {
@@ -132,7 +132,7 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str) -> std::result::Resu
     }
     let mut request = vec![5, 1, 0, 3, name.len() as u8];
     request.extend_from_slice(name);
-    request.extend_from_slice(&443u16.to_be_bytes());
+    request.extend_from_slice(&port.to_be_bytes());
     stream.write_all(&request).await.map_err(io)?;
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await.map_err(io)?;
@@ -165,6 +165,25 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str) -> std::result::Resu
     let mut skip = [0u8; 257];
     stream.read_exact(&mut skip[..rest]).await.map_err(io)?;
     Ok(())
+}
+
+/// Connect to the SOCKS5 proxy at `proxy` and have it open a tunnel to `host:port`; what
+/// comes back is a byte stream to that host. The one SOCKS5 client in this program: the
+/// HTTPS client above uses it for the launcher's own requests, and the egress relay for the
+/// connections it passes through to Mojang's services (`egress::relay_service`), so that
+/// "through the proxy" means the same thing — name resolved by the proxy, never here — in
+/// both places.
+pub(crate) async fn socks5_dial(proxy: SocketAddr, host: &str, port: u16) -> std::result::Result<TcpStream, String> {
+    let mut stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(proxy)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => return Err(format!("cannot connect ({proxy}: {e})")),
+        Err(_) => return Err(format!("cannot connect ({proxy}: connect timed out)")),
+    };
+    let _ = stream.set_nodelay(true);
+    timeout(CONNECT_TIMEOUT, socks5_connect(&mut stream, host, port))
+        .await
+        .map_err(|_| "the SOCKS5 proxy did not answer in time".to_string())??;
+    Ok(stream)
 }
 
 impl HttpClient {
@@ -246,36 +265,35 @@ impl HttpClient {
         self.check_host(host)?;
         let net = |m: String| Error::Net(format!("{host}: {m}"));
 
-        let addrs: Vec<SocketAddr> = match (self.socks5, self.dial_override) {
+        let tcp = match (self.socks5, self.dial_override) {
             // The proxy resolves the name; this process must not.
-            (Some(proxy), _) => vec![proxy],
-            (None, Some(a)) => vec![a],
-            (None, None) => timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, 443)))
-                .await
-                .map_err(|_| net("DNS lookup timed out".into()))?
-                .map_err(|e| net(format!("DNS lookup failed: {e}")))?
-                .collect(),
-        };
-        let mut tcp = None;
-        let mut last_err = "no addresses".to_string();
-        for addr in addrs {
-            match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-                Ok(Ok(s)) => {
-                    tcp = Some(s);
-                    break;
+            (Some(proxy), _) => socks5_dial(proxy, host, 443).await.map_err(net)?,
+            (None, dial) => {
+                let addrs: Vec<SocketAddr> = match dial {
+                    Some(addr) => vec![addr],
+                    None => timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, 443)))
+                        .await
+                        .map_err(|_| net("DNS lookup timed out".into()))?
+                        .map_err(|e| net(format!("DNS lookup failed: {e}")))?
+                        .collect(),
+                };
+                let mut tcp = None;
+                let mut last_err = "no addresses".to_string();
+                for addr in addrs {
+                    match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+                        Ok(Ok(s)) => {
+                            tcp = Some(s);
+                            break;
+                        }
+                        Ok(Err(e)) => last_err = format!("{addr}: {e}"),
+                        Err(_) => last_err = format!("{addr}: connect timed out"),
+                    }
                 }
-                Ok(Err(e)) => last_err = format!("{addr}: {e}"),
-                Err(_) => last_err = format!("{addr}: connect timed out"),
+                let tcp = tcp.ok_or_else(|| net(format!("cannot connect ({last_err})")))?;
+                let _ = tcp.set_nodelay(true);
+                tcp
             }
-        }
-        let mut tcp = tcp.ok_or_else(|| net(format!("cannot connect ({last_err})")))?;
-        let _ = tcp.set_nodelay(true);
-        if self.socks5.is_some() {
-            timeout(CONNECT_TIMEOUT, socks5_connect(&mut tcp, host))
-                .await
-                .map_err(|_| net("the SOCKS5 proxy did not answer in time".into()))?
-                .map_err(net)?;
-        }
+        };
 
         let name = ServerName::try_from(host.to_owned()).map_err(|_| net("not a valid TLS server name".into()))?;
         let tls = timeout(CONNECT_TIMEOUT, self.tls.connect(name, tcp))

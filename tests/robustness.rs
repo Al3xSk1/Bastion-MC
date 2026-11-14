@@ -319,6 +319,66 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             ),
             zip_archive(&[("a", b"")], false),
         ],
+        "udp" => {
+            // Scripts for the datagram relay's decision table, four bytes an event (see
+            // `egress::udp::fuzz_table`): 1 = a game connection opens (rule, address),
+            // 2 = one closes, 0 = time passes, 3 = a datagram from the server, 4 = idle
+            // flows end, anything else = a datagram from the game (source, destination,
+            // port and size).
+            let script = |events: &[[u8; 4]]| events.as_flattened().to_vec();
+            vec![
+                // A session: connect, talk both ways, fall silent, close.
+                script(&[[1, 0, 0, 0], [5, 0, 0, 0], [5, 0, 0, 3], [3, 0, 10, 0], [0, 100, 0, 0], [5, 0, 0, 6]]),
+                // The limits: a burst on one flow, an oversize datagram, more sockets than flows.
+                script(&[
+                    [1, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [5, 0, 0, 51],
+                    [5, 1, 0, 0],
+                    [5, 2, 0, 0],
+                    [5, 3, 0, 0],
+                    [3, 0, 60, 0],
+                    [3, 1, 5, 0],
+                ]),
+                // Rules: private addresses with and without the flag, a literal address, the
+                // other server's port, a server without a UDP rule, a service name, nobody.
+                script(&[
+                    [1, 1, 1, 0],
+                    [5, 0, 1, 0],
+                    [5, 1, 1, 1],
+                    [1, 0, 1, 0],
+                    [5, 2, 0, 0],
+                    [1, 3, 0, 0],
+                    [5, 3, 4, 0],
+                    [5, 4, 0, 1],
+                    [1, 2, 0, 0],
+                    [5, 5, 2, 0],
+                    [5, 0, 3, 0],
+                    [5, 0, 5, 0],
+                    [5, 0, 6, 0],
+                ]),
+                // Endings: silence, the idle check, the connection closing, and what comes after.
+                script(&[
+                    [1, 0, 2, 0],
+                    [5, 0, 0, 0],
+                    [0, 255, 0, 0],
+                    [0, 255, 0, 0],
+                    [4, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [1, 0, 0, 0],
+                    [5, 1, 0, 0],
+                    [2, 0, 0, 0],
+                    [5, 0, 0, 0],
+                    [2, 0, 0, 0],
+                    [5, 1, 0, 0],
+                ]),
+            ]
+        }
         other => panic!("no seeds for {other}"),
     }
 }
@@ -363,7 +423,7 @@ fn run(name: &str) {
 
 #[test]
 fn every_harness_has_a_test_here() {
-    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir"];
+    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp"];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
@@ -411,6 +471,11 @@ fn zip_directory_reader() {
     run("zipdir");
 }
 
+#[test]
+fn datagram_relay_decisions() {
+    run("udp");
+}
+
 /// Mutation only explores a parser if it starts from inputs the parser accepts.
 #[test]
 fn the_starting_points_are_accepted_by_their_parsers() {
@@ -448,4 +513,8 @@ fn the_starting_points_are_accepted_by_their_parsers() {
         let listed = bastion_mc::profile::zipdir::read(archive.as_slice(), archive.len() as u64, &limits);
         assert_eq!(listed.expect("a zip archive").len(), members);
     }
+    // The relay scripts: datagrams relayed and refused by each, so that both outcomes and
+    // every ending are among the starting points.
+    let outcomes: Vec<(u64, u64)> = seeds("udp").iter().map(|s| bastion_mc::egress::udp::fuzz_table(s)).collect();
+    assert_eq!(outcomes, [(3, 0), (6, 4), (3, 6), (4, 1)]);
 }
