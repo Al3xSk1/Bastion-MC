@@ -59,7 +59,9 @@ One commit per step (`git log --oneline c25c3c4..HEAD` lists them all):
 | `417fdc0` | decision 8: the front end |
 | `5ad9356` | the `bedrock_store` harness's libFuzzer target (found missing) |
 | `5e04e50` | `tests/bedrock_cli.rs` follows the gate-first order |
-| this commit | doctor's telemetry and TOTP lines; `docs/BEDROCK.md`; these notes |
+| `79a10eb` | phase 1 documents: doctor's telemetry and TOTP lines; `docs/BEDROCK.md`; these notes |
+| `7d0cfde` | phase 2: the sign-in scheme handler (section 3) |
+| the last commit | phase 2 documents: the guide's sign-in section, these notes' sections 3, 6, 9 and 11 |
 
 ### Decision 1 — the per-session data directory
 
@@ -273,7 +275,108 @@ of it.
 
 ## 3. Phase 2: the sign-in scheme handler
 
-(Section written with phase 2; see below in this file once phase 2 is committed.)
+**Why.** The sign-in package found the "paste the final address" step unusable in practice:
+Firefox shows `ms-xal-0000000048183522://auth?code=…` neither in its address bar nor in its console
+(only the developer tools' Network panel lists it, as the failed 302's `Location`). Its notes
+(section 4) recommended a scheme handler; built here (`7d0cfde`).
+
+**What.**
+
+* **The desktop entry** `packaging/arch/bastion-mc-bedrock-signin.desktop`:
+  `MimeType=x-scheme-handler/ms-xal-0000000048183522;`, `NoDisplay=true`, `Terminal=false`,
+  `Exec=/usr/bin/bastion-mc bedrock hand-back %u` (an absolute path: the package installs the
+  launcher there). Installed by `package_bastion-mc` into `usr/share/applications/` (its `install`
+  line). **`update-desktop-database` is triggered by pacman's own hook**: checked on this system,
+  `/usr/share/libalpm/hooks/update-desktop-database.hook` (owned by desktop-file-utils 0.28-1)
+  triggers on Install/Upgrade/Remove of `usr/share/applications/*.desktop` and runs
+  `/usr/bin/update-desktop-database --quiet` after the transaction. The PKGBUILD names
+  desktop-file-utils as an optional dependency for that reason, and now also installs
+  `docs/BEDROCK.md` with the other documents (it did not). `desktop-file-validate`: valid.
+* **The command** `bastion-mc bedrock hand-back <address>` (`signin::handback::hand_back`): refuses
+  what is not the redirect's own address (printable, ≤ 4096 bytes, `ms-xal-0000000048183522://auth?…`)
+  before anything is sent; without `XDG_RUNTIME_DIR`, or with no session holding the handler, says
+  so; otherwise sends the address as one line and prints the session's verdict — one sentence, exit
+  0 (handed to the game) or 1 (anything else, a missing argument included). It reads no
+  configuration, opens nothing, writes no file, and never prints the address (it holds the code).
+  Not offered with `--events`.
+* **The socket** `$XDG_RUNTIME_DIR/bastion-mc/bedrock-signin.sock` (`signin::handback::take`): the
+  directory 0700 (`create_private_dir_all`, which refuses a link or a directory open to others),
+  the socket 0600, bound **before step 9** by the launch (`SignIn::prepare`, before the sandbox
+  exists), after an exclusive `flock` on `bedrock-signin.lock` beside it. From step 10 the sign-in
+  server accepts on it (paced and bounded like the bridge, its own budget; the peer's user id
+  checked with `SO_PEERCRED`) — it binds, connects and executes nothing after step 9. The game's
+  sandbox has no path to it (none of the runtime directory is mounted; the e2e checks the host path
+  is `ENOENT` inside).
+* **The session treats an address from the handler as a trusted answer for the waiting prompt**:
+  the same `check::check_final` (under the redirect URI, a code, the waiting sign-in's state), the
+  same outcome (accepted: the stub gets the address rebuilt from code and state, the prompt ends
+  `done`; refused: the prompt says why and stays). Refusals logged once per reason, totals at the
+  end. **One deliberate difference: a refused hand-back does not use up one of the prompt's 10
+  answers.** Any web page can make a browser call the handler (after the user's consent the first
+  time, maybe without asking later); such an address carries no state of this sign-in and cannot
+  get through — but with attempts counted, ten of them would end the user's prompt.
+* **Two Bedrock sessions at once: the second falls back to paste.** The lock gives the handler to
+  one session; a second session started while it runs takes pasted addresses only, for its whole
+  session, and its launch log ("another running Bedrock session takes the addresses your browser
+  hands back …; in this session paste the address …") and its prompt (`SignInPage.handback =
+  false`) say so. Why not address each session uniquely: the redirect URI is fixed by Microsoft's
+  client registration (nothing per session can be put in it); the handler cannot tell which session
+  a browser tab belongs to; the only key is the address's `state`, so the command would have to
+  hand one sign-in's code to every running session and each would have to recognise and ignore the
+  others' — more code on the credential path for a rare case whose fallback works. A name left by a
+  session that could not remove it (a confined launcher may not remove files in the runtime
+  directory; a killed one removes nothing) is removed by the next session that takes the lock: with
+  the lock held, the name belongs to nobody. An unconfined session removes its name at its end,
+  before it releases the lock.
+* **The protocol**: `SignInPage` gains `handback` (`#[serde(default, skip_serializing_if =
+  "Not::not")]`): absent when false, so a line from before reads the same and an older front end
+  ignores the field (tested both ways in the proto crate).
+* **The front end**: the panel's control is "Open the sign-in page" (in the user's browser); where
+  this session holds the handler, below it: "When you have signed in, the page hands the result
+  back to bastion-mc by itself, where bastion-mc's handler for these links is registered (the Arch
+  package registers it; your browser may ask once whether to open such links with bastion-mc: allow
+  it)", and the paste instructions under "If nothing happens"; without it, the paste instructions
+  alone. The terminal's text likewise. The paste field stays in both.
+* **Within the confinement rules**: the handler's socket is a pre-bound listener; after step 9 the
+  launcher only accepts on it and writes the verdict to the accepted connection.
+
+**Tested.**
+
+* `signin::handback` unit tests: one session holds the handler, a second at the same time falls
+  back, a stale name is removed by the next holder and an unconfined holder removes its own; the
+  socket 0600 in a 0700 directory; something other than a socket at the name is refused, not
+  removed; the command refuses foreign addresses (other hosts, another path, empty, control
+  characters) before sending anything, says "no session" without a runtime directory or socket, and
+  reports the session's verdicts (exit 0 / 1, never the code); the packaged desktop entry names the
+  scheme, `NoDisplay`, the exact `Exec`, and the PKGBUILD's install line.
+* Server tests: with nothing waiting, "no Bedrock sign-in is waiting"; an address of another
+  sign-in refused with the reason, the prompt still waiting with all 10 answers and a note; the
+  right one handed to the game (the stub's connection gets the rebuilt address); logged as coming
+  from the handler, the code nowhere; after the session the handler is gone (`NoSession`).
+* `bedrock::launch` unit test: a second session's `SignIn::prepare` does not get the handler and
+  says so; without a runtime directory there is none; offline there is no bridge.
+* **End to end** (`tests/bedrock_launch.rs`): session 1 shows the prompt with `handback: true` and
+  the handler's host path missing inside the sandbox; after session 2 (offline) the real binary's
+  `bedrock hand-back` with no session says "nothing was done: no Bedrock session that takes sign-in
+  addresses is running" (exit 1); **session 3, with the launcher confined**, is answered by the real
+  `bastion-mc bedrock hand-back`, run by a helper started before the session (so before the
+  confinement), as the desktop would run it: a foreign address refused by the command (exit 1),
+  another sign-in's refused by the session ("its state is not this sign-in's", exit 1; the prompt
+  still waiting with 10 answers), the right one handed to the game (exit 0); the stand-in reads the
+  rebuilt address from the stub; the after-session cape lines follow.
+* The front end: view tests (both texts; "Open the sign-in page" opens the page; the paste field
+  stays), a layout state with the hand-back text at every size (snapshot looked at), the emulated
+  application with a stand-in launcher whose prompt carries `handback: true`.
+* The desktop integration, by hand, in isolated directories under the clone's `target/` (no file of
+  the user's touched; the entry's `Exec` pointed at the debug build): `update-desktop-database`
+  wrote `x-scheme-handler/ms-xal-0000000048183522=bastion-mc-bedrock-signin.desktop;` into
+  `mimeinfo.cache`; `xdg-mime query default` and `gio mime` named the entry as the default; `gio
+  open 'ms-xal-0000000048183522://auth?code=M.C5&state=s'` ran the command, which printed
+  "bastion-mc: nothing was done: no Bedrock session that takes sign-in addresses is running".
+
+**Not verified**: a real browser following Microsoft's last redirect into the handler (Firefox
+asks the system through GIO; that path was exercised with `gio open`, not with a browser); the
+real package installed by pacman (makepkg built it, section 6; nothing was installed).
 
 ## 4. The wiring of a Bedrock launch (in order)
 
@@ -465,7 +568,55 @@ additions — the asset row (§1), the adversary paragraph (§2), the trust-boun
 `bedrock-risk.md` §2 and fold in as they are; the integration's own experiments are proposed as
 E35–E37 below the table.
 
-(The table is in the next commit of these notes, with phase 2's rows.)
+| # | Threat | Defence | Verified by | Residual risk | From |
+|---|---|---|---|---|---|
+| B1 | **Licence check and DRM**: bastion-mc used to defeat or answer a licence check, or to decrypt the game | No circumvention in bastion-mc's code: it decrypts nothing, patches no game file, answers no licence query, contains no Google Play client. `mcpelauncher-client` answers the game's Google Play query itself, after `mcpelauncher-ui` asked Google at download. Every launch refused until `[bedrock] accept_licence_substitution`; the refusal says what is accepted and what bastion-mc does not do. The Windows (GDK) build is not supported in any form | `bedrock::tests::bedrock_is_refused_until_the_licence_substitution_is_accepted`, `bedrock::policy::tests::the_gate_names_what_is_accepted_and_what_bastion_does_not_do`, `tests/bedrock_cli.rs::a_bedrock_launch_is_gated_and_refuses_the_java_launch_options` (the gate before everything) | bastion-mc cannot check that an imported version was bought. `mcpelauncher-client` changes the game's code in memory to run it | risk B1 |
+| B2 | **The client program** (C): a user-writable, swapped or foreign client | Root-owned, every directory and link hop root-owned and writable by nobody else, not under the home, not on FUSE, an x86-64 ELF, not set-user-ID; Flatpak (by location, configuration and layout) and AppImage (magic, mount) refused, each with the reason; never downloaded or built | `bedrock::runtime::tests::*` (14) | `[bedrock] client` is the user's file: a same-user program can point it at another root-owned program. Unaudited native code that patches the game, trusted as much as any package | store B-S1, B-S2; risk B2 |
+| B3 | **The client's build** (C): its HTTP stack | — (a finding) | read in the manifest | mcpelauncher's manifest builds curl 8.21.0 statically, downloaded **without a checksum** (`ext/curl.cmake`, `USE_OWN_CURL=ON` by default), and the AUR PKGBUILD keeps that default. An AUR PKGBUILD is user-submitted: read it before building | net BN10; risk B2 |
+| B4 | **Import pulls a private file in** (a link or hard link in the download directory) | Links, hard links, FIFOs, sockets, devices refused in what is copied; every name opened relative to a directory descriptor with `O_NOFOLLOW`; device/inode/size/times compared between scan and copy | `bedrock::store::tests::links_hard_links_fifos_and_sockets_in_the_copied_part_are_refused_by_name`, `…::a_file_that_changes_between_the_scan_and_the_copy_ends_the_import` | — | store B-S4 |
+| B5 | **Tampering with an imported version** between sessions, or between check and use | Per-file SHA-256 manifest written last; every launch re-hashes every file, refuses anything unlisted, linked or hard-linked; the checked descriptor is what is mounted (a duplicate, held with the version for the session) | `…::open_finds_a_changed_added_removed_or_replaced_file`, `…::open_refuses_a_damaged_or_missing_manifest_or_game_directory`; `tests/bedrock_launch.rs` (session 1 runs on a version opened by `store::open`) | Whatever can write the store can write a matching manifest: the check makes files checkable, not authentic. **No signer is checked** (mcpelauncher-ui keeps no APK). Checked at launch, not after | store B-S5; risk B3 |
+| B6 | **A hostile download directory** exhausting disk, inodes or time | Bounded entries, bytes (checked before copying: a sparse file refused at once), depth, libraries, manifest size; free space first; staging removed on failure | `…::the_import_stops_at_its_limits_before_copying` | The bounds are guesses: no real version measured | store B-S6 |
+| B7 | **Removing a version a running session uses** | `store::open`'s shared `flock`, held by the launch for the whole session (the sandbox gets a duplicate); `remove` takes it exclusively; also refused while a `bedrock:` (or `launch:`) marker's instance names the version | `…::remove_refuses_while_a_launch_holds_the_version_and_removes_it_after`, `…::remove_refuses_while_a_marked_launch_of_a_bedrock_instance_names_the_version`; `tests/bedrock_launch.rs` (refused while the stand-in waits, possible after) | A launch that lost both its lock and its marker can have its version removed under it (the game then fails; nothing else) | store B-S7 |
+| B8 | **Parsers of imported bytes** (compiled XML, the store's manifest, ELF headers, pacman records) | Strict, bounded, fuzzed (`bedrock_store`: a stable robustness test, and a libFuzzer target) | `tests/robustness.rs`, unit tests of `store::axml`, `store::manifest`, `store::elf` | libFuzzer targets compiled, not run (no nightly) | store B-S8 |
+| B9 | **Hostile game, server or content (S), native mods (M), against your files and session** | The Java sandbox with a profile of its own: namespaces, empty root, `/usr` read-only, synthetic `/etc`, no home; Landlock: only the client, its libraries, the loader and the stub execute, nothing writable is executable; the client's own system-call allowlist with the tripwire; the display only through the security context or the nested compositor; no `/dev/input`, hidraw; cgroup limits; the mod directory empty and read-only | `tests/bedrock_launch.rs` (the stand-in: no home, no host paths, no keyring, written code not executable, `mods/` sealed), `tests/bedrock_sandbox.rs` (3), `bedrock::launch::profile::tests::*` | The allowlist was derived from the client's source, never profiled on the real client (`[bedrock] seccomp = "log"` exists for that). Within a session, code already running in the client can `mmap(PROT_EXEC)` a file it wrote (Landlock governs `execve`). Kernel and GPU driver surface; same-user memory reading (P7) | risk B4; launch BL2 (in part) |
+| B10 | **The client creates namespaces** (an escape surface, or a browser sandbox) | `unshare`, `clone3`, `clone` with namespace flags refused in both filter modes; `setns` on the tripwire; bubblewrap's `--disable-userns` | `tests/bedrock_launch.rs` (`unshare`, `clone(CLONE_NEWUSER)` → ENOSYS), `tests/bedrock_sandbox.rs` | — | launch BL5 |
+| B11 | **Log mode, meant for profiling, opens the filter** | Log mode keeps the tripwire and an always-refused filter (namespaces, keyrings, io_uring, userfaultfd, perf events, `pidfd_getfd`) in front of the logging allowlist; loud in the launch; `extra_syscalls` cannot name those | `sandbox::seccomp::tests::bedrock_filters_compile_fit_and_keep_the_tripwire_in_log_mode`, `…::bedrock_extra_syscalls_cannot_reopen_what_is_always_denied`, `tests/bedrock_sandbox.rs::log_mode_lets_the_rest_through_but_keeps_refusing_namespaces_keyrings_and_io_uring` | Everything else outside the allowlist is allowed during a log-mode session | launch BL6 |
+| B12 | **A session plants native code for the next one** (the client loads helper libraries and mods from its data directory first) | The whole data root is per-session (fresh, deleted at the end); `mods/` empty and read-only every session; only worlds, `minecraftpe/` and the client's settings file persist (none of its keys names a path or program); the working directory is `/`; `XDG_DATA_DIRS` unset | `tests/bedrock_launch.rs` (a library planted in session 1 is gone in session 2; `mods/` not writable), `bedrock::launch::profile::tests::*` | Worlds and `options.txt` are game-written content parsed by the next session (as with Java worlds); the settings file can switch the client's own patches for the next session | launch BL2; store's finding |
+| B13 | **The client's legacy Microsoft sign-in path** (`msa-daemon`, for old versions and telemetry upload) | Landlock lets the sandbox execute only the client, its libraries, the loader and the stub | the Landlock rules (`nothing_writable_is_executable_and_the_stub_and_client_are`); not exercised with an `msa-daemon` | Not tested with a real `msa-daemon` | risk B13 |
+| B14 | **Two sessions of one instance** corrupt its worlds or remove each other's data | An exclusive lock on `bedrock-data/` for the whole session; session directories locked while in use and never removed then | `…::one_instance_runs_once_at_a_time_and_its_kept_directories_must_be_plain`, `bedrock::policy::tests::leftovers_of_killed_sessions_are_removed_and_running_ones_are_not` | — | launch BL7 |
+| B15 | **The game's Xbox identity carried away** (S, M) | Cannot be prevented: the game's sign-in library needs it. Narrowed by the filtered network (B28–B36) and by no Java credential in the session (B17) | the network rows' tests | **The game holds the account's Xbox identity for the whole session.** A game taken over can use it and copy it out through any allowed connection; the copy works until "sign out everywhere" (Microsoft: up to 24 h). At stake: joining as you, your Realms (owner's rights), Minecoins, your Bedrock character and cape, your Xbox friends; possibly your Java profile (not verified) | risk B5 |
+| B16 | **The game's sign-in at rest** (U, a later session) | The client's whole `-dd` root is the token store (`XboxLocalStorage.getPath` → the data directory's root): per-session (`policy::SessionDir`, 0700, locked), deleted at the end (bounded, said only if true); leftovers deleted at the next Bedrock start (`remove_leftovers`, which refuses a sessions directory that is a link or open to others) and by scram; doctor warns | `bedrock::policy::tests::*`, `tests/scram.rs` (Bedrock tests), `tests/bedrock_launch.rs` (tokens gone, a crashed session's directory deleted at the next start, the directory deleted with the launcher confined) | Where the real game writes its tokens was read in the client's source, not observed: if the game wrote a token into `minecraftWorlds/` or `minecraftpe/`, it would persist (symptom: no sign-in asked next time). During a session, and after a crash until the next start or scram, it is a file of the user's. Deleting is not a secure wipe | risk B6; launch BL1 |
+| B17 | **A Java credential in a Bedrock session** | None exists: no Java sign-in, no token store or vault opened; no path to them in the sandbox; `keyctl`/`add_key` refused by the client's filter; the relay denies the Java services | `tests/bedrock_launch.rs` (host paths ENOENT, `keyctl`/`add_key` ENOSYS), `bedrock::net::tests::the_java_services_are_denied_even_where_a_suffix_would_reach_them` | If the game can turn its Xbox identity into a Java token (not verified), a copy taken out (B15) works elsewhere | risk B7; launch BL4 |
+| B18 | **A real webview (a browser engine) inside the sandbox** | The stub (the launcher's own executable) at `/bastion/bin/mcpelauncher-webview`, first in PATH (`/bastion/bin:/usr/bin`, no empty entry), and over every installed webview (`Client::installed_webviews`: beside the client, `/usr/bin`, pacman's records, a manual install's tree, links resolved); no browser could run anyway (namespaces refused) | `tests/bedrock_launch.rs` (the client's first candidate is the stub; the planted "installed webview" never ran), `bedrock::runtime::tests::a_packaged_client_is_found_with_its_data_directory_version_and_every_webview_place` | A client compiled with an unusual `XAL_WEBVIEW_QT_PATH` and a webview installed by hand outside the client's tree under `/usr` would be missed (and then could not start a browser in the sandbox anyway) | store B-S3; launch BL3; risk B8 (part) |
+| B19 | **The game makes the launcher show a phishing page** or another application's consent | Only `https://login.live.com/oauth20_authorize.srf`, client `0000000048183522`, redirect `ms-xal-0000000048183522://auth`, `response_type=code`, scope exactly Xbox sign-in, PKCE S256, a state; no `request`/`request_uri`/`resource`/return-address parameters; names plain and unique; no `;`. The front end opens only Microsoft sign-in hosts | `bedrock::signin::check::tests::*` (7), `tests/signin_stub.rs::a_page_bastion_does_not_show_leaves_the_stub_silent_on_standard_output` | Cosmetic parameters (`login_hint`, `display`, `prompt`, `mkt`, …) are the game's choice; the scope check must be reviewed after the first real sign-in | sign-in B-S1; risk B8 |
+| B20 | **The game answers its own prompt** | Answers come only from outside the game: the front end's control pipe, the terminal (foreground only), and the desktop's handler (a 0600 socket in the user's 0700 runtime directory, which the sandbox cannot reach: not mounted, no route; the peer's uid checked); the sandbox starts a new session (no `TIOCSTI`), both filters deny the terminal-injection ioctls | `events::input::tests::*`, `tests/bedrock_launch.rs` (the handler's host path ENOENT inside) | The user can be talked into pasting something; the state check limits that to an address of this very sign-in | sign-in B-S2 |
+| B21 | **Prompt spam** | One prompt at a time, 6 per session, 10 s after one ends without an address, 15 min each; connections paced and read by at most 4 tasks | `bedrock::signin::server::tests::one_prompt_at_a_time_and_a_bounded_number_per_session`, `…::a_cancelled_prompt_cannot_be_reopened_at_once`, `…::a_flood_of_connections_is_paced_and_the_prompt_still_works` | A game can show 6 prompts per session | sign-in B-S3 |
+| B22 | **Hostile bytes on the bridge socket** (the game can connect without the stub) | Frames ≤ 16 KiB, length checked before allocation, exact JSON shapes, URLs parsed strictly; fuzzed | `bedrock::signin::wire::tests::*`, harnesses `signin_frame`, `signin_url` | — | sign-in B-S4 |
+| B23 | **The sign-in code exposed on the way back** | Single-use, useless without the game's PKCE verifier; never logged, never in an event; only the rebuilt `code`+`state` goes to the game; the hand-back command never prints it | `…::a_sign_in_is_shown_outside_the_game_and_only_its_rebuilt_address_goes_back`, `tests/bedrock_launch.rs` (no launcher line holds the code) | The terminal echoes a pasted address; the front end shows it in its field; after use the code is worthless | sign-in B-S5 |
+| B24 | **The stub as a way out** | It reads no configuration or environment, writes no file, needs 30 system calls (`stub::SYSCALLS`), all in the client's allowlist; it is not a boundary — every check is the launcher's | `tests/signin_stub.rs::the_stub_needs_no_system_call_beyond_its_documented_list`, `sandbox::seccomp::tests::the_bedrock_client_allows_every_system_call_of_the_sign_in_stub` | Inside the sandbox the stub can be run with any arguments — with exactly the game's rights | sign-in B-S6; launch BL3 |
+| B25 | **Another program of the user uses the bridge** to phish a sign-in through bastion-mc's prompt | The bridge socket is bound into the sandbox as a file and its host name removed as soon as the sandbox holds it; names left by killed launches swept | `bedrock::launch::profile::tests::a_killed_launchs_bridge_socket_is_swept_and_a_live_one_is_not`, `tests/bedrock_launch.rs` (the name gone after the session) | If the program in the sandbox is not identified in time the name stays for the session (a warning; the read-out says Partial). Same-user code is otherwise out of reach (P7): the prompt cannot tell a request from the game from one by another program of the user | sign-in B-S7; launch BL8 |
+| B26 | **A backgrounded terminal launch stopped by its own reader** (`SIGTTIN`) | The reader reads only while the launcher is the terminal's foreground job | `events::input::tests::only_a_controlling_terminal_owned_by_another_job_is_left_unread`, a pty probe | A job backgrounded between the check and the read is stopped until brought back | sign-in B-S8 |
+| B27 | **The desktop's handler**: a web page, another program of the user or another session hands the waiting sign-in an address | The handler's address is checked exactly as a pasted one (under the redirect, a code, this sign-in's state); a refused one does not use up the prompt's answers and is logged once per reason; the socket is 0600 in the user's 0700 runtime directory, bound before step 9, accepted on after it (paced, bounded, peer uid checked); one session holds it (a lock), a second falls back to pasting and says so; the command never prints the address | `bedrock::signin::handback::tests::*` (4), `bedrock::signin::server::tests::an_address_the_browser_hands_back_is_checked_like_a_pasted_one_and_handed_to_the_game`, `bedrock::launch::tests::a_second_bedrock_session_falls_back_to_pasting_and_says_so`, `tests/bedrock_launch.rs` (session 3, confined) | A web page can make the browser call the handler (after the user's first consent): it cannot get an address through without this sign-in's state, but its refusal shows in the prompt. Any program of the user can connect to the socket (P7), as it could type into the terminal. With two sessions, the second session's browser hands its address to the first, which refuses it (wrong state); that user pastes | integration (phase 2) |
+| B28 | **The game reaches other HTTPS hosts** | No route out of the namespace; the resolver answers only listed names (exact, sub-domain suffixes, minus the deny list) with synthetic addresses; the ClientHello must name the looked-up host; Landlock: TCP to 443 only | `egress::bedrock::tests::*`, `tests/bedrock_net.rs`, `tests/bedrock_launch.rs` (an unlisted name does not resolve; `api.minecraftservices.com` does not) | Everything below `.xboxlive.com`, `.minecraft-services.net`, `.playfabapi.com` is reachable: services that hold the Xbox identity, through which a hostile game can exfiltrate (B15) | net BN1 |
+| B29 | **The game sends UDP elsewhere** | No route; datagrams reach only the relay's sockets (Landlock ABI 10: DNS, the listed ports, the pass's); a flow goes only to the address resolved for a listed server or to an approved join, opens only with a RakNet ping or connection request; 32 flows, 1472-byte datagrams, 500/s to and 4000/s from a server per flow, 30 s idle | `egress::raknet::tests::*`, `tests/bedrock_net.rs::a_raknet_client_reaches_the_listed_servers_and_their_answers_come_from_where_it_sent` | A listed server receives whatever the game sends within those limits. Without Landlock ABI 10 the game may send to any port inside its namespace (where only the relay listens) | net BN2 |
+| B30 | **A poisoned name lookup turns the relay against the LAN** | Non-public addresses refused for servers and approved joins; one lookup per name per session | `tests/bedrock_net.rs::nethernet_private_addresses_host_names_and_unknown_join_answers_are_refused_with_the_reason` | — | net BN3 |
+| B31 | **A Realms or event-server join without the user** (an attacker's Realm), and without the phone | Join answers held (TLS terminated for four hosts only); approval outside the game by the code shown, typed at the trusted input (the terminal or the front end's Realms panel; `realms::answers`, never the game); the pass leads to that one server (one join, up to four flows within 30 s); `totp` acts as `code` (the TOTP secret stays in the token store) | `tests/bedrock_net.rs::a_realms_join_waits_for_the_approval_and_then_the_pass_reaches_exactly_that_server` (approved through the trusted input), `…::an_event_server_join_from_the_gatherings_service_is_approved_the_same_way`, `realms::answers::tests::*` | The user must read the prompt; a game can raise up to 20 prompts per session (a nuisance). In `code` mode the code binds the approval to the prompt it was shown with | net BN4; risk B9; sign-in B-R1 |
+| B32 | **A bug in the TLS termination** | Four hosts only; rustls (TLS 1.3) and hyper; bodies bounded; no credential held; join answers parsed strictly, fuzzed (`bedrock_realms`, `bedrock_gatherings`) | `egress::services::tests::*`, `tests/robustness.rs` | The broker holds the game's Realms and Minecraft tokens in memory while forwarding them (never logged); a compromised launcher could use them — the game holds them anyway | net BN5 |
+| B33 | **The per-launch authority used against other hosts** | Name constraints: the four hosts; made in memory per launch, never written, only in this sandbox's trust store (first in its bundle) | `egress::services::tests::the_authority_signs_for_the_four_hosts_and_its_constraints_void_anything_else`, `bedrock::launch::tests::the_brokers_authority_comes_first_in_the_trust_store_and_garbage_is_refused` | Name constraints also admit names *below* a permitted host (none is issued) | net BN6 |
+| B34 | **Tokens in the log** | Header values, bodies and query strings never logged; upstream error lines stripped of the query | `egress::services::tests::only_end_to_end_headers_are_forwarded_and_credentials_are_marked_sensitive`, `tests/bedrock_net.rs` (the game's token never in the log) | — | net BN7 |
+| B35 | **NetherNet or LAN around the relay** | NetherNet signalling denied by name; NETHERNET join answers refused with the reason; broadcasts have no route | `tests/bedrock_net.rs` | Friends' worlds, NetherNet Realms and LAN games do not work in this version | net BN8 |
+| B36 | **The confined launcher** | The relay starts after step 9; the confinement keeps TCP 443 (or the proxy's port), the cache writable (the session's data root is deleted from there), nothing executable; the sign-in bridge and the handler are pre-bound listeners | `tests/bedrock_net.rs::the_bedrock_relay_works_after_the_launcher_has_confined_itself`, `bedrock::launch::tests::the_confined_launcher_can_still_delete_the_sessions_data_root`, `tests/bedrock_launch.rs` (session 3) | UDP is not the confinement's to restrict: a compromised launcher can send UDP anywhere (as with voice chat) | net BN9 |
+| B37 | **A Bedrock session running when you scram** | Marked as its own kind (`bedrock:<instance>`), stopped through a pidfd like a Java launch; then, after bastion-mc's own credentials and the last stop pass, what Bedrock sessions left is deleted for a bounded time and confirmed; an unstoppable or unmarked session is a `COULD NOT` line saying to end it and to sign out everywhere; worlds and versions kept, and said | `running::tests::a_bedrock_session_is_marked_as_a_launch_of_its_own_kind_and_stopped_like_one`, `tests/scram.rs` (4 Bedrock tests) | Revokes nothing at Microsoft. A launcher older than this takes a `bedrock:` marker for a stale one. `mcpelauncher-ui`'s data is not touched | risk B10 |
+| B38 | **Noticing it afterwards** | After a session in which the game was signed in through the bridge, the launch says where a new cape shows and what the canary does; the canary never alarms on a gained cape, names it and pins it; every other change is a difference | `bedrock::policy::tests::after_a_signed_in_session_the_user_learns_where_the_cape_shows_and_what_the_canary_does`, `launch::canary_tests::a_gained_cape_is_named_pinned_and_never_stops_a_launch`, `tests/bedrock_launch.rs` (the lines only after the signed-in sessions) | The canary sees the Java profile only, and only at the next Java sign-in: nothing watches Minecoins, Realms, the Bedrock character or Xbox friends | risk B11 |
+| B39 | **Account enforcement, and the Google credential** | Not the launcher's to defend; the guide advises a Google account of its own and signing out of `mcpelauncher-ui` after downloading | — | Whether Google or Microsoft act against accounts used with unofficial clients is unknown. `mcpelauncher-ui` keeps a Google sign-in on disk, outside bastion-mc and scram | risk B12 |
+
+**Experiments for §7** (besides the risk package's E33 and E34):
+
+| # | What | Result |
+|---|---|---|
+| E35 | A Bedrock session end to end with a stand-in client in the real sandbox (`tests/bedrock_launch.rs`, three sessions, 2026-11-14) | The client's arguments, the version opened from the store and held for the session (`bedrock remove` refused meanwhile), the data split (world kept; tokens, a planted library and a crashed session's directory gone), the stub over the installed webview, no home, keyring or namespaces, HTTPS through the relay with the system's libcurl, the sign-in from the stub to the bridge and back (pasted; and handed back by `bastion-mc bedrock hand-back` with the launcher confined), the telemetry switch, the launcher confined |
+| E36 | The CI's test steps with bubblewrap, ffmpeg, xdg-dbus-proxy, Firefox and `systemd-run` hidden and no `XDG_RUNTIME_DIR` (`target/int-logs/ci-tests-hidden.sh`) | Only tests that check root ownership failed — an artefact of the unprivileged user namespace used to hide the programs; none for a missing program (section 2, decision 9) |
+| E37 | The sign-in handler's desktop entry in isolated XDG directories (`update-desktop-database`, `xdg-mime`, `gio mime`, `gio open`) | Registered as the scheme's default; `gio open ms-xal-…://auth?…` ran `bastion-mc bedrock hand-back`, which said that no session was running |
 
 ## 10. The risk package's re-check list (`bedrock-risk.md` §5), answered
 
@@ -507,4 +658,28 @@ E35–E37 below the table.
 
 ## 11. For the documents pass
 
-(Completed with phase 2.)
+* **Fold in**: the threat-model table above (B1–B39, a new section of `docs/THREAT_MODEL.md`) and
+  experiments E35–E37; the risk package's asset row, adversary paragraph, trust-boundary sentence,
+  "not defended" items 17–19, the canary deviation and E33/E34 (`bedrock-risk.md` §2); its README
+  text (§1.1: intro paragraph, status-table row, contents line, the Bedrock section, the emergency
+  paragraph, the tests counts) and its `docs/README.md` index line (§1.2); its runbook text (§2.8).
+* **Correct while folding** (the risk package wrote before the merge): the README section's sign-in
+  sentence must say that the browser hands the address back where bastion-mc's handler is
+  registered, and that pasting is the fallback; `totp` acts as `code` for Bedrock; Realms joins are
+  approved in the front end's Realms panel or on the terminal, never in a phone; what is kept is
+  `minecraftWorlds/`, `minecraftpe/` and the client's settings file — not all of
+  `games/com.mojang`; `--demo` changes nothing for Bedrock.
+* **README, "Tests"**: the counts of this tree (section 6); the new suites (`bedrock_launch`,
+  `bedrock_sandbox`, `bedrock_cli`, `bedrock_store`, `bedrock_net`, `signin_stub`); the risk
+  package's observation that the suite assumes a short `TMPDIR` on a file system without fs-verity
+  (with a long btrfs `TMPDIR`, 23 tests outside Bedrock failed for it).
+* **README, packaging**: the PKGBUILD now installs `docs/BEDROCK.md` and the sign-in handler's desktop
+  entry (and names desktop-file-utils as optional for its hook).
+* **TODO.md**: round 5 is integrated and committed in this clone; what only the user can do is the
+  list in section 8 (the real client once in log mode, a real version's size, a real sign-in, a
+  real server/Realm/event, a cape reaching Java).
+* **The website** (`site/`): unchanged; `python3 -I site/build.py --check` passes on this tree. The
+  pages mention no Bedrock yet; when they do, they must say what the guide says (above all the
+  residual of B15: the game holds the Xbox identity for the session).
+* **Pushing**: this clone's `integration` branch has every commit; the user pushes (the session's
+  token cannot).

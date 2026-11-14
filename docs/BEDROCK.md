@@ -58,6 +58,10 @@ for the whole session.
 * **Your decision about the licence substitution**, below.
 * For capes on Java: bastion-mc's own Java sign-in (README, "Accounts"), which needs your Azure
   application and Mojang's approval of it.
+* For the sign-in to come back from your browser by itself: bastion-mc installed from its Arch
+  package (it brings the desktop entry) and desktop-file-utils (its pacman hook registers the
+  entry; most desktops have it). Without them you paste the address by hand
+  ([Signing in](#signing-in-every-session)).
 
 ## The licence substitution, and its switch
 
@@ -189,7 +193,7 @@ Microsoft account (servers, Realms, events, capes) starts with a sign-in. Single
 work without one.
 
 When the game wants you to sign in, bastion-mc shows Microsoft's sign-in page **outside the
-game**: the front end's *Microsoft sign-in for Bedrock* panel opens it in your browser (*Open
+game**: the front end's *Microsoft sign-in for Bedrock* panel opens it in your browser (*Open the
 sign-in page*; only `https://login.live.com/…` is ever offered), and a terminal launch prints its
 address on a line of its own. Sign in there, with two-factor steps or a passkey as usual. Never
 type your password into the game: it never asks for it.
@@ -200,9 +204,24 @@ At the end, Microsoft sends your browser to an address that starts with
 ms-xal-0000000048183522://auth?code=
 ```
 
-— an address for the game, which your browser cannot open. **Your browser may not show it at
-all**: Firefox (checked with version 159) stays on the page before, with nothing in the address bar
-and nothing in the console. To get it:
+— an address for the game, not for the browser. **Where bastion-mc's handler for these links is
+registered, the browser hands it back by itself**: the Arch package installs a desktop entry for
+the `ms-xal-0000000048183522` scheme (`/usr/share/applications/bastion-mc-bedrock-signin.desktop`,
+hidden from menus), and desktop-file-utils' pacman hook registers it. Your browser may ask once
+whether to open such links with bastion-mc: allow it. It then runs
+`bastion-mc bedrock hand-back <address>`, which hands the address to the running Bedrock session
+and opens nothing; the game continues. To check the registration:
+`xdg-mime query default x-scheme-handler/ms-xal-0000000048183522` names
+`bastion-mc-bedrock-signin.desktop`.
+
+The handler reaches one session at a time: a Bedrock session that starts while no other one holds
+it. One started while another runs takes pasted addresses only, for its whole session, and its
+prompt and launch log say so. Without `XDG_RUNTIME_DIR` (no desktop session) there is no handler
+either.
+
+**If nothing happens — or without the handler — paste the address.** Your browser may not show it
+at all: Firefox (checked with version 159) stays on the page before, with nothing in the address
+bar and nothing in the console. To get it:
 
 1. Before the last step of the sign-in (or before you start it), open the browser's developer
    tools with **F12** and choose the **Network** tab.
@@ -212,19 +231,22 @@ and nothing in the console. To get it:
 4. Paste it into the field of the front end's panel and press *Send* (or Enter) — or, on a
    terminal launch, paste it into the terminal and press Enter.
 
-bastion-mc checks it (it must be the game's address, carry a sign-in code, and belong to *this*
-sign-in) and hands the game only the code and the sign-in's state, nothing else you pasted. The
-prompt says why an address was not accepted; you have 10 tries and 15 minutes. *Cancel* (or typing
-`cancel` on the terminal) refuses the sign-in, and the game is told that it failed. If you did not
-press *Sign in* in the game, cancel. One prompt at a time, at most 6 per session, and after one
-ends without an address the next waits 10 seconds: a game cannot keep a prompt in front of you.
+Either way, bastion-mc checks it (it must be the game's address, carry a sign-in code, and belong
+to *this* sign-in) and hands the game only the code and the sign-in's state, nothing else. The
+prompt says why an address was not accepted; you have 10 tries (an address the handler brought
+that was refused does not count: any web page can make a browser call the handler) and 15
+minutes. *Cancel* (or typing `cancel` on the terminal) refuses the sign-in, and the game is told
+that it failed. If you did not press *Sign in* in the game, cancel. One prompt at a time, at most
+6 per session, and after one ends without an address the next waits 10 seconds: a game cannot
+keep a prompt in front of you.
 
 What bastion-mc checks: it shows only Microsoft's sign-in page for Minecraft for Android's own
 client (`login.live.com`, client id `0000000048183522`), and returns only an address of that
 client's own form. A game that asks for any other page is refused. Your password, two-factor
-codes and the sign-in page's cookies never enter the game's sandbox. A pasted answer is
-accepted only from the terminal of a terminal launch or from the front end: the game cannot
-answer a prompt.
+codes and the sign-in page's cookies never enter the game's sandbox. The address is accepted
+only from outside the game — the terminal of a terminal launch, the front end, or the desktop's
+handler (a socket in your private runtime directory, which the game's sandbox cannot reach) — so
+the game cannot answer its own prompt.
 
 ### Servers
 
@@ -414,6 +436,13 @@ credential:
   session.
 * **The sign-in page did not open**: the address is in the launcher's output; open it in your
   browser yourself.
+* **After the sign-in nothing happens in the game**: the browser did not hand the address back.
+  Check that the handler is registered (`xdg-mime query default
+  x-scheme-handler/ms-xal-0000000048183522` should name `bastion-mc-bedrock-signin.desktop`; the
+  desktop-file-utils package's pacman hook registers it), that you allowed the browser to open the
+  link, and that no other Bedrock session was running (the first one holds the handler). Then
+  paste the address instead (above). `bastion-mc bedrock hand-back '<address>'` in a terminal does
+  what the handler does, and says what happened.
 * **A server cannot be reached**: look for the line that names it, and add it to `servers`.
 * **A Realm or event server is refused**: `[realms] approve` is `"off"`, or the join was not
   approved in time, or the Realm uses NetherNet.
@@ -443,7 +472,7 @@ of this ran with the real game:
 | The licence gate, `doctor`'s Bedrock section | unit tests; `doctor` in isolated directories with a stand-in store and a stand-in leftover session | the client's discovery against the real package |
 | Finding the client, importing and checking versions | unit tests on fake install trees and synthetic versions (links, devices, limits, tampering); the `bedrock` commands end to end with the real binary; `/usr/bin/true` standing in for a root-owned client | a real `mcpelauncher-linux` package, a real downloaded version |
 | A whole session | the launch end to end with a stand-in client (a program the test compiles, started as the client in the real sandbox): its arguments, the read-only version opened from the store, the data split (a world kept, tokens and a planted library gone, a crashed session's directory deleted at the next start), the stub over the installed webview, no home, no keyring, no namespaces, HTTPS through the relay with the system's libcurl, the launcher confining itself | the real client and game, a display, sound, a GPU, resource limits |
-| The sign-in | the stand-in running `mcpelauncher-webview` inside the sandbox under the client's own filters: the stub reached the launcher, the page was offered, another sign-in's address was refused, the right one came back to the stand-in rebuilt; cancelling; a wrong state; the front end's prompt in its emulator; Firefox 159 against a stand-in redirect page (where the final address shows) | Microsoft's real sign-in, two-factor, passkeys, the game's sign-in library accepting the address |
+| The sign-in | the stand-in running `mcpelauncher-webview` inside the sandbox under the client's own filters: the stub reached the launcher, the page was offered, another sign-in's address was refused, the right one came back to the stand-in rebuilt — pasted at the trusted input, and handed back by the real `bastion-mc bedrock hand-back` with the launcher confined; a foreign address, no session; the front end's prompt in its emulator; the desktop entry resolved by `xdg-mime` and `gio` in isolated directories, and `gio open` running the command; Firefox 159 against a stand-in redirect page (where the final address shows) | Microsoft's real sign-in, two-factor, passkeys, the game's sign-in library accepting the address; a real browser calling the handler |
 | The network | a sandboxed client (Python, the system's curl) with the real relay: RakNet to stand-in servers, refusals, a Realms and an event-server join through stand-in services over TLS approved through the trusted input, the per-launch authority accepted by curl, the relay working after the launcher confined itself | a real Bedrock server, Realm or event server; the game's own TLS stack |
 | `scram` for Bedrock | tests with stand-in sessions (processes that hold a session directory, with and without a marker, one that cannot be stopped) and stand-in token files | a real game's token files |
 | The canary and new capes | unit tests with stand-in profiles | a real profile with a cape claimed in Bedrock |
