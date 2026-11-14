@@ -1,0 +1,68 @@
+# Coverage-guided fuzz targets (cargo-fuzz / libFuzzer). Not part of the workspace: nothing
+# here is built by `cargo build`, `cargo test` or the package.
+[package]
+name = "bastion-mc-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bastion-mc = { path = ".." }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "persist"
+path = "fuzz_targets/persist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sni"
+path = "fuzz_targets/sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "broker"
+path = "fuzz_targets/broker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xauthority"
+path = "fuzz_targets/xauthority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wayland"
+path = "fuzz_targets/wayland.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile"
+path = "fuzz_targets/profile.rs"
+test = false
+doc = false
+bench = false
