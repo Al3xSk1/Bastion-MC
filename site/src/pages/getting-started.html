@@ -73,7 +73,7 @@ bastion-mc --help</code></pre>
 <p><code>packaging/arch/PKGBUILD</code> makes two packages, <code>bastion-mc</code> and <code>bastion-mc-gui</code>. Until there is a release it is a template: it does not build your checkout, and <code>makepkg</code> builds whatever its <code>source=</code> line points to.</p>
 <p>On the development machine both packages were built from a tarball of the tree: their <code>check()</code> passes, and both binaries pass the hardening check.</p>
 {{REQUIRE README.md "packaging/arch/PKGBUILD does not build this checkout: until there is a release it is a template, and makepkg builds whatever its source= line points to."}}
-{{REQUIRE README.md "both build, their check() passes and both binaries pass the hardening check — run again on the merged tree of the third round, from a tarball of that tree"}}
+{{REQUIRE README.md "both build, their check() passes and both binaries pass the hardening check — run again on the merged tree of the fourth round, from a git archive of that tree"}}
 </article>
 </div>
 <p>Settings go in <code>~/.config/bastion-mc/config.toml</code>, which does not exist until you create it: <code>bastion-mc config example</code> prints a commented template of every key, and <code>bastion-mc config path</code> prints where the file goes.</p>

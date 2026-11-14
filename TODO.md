@@ -13,8 +13,9 @@ working copies against one contract (`docs/notes/round4-contract.md`) and is **m
 the first-party companion Fabric mod, the UDP relay for voice chat with the fix of review
 finding B-M3, verified mod installs from Modrinth, and the fixes for the two independent
 reviews — was merged before it (merge commits `3025219`, `aef85df`, `263498c`, `2dd827a`,
-`35d57cd`; integration fixes `1dbb587`, `c383196`). A project website for GitHub Pages is
-being built separately and is not in this tree yet.
+`35d57cd`; integration fixes `1dbb587`, `c383196`). The project website (`site/`, published
+to GitHub Pages by `.github/workflows/pages.yml`) and continuous integration
+(`.github/workflows/ci.yml`) were merged after the fourth round.
 
 How to read this file: **Open** is what is left and why; **Blocked on you** needs
 something only you have; **Done in the fourth round**, **Done in the third round** and
@@ -26,21 +27,23 @@ Verification state of the merged tree of the fourth round (the integrator's runs
 2026-11-14, with separate XDG directories, only private displays, and never your session
 bus): what each package ran on its own branch is under "Done in the fourth round". On the
 merged tree: `cargo fmt --check` clean, `cargo clippy --workspace --all-targets` without
-warnings, `cargo test --workspace` <!-- COUNTS --> passed, 0 failed; with
-`BASTION_NET_TESTS=1 BASTION_X11_TESTS=1 BASTION_BROWSER_TESTS=1` 763 passed; the
-nested-compositor suite 4/4 with the clipboard test; the Wayland suite 2/2;
-`tests/nested_game.rs` (vanilla 26.3); `tests/companion_game.rs` on 26.3 (in the demo world),
-1.21.4 and 1.20.1; `tests/clips_game.rs` 2/2; `tests/browser_game.rs` (after `2660a67`);
-demo launches of the voice-chat and catalog instances and of a vanilla 1.21.4 instance (the
-bootstrap fix: the same instance did not start with the third round's binary);
-`cargo deny check` ok. The phone end to end with the real services (not the demo), in the
-real game (26.3, demo mode): the phone listed Spotify, Discord, Browser, Clips, Realms and
-Settings; 27 commands from it reached the services and were accepted; the Spotify app showed
-the track of a stand-in player on a private D-Bus (never the session bus or the Spotify
-app), with its cover; the Discord app showed Discord's public sign-in page, loaded by the
-sandboxed browser through its relay (nobody signed in); a clip was saved (30 s, 900 frames,
-1280x720). <!-- MAKEPKG --> **Not run:** the libFuzzer targets, and anything that needs an
-account (a Spotify client ID, a Discord sign-in, a Realm), `age`, root or another kernel.
+warnings, `cargo test --workspace` 768 passed, 0 failed; with `BASTION_NET_TESTS=1
+BASTION_X11_TESTS=1 BASTION_BROWSER_TESTS=1` 768 passed; the nested-compositor suite 4/4
+with the clipboard test; the Wayland suite 2/2; `tests/nested_game.rs` (vanilla 26.3);
+`tests/companion_game.rs` on 26.3 (in the demo world), 1.21.4 and 1.20.1;
+`tests/clips_game.rs` 2/2; `tests/browser_game.rs` (after `2660a67`); demo launches of the
+voice-chat and catalog instances and of a vanilla 1.21.4 instance (the bootstrap fix: the
+same instance did not start with the third round's binary); `cargo deny check` ok. The phone
+end to end with the real services (not the demo), in the real game (26.3, demo mode): the
+phone listed Spotify, Discord, Browser, Clips, Realms and Settings; 27 commands from it
+reached the services and were accepted; the Spotify app showed the track of a stand-in
+player on a private D-Bus (never the session bus or the Spotify app), with its cover; the
+Discord app showed Discord's public sign-in page, loaded by the sandboxed browser through
+its relay (nobody signed in); a clip was saved (30 s, 900 frames, 1280x720). `makepkg` from
+a `git archive` of the tree (with the CI workflows, the same code): both packages build,
+`check()` passes, both binaries pass the hardening check. **Not run:** the libFuzzer
+targets, and anything that needs an account (a Spotify client ID, a Discord sign-in, a
+Realm), `age`, root or another kernel.
 
 Verification state of the merged tree of the third round (the integrator's runs,
 2026-11-13, with separate XDG directories and only private displays): `cargo fmt --check`
@@ -72,8 +75,6 @@ libFuzzer targets themselves.
       `bastion-mc wiki scram`.
 - [ ] **`README.md` "Status" numbers** drift with every test added; re-count before a
       release (the README says how: the `test result` lines of `cargo test --workspace`).
-      The fourth round's documents kept the third round's numbers, each marked with
-      `<!-- COUNTS -->`, for the integrator to fill in from the final run of the merged tree.
 - [ ] **Java runtimes from Arch's jre packages are not found** (review of the documents).
       The launcher recognises a runtime by its `release` file (`src/java.rs`, `read_release`
       and `discover_in`), and for Java 17 and later Arch ships that file only in the jdk
@@ -555,6 +556,18 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
   `COMPANION.md`, `MODS.md` and the README's images, and names firefox, xdg-dbus-proxy and
   ffmpeg as optional dependencies; the header of `tests/jvm.rs` names the bootstrap's new
   class.
+- The website (merged `694c81c`, brought up to rounds 3 and 4 in `7c839d4`: the three
+  hand-written pages rewritten where the facts had changed, `docs/PHONE.md`,
+  `docs/COMPANION.md` and `docs/MODS.md` rendered, the threat model's table repairs retired,
+  HTML comments in documents left out as GitHub leaves them out). What its review found in
+  the documents was fixed in `28c0c57`: Realms is brokered only in a launch with the phone,
+  burner sessions record no clips, DNS is UDP too (§5 item 7), `audio = "alsa"` gives the
+  game `/dev/snd` and its device ioctls (D4, the §3 drawing, `examples/config.toml`), the
+  front end holds no token, and its scram line names everything scram removes.
+- CI (`9c99344`): `.github/workflows/ci.yml` and the manual `integration.yml` (see Open).
+  Simulating its test job found that `check()` needs fonts: `PKGBUILD` has
+  `checkdepends=('adwaita-fonts')` now (without a monospace face two layout tests fail, and a
+  clean chroot has no fonts at all).
 - Documents (this pass): the README (the phone and each app, the home screen and dark menus,
   Realms, settings sync, the versions, the new commands, configuration sections and tests,
   one Status row per part), `docs/README.md`, `docs/SCRAM_RUNBOOK.md` (what scram now
