@@ -223,7 +223,16 @@ pub struct Inputs<'a> {
     pub bridge_socket: Option<PathBuf>,
     /// `-ww` / `-wh`, from the instance's `width` and `height`.
     pub window: Option<(u32, u32)>,
+    /// `[bedrock] telemetry`. Off: besides the relay refusing Microsoft's telemetry hosts, the
+    /// client is told to keep the game's telemetry from starting ([`TELEMETRY_SWITCH`]).
+    pub telemetry: bool,
 }
+
+/// The client's own switch for the game's telemetry: with it set, mcpelauncher-core hooks the
+/// game's `Microsoft::Applications::Events::TelemetrySystemBase::start` with an empty function
+/// (`ReadEnvFlag("MCPELAUNCHER_DISABLE_TELEMETRY")` in its `minecraft_utils.cpp`, which takes
+/// "1", "true" or "on").
+pub const TELEMETRY_SWITCH: &str = "MCPELAUNCHER_DISABLE_TELEMETRY";
 
 /// The program the sandbox runs, and everything that goes with it.
 pub struct Profile {
@@ -320,6 +329,9 @@ pub fn build(base: Base, mut input: Inputs<'_>) -> Result<Profile> {
     set(&mut env, "PATH", &sandbox_path());
     set(&mut env, "HOME", SANDBOX_DATA);
     set(&mut env, "XDG_CACHE_HOME", SANDBOX_CACHE);
+    if !input.telemetry {
+        set(&mut env, TELEMETRY_SWITCH, "1");
+    }
 
     // The client's arguments, as its argument parser names them (`main.cpp`: --game-dir -dg,
     // --data-dir -dd, --cache-dir -dc, --width -ww, --height -wh). Not --free-only (it refuses
@@ -465,6 +477,16 @@ mod tests {
         }
 
         fn build(&self, session: &SessionDir, kept: &mut Kept, window: Option<(u32, u32)>) -> Profile {
+            self.build_with(session, kept, window, true)
+        }
+
+        fn build_with(
+            &self,
+            session: &SessionDir,
+            kept: &mut Kept,
+            window: Option<(u32, u32)>,
+            telemetry: bool,
+        ) -> Profile {
             let base = crate::sandbox::base(&BaseOptions {
                 tmp_size_mb: 64,
                 jvm: None,
@@ -487,6 +509,7 @@ mod tests {
                     stub: Stub::open(&program, &self.client.installed_webviews()).unwrap(),
                     bridge_socket: Some(self.root.join("signin.sock")),
                     window,
+                    telemetry,
                 },
             )
             .unwrap()
@@ -614,6 +637,7 @@ mod tests {
         assert!(sandbox_path().split(':').all(|d| d.starts_with('/') && d.len() > 1), "no empty or relative entry");
         assert_eq!(get("XDG_DATA_DIRS"), None, "the client's data search stays on /usr");
         assert_eq!(get("XDG_DATA_HOME"), None);
+        assert_eq!(get(TELEMETRY_SWITCH), None, "telemetry on (the default): the client's switch is not set");
         assert_eq!(get("HOME"), Some(SANDBOX_DATA));
         assert_eq!(get("XDG_CACHE_HOME"), Some(SANDBOX_CACHE));
         assert_eq!(get("DBUS_SESSION_BUS_ADDRESS"), None);
@@ -623,6 +647,17 @@ mod tests {
         let mounts: Vec<(&str, PathBuf)> = profile.mounts.iter().map(dst).collect();
         assert!(!mounts.iter().any(|(_, d)| d.starts_with("/bastion/data/games")));
         assert!(mounts.iter().any(|(k, d)| *k == "remount-ro" && d == Path::new("/bastion/data/mods")));
+    }
+
+    /// `[bedrock] telemetry = false`: the client's own switch is set too, so that the game's
+    /// telemetry does not even start (the relay refuses its hosts in any case).
+    #[test]
+    fn telemetry_off_also_sets_the_clients_own_switch() {
+        let f = Fixture::new("telemetry");
+        let session = SessionDir::create(&f.paths, "bedrock").unwrap();
+        let profile = f.build_with(&session, &mut Kept::open(&f.inst_dir, "bedrock", false).unwrap(), None, false);
+        let set: Vec<&(String, String)> = profile.env.iter().filter(|(k, _)| k == TELEMETRY_SWITCH).collect();
+        assert_eq!(set, [&(TELEMETRY_SWITCH.to_string(), "1".to_string())]);
     }
 
     #[test]

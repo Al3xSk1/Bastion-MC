@@ -182,6 +182,8 @@ impl World {
     fn config(&self, confine: ConfineMode) -> Config {
         let mut cfg = Config::default();
         cfg.bedrock.accept_licence_substitution = true;
+        // The confined session runs with telemetry off (its switch reaches the client).
+        cfg.bedrock.telemetry = confine == ConfineMode::Off;
         cfg.sandbox.cgroup = CgroupMode::Off;
         cfg.launcher.confine = confine;
         cfg.network.launcher_proxy = Some(format!("socks5h://{}", self.proxy));
@@ -473,6 +475,7 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     }
     assert_eq!(one.outcome, Ok(0), "{}", one.dump());
     one.expect("argv", "-dg /bastion/game -dd /bastion/data -dc /bastion/cache");
+    one.expect("env.disable_telemetry", "unset");
     one.expect("game.read", &library.to_string());
     one.refused("game.write");
     // The data root is writable; the mod directory is not; nothing written can be executed.
@@ -606,6 +609,9 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     // ---------------------------------------------------------------- session 3 (confines this process)
     let three = world.session(3, ConfineMode::Auto, AtTheInput::Cancel).await;
     assert_eq!(three.outcome, Ok(0), "{}", three.dump());
+    // `[bedrock] telemetry = false`: the client's own switch is set, and the launch says so.
+    three.expect("env.disable_telemetry", "1");
+    assert!(three.said("telemetry: off"), "{}", three.dump());
     three.expect("world.present", "true");
     three.expect("token.root.present", "false");
     if curl {

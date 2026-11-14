@@ -80,6 +80,7 @@ fn main() {
     }
     say("standin", "started");
     say("argv", args[1..].join(" "));
+    say("env.disable_telemetry", std::env::var("MCPELAUNCHER_DISABLE_TELEMETRY").unwrap_or_else(|_| "unset".into()));
     let probes = read_probes();
     let session: u32 = probes.iter().find(|(k, _)| k == "session").and_then(|(_, v)| v.parse().ok()).unwrap_or(0);
     say("session", session);

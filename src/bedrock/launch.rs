@@ -365,8 +365,16 @@ pub async fn launch_with(
             stub,
             bridge_socket: bridge_socket.clone(),
             window,
+            telemetry: cfg.bedrock.telemetry,
         },
     )?;
+    if !cfg.bedrock.telemetry {
+        say(&format!(
+            "telemetry: off ([bedrock] telemetry = false): Microsoft's telemetry hosts are not reachable, and the client \
+             is told to keep the game's telemetry from starting ({}=1)",
+            profile::TELEMETRY_SWITCH
+        ));
+    }
     mounts.extend(desktop.mounts);
     env.extend(desktop.env);
     landlock.devices.extend(desktop.devices);
