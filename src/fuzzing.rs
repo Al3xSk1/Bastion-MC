@@ -166,4 +166,9 @@ pub const ALL: &[(&str, Harness)] = &[
     ("zipdir", zipdir),
     ("udp", udp),
     ("companion", companion),
+    // Answers of the mod registry (`profile add`, `profile check`); the harness lives with its parser.
+    ("registry", crate::profile::modrinth::fuzz),
+    // Mod jars, class files and mod metadata as the capability scan reads them (`profile add`
+    // runs it on what it has just downloaded).
+    ("jar", crate::profile::capabilities::fuzz),
 ];

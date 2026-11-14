@@ -12,6 +12,11 @@ object; an archive the strict zip reader accepts is listed identically by a seco
 implementation; a datagram is relayed only to the address of an open game connection under
 a rule that names the port; …), not only "does not crash".
 
+The answers of the mod registry (`profile add`, `profile check`) have their harness next to
+the parser, `profile::modrinth::fuzz`; it is registered under the name `registry`. The
+capability scan of mod jars (`profile lock`, `profile audit`, and `profile add` on what it
+has just downloaded) has its own, `profile::capabilities::fuzz`, registered as `jar`.
+
 Two ways to run them:
 
 **Every test run, stable toolchain** — `tests/robustness.rs` feeds each harness its valid

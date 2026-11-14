@@ -4,7 +4,9 @@
 
 pub mod author;
 pub mod capabilities;
+pub mod catalog;
 pub mod manifest;
+pub mod modrinth;
 pub mod mods;
 pub mod packs;
 pub mod signing;

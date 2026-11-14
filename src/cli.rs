@@ -82,6 +82,14 @@ USAGE: bastion-mc [--events] <command> [options]
   key list                            show trusted keys and which store is authoritative
 
   profile new <id> --minecraft <version> (--fabric | --quilt) [--loader-version V]
+  profile add <id> <mod>... [--prerelease] [--allow-fresh] [--dry-run]
+                                      fetch mods from Modrinth into the draft: <mod> is a slug, a project id or
+                                      an alias (viafabric, simple-voice-chat, fabric-api, sodium, lithium, modmenu).
+                                      Newest release for the profile's Minecraft version and loader, required
+                                      dependencies included, SHA-512 verified; nothing is signed.
+                                      --prerelease: a beta or alpha where there is no release; --allow-fresh:
+                                      also builds and files less than 48 hours old; --dry-run: only show the plan
+  profile check <id>                  ask Modrinth about the hash of every jar in mods/: known, unknown, fresh
   profile lock <id>                   record the current mods/ directory in the manifest (and say which
                                       sensitive Java APIs each updated mod newly refers to)
   profile audit <id>                  list, per mod jar, the sensitive APIs its classes refer to
@@ -1042,6 +1050,7 @@ fn key_command(args: &mut Args, paths: &Paths) -> Result<()> {
 fn profile_command(args: &mut Args, paths: &Paths, sub: &str, id: &str) -> Result<()> {
     validate_id(id)?;
     match sub {
+        "add" | "check" => return crate::profile::catalog::command(&mut args.parser, paths, sub, id),
         "new" => {
             let (mut minecraft, mut kind, mut loader_version) = (None, None, None);
             args.flags(|name, a| {

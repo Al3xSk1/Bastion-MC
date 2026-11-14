@@ -239,6 +239,59 @@ fn zip_archive(entries: &[(&str, &[u8])], deflate: bool) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
+/// A class file whose constant pool names its own class, `java.net.Socket`,
+/// `Runtime.exec` and the string "sun.misc.Unsafe".
+fn class_file() -> Vec<u8> {
+    let utf8 = |text: &str| {
+        let mut entry = vec![1];
+        entry.extend_from_slice(&(text.len() as u16).to_be_bytes());
+        entry.extend_from_slice(text.as_bytes());
+        entry
+    };
+    let pool: Vec<Vec<u8>> = vec![
+        utf8("mod/Main"),          // 1
+        vec![7, 0, 1],             // 2: class mod/Main
+        utf8("java/net/Socket"),   // 3
+        vec![7, 0, 3],             // 4
+        utf8("java/lang/Runtime"), // 5
+        vec![7, 0, 5],             // 6
+        utf8("exec"),              // 7
+        utf8("()V"),               // 8
+        vec![12, 0, 7, 0, 8],      // 9: name and type
+        vec![10, 0, 6, 0, 9],      // 10: Runtime.exec
+        utf8("sun.misc.Unsafe"),   // 11
+        vec![8, 0, 11],            // 12: a string
+    ];
+    let mut out = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52];
+    out.extend_from_slice(&((pool.len() + 1) as u16).to_be_bytes());
+    out.extend(pool.into_iter().flatten());
+    out.extend_from_slice(&[0, 0x21, 0, 2]); // access flags, this class
+    out.extend_from_slice(&[0; 10]); // super class, interfaces, fields, methods, attributes
+    out
+}
+
+/// A jar with the given entries, deflated or stored: a zip archive like any other.
+fn jar(entries: &[(&str, &[u8])], deflated: bool) -> Vec<u8> {
+    zip_archive(entries, deflated)
+}
+
+const MOD_JSON: &[u8] =
+    br#"{"schemaVersion":1,"id":"example-mod","version":"1.0","depends":{"fabricloader":">=0.19"}}"#;
+
+/// A mod jar as Fabric mods are built: metadata, a class, a native library, and a jar inside.
+fn mod_jar(deflated: bool) -> Vec<u8> {
+    let inner = jar(&[("lib/Helper.class", &class_file()), ("natives/libhelper.so", b"\x7fELF")], deflated);
+    jar(
+        &[
+            ("fabric.mod.json", MOD_JSON),
+            ("mod/Main.class", &class_file()),
+            ("META-INF/jars/helper-1.2.jar", &inner),
+            ("assets/example/icon.png", &[1, 2, 3]),
+        ],
+        deflated,
+    )
+}
+
 fn seeds(harness: &str) -> Vec<Vec<u8>> {
     let text = |s: &str| s.as_bytes().to_vec();
     match harness {
@@ -391,6 +444,33 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             },
             text("diag zoom \u{1b}[2J\u{1b}]0;title\u{7}\u{202e}text\n").repeat(40),
         ],
+        "registry" => {
+            // A build, a project, a list of builds and a hash lookup, shaped like Modrinth's answers.
+            let sha512 = "090e8b47b413523b8682c3953beb6d99e5a92473a8d0580bdbf6a057352aadb8ad8b7a2d08f36c99c14ed3294923102c45724c88b24d697a05b729925ce03de3";
+            let version = format!(
+                "{{\"game_versions\":[\"26.2\",\"26.3\"],\"loaders\":[\"fabric\"],\"id\":\"z1FVDMnq\",\"project_id\":\"YlKdE5VK\",\"version_number\":\"0.4.22+188-26.x\",\"changelog\":null,\"date_published\":\"2026-10-22T19:11:11.566967Z\",\"downloads\":7,\"version_type\":\"alpha\",\"status\":\"listed\",\"files\":[{{\"hashes\":{{\"sha1\":\"602797ada2a9bcc4aaecbfdd2f89e4c9397787cc\",\"sha512\":\"{sha512}\"}},\"url\":\"https://cdn.modrinth.com/data/YlKdE5VK/versions/z1FVDMnq/ViaFabric-0.4.22%2B188-26.x.jar\",\"filename\":\"ViaFabric-0.4.22+188-26.x.jar\",\"primary\":true,\"size\":5916758,\"file_type\":null}}],\"dependencies\":[{{\"version_id\":null,\"project_id\":\"P7dR8mSH\",\"file_name\":null,\"dependency_type\":\"required\"}},{{\"version_id\":\"Zns5SSRA\",\"project_id\":null,\"file_name\":\"x.jar\",\"dependency_type\":\"optional\"}}]}}"
+            );
+            vec![
+                text(&version),
+                text(
+                    "{\"id\":\"YlKdE5VK\",\"slug\":\"viafabric\",\"project_type\":\"mod\",\"title\":\"ViaFabric\",\"status\":\"approved\",\"license\":{\"id\":\"GPL-3.0-only\",\"name\":\"GNU General Public License v3.0 only\",\"url\":null},\"versions\":[\"z1FVDMnq\"]}",
+                ),
+                text(&format!("[{version},{version}]")),
+                text(&format!("{{\"{sha512}\":{version}}}")),
+                text("2026-10-22T19:11:11.566967Z"),
+                text("ViaFabric-0.4.22%2B188-26.x.jar"),
+                text("https://cdn.modrinth.com/data/AABBCCDD/versions/z1FVDMnq/a.jar"),
+            ]
+        }
+        // Stored as well as deflated: in a stored archive a mutation lands in the entry it
+        // hits; in a deflated one it mostly breaks the stream.
+        "jar" => vec![
+            mod_jar(false),
+            mod_jar(true),
+            class_file(),
+            MOD_JSON.to_vec(),
+            text(r#"{"schema_version":1,"quilt_loader":{"id":"example_mod","version":"1.0"}}"#),
+        ],
         other => panic!("no seeds for {other}"),
     }
 }
@@ -435,7 +515,8 @@ fn run(name: &str) {
 
 #[test]
 fn every_harness_has_a_test_here() {
-    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp", "companion"];
+    let tested =
+        ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp", "companion", "registry", "jar"];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
@@ -491,6 +572,52 @@ fn datagram_relay_decisions() {
 #[test]
 fn companion_channel_reader() {
     run("companion");
+}
+
+#[test]
+fn mod_registry_answers() {
+    run("registry");
+}
+
+/// The starting points of the registry harness are answers its parsers accept in full.
+#[test]
+fn the_registry_starting_points_are_accepted() {
+    use bastion_mc::profile::modrinth;
+    let inputs = seeds("registry");
+    let version = modrinth::parse_version(&inputs[0]).expect("a build");
+    let jar = version.primary_jar().expect("its file passes every check");
+    assert_eq!((jar.filename.as_str(), jar.size), ("ViaFabric-0.4.22+188-26.x.jar", 5_916_758));
+    assert_eq!(version.dependencies.len(), 2);
+    assert_eq!(modrinth::parse_project(&inputs[1]).expect("a project").license, "GPL-3.0-only");
+    assert_eq!(modrinth::parse_versions(&inputs[2]).expect("a list of builds").len(), 2);
+    let lookup = modrinth::parse_hash_lookup(&inputs[3], std::slice::from_ref(&jar.sha512)).expect("a hash lookup");
+    assert!(lookup[&jar.sha512].file_with_sha512(&jar.sha512).is_some_and(|file| file.is_ok()));
+    assert_eq!(modrinth::parse_timestamp(std::str::from_utf8(&inputs[4]).unwrap()).unwrap(), 1_792_696_271);
+}
+
+#[test]
+fn mod_jars_and_class_files() {
+    run("jar");
+}
+
+/// The starting points of the jar harness are a jar the capability scan reads in full.
+#[test]
+fn the_jar_starting_points_are_scanned_in_full() {
+    use bastion_mc::profile::capabilities;
+    for (n, bytes) in seeds("jar")[..2].iter().enumerate() {
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("robustness-seed-{n}.jar"));
+        std::fs::write(&path, bytes).unwrap();
+        let report = capabilities::scan_jar(&path).expect("a jar");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(report.mod_id.as_deref(), Some("example-mod"));
+        assert_eq!((report.classes, report.nested.len()), (2, 1), "{report:?}");
+        assert_eq!(report.natives, ["META-INF/jars/helper-1.2.jar!/natives/libhelper.so"]);
+        // Both class files are the same class, so each capability is counted once.
+        for capability in ["network", "runs programs", "raw memory (named in a string)"] {
+            assert_eq!(report.capabilities.get(capability).map(Vec::as_slice), Some(&["mod.Main".to_string()][..]));
+        }
+        assert!(report.unreadable.is_empty(), "{:?}", report.unreadable);
+    }
 }
 
 /// Mutation only explores a parser if it starts from inputs the parser accepts.

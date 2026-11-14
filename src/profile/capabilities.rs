@@ -433,6 +433,11 @@ pub fn scan_jar(path: &Path) -> Result<JarReport> {
 }
 
 /// identity → report, for every `*.jar` in `mods_dir`.
+///
+/// Two jars can go by one identity: the same mod id in both, or a jar that declares none
+/// and whose file name begins like another's id. Neither may hide the other from a report
+/// that is read before signing, so the later one (by file name) is filed under its
+/// identity followed by its file name.
 pub fn scan_mods(mods_dir: &Path) -> Result<BTreeMap<String, (String, JarReport)>> {
     let mut out = BTreeMap::new();
     let entries = match std::fs::read_dir(mods_dir) {
@@ -446,7 +451,13 @@ pub fn scan_mods(mods_dir: &Path) -> Result<BTreeMap<String, (String, JarReport)
     for name in names {
         crate::paths::validate_file_name(&name)?;
         let report = scan_jar(&mods_dir.join(&name))?;
-        out.insert(report.identity(&name), (name, report));
+        let mut identity = report.identity(&name);
+        if out.contains_key(&identity) {
+            // File names are unique and hold neither a space nor a bracket, identities
+            // hold neither: this key cannot be taken.
+            identity = format!("{identity} ({name})");
+        }
+        out.insert(identity, (name, report));
     }
     Ok(out)
 }
@@ -534,6 +545,55 @@ pub fn changes(before: &Recorded, scanned: &BTreeMap<String, (String, JarReport)
         }
     }
     lines
+}
+
+// ---------------------------------------------------------------- robustness harness
+
+/// Arbitrary bytes as a jar, as a class file and as mod metadata.
+///
+/// Since `profile add`, what this module reads is no longer only a jar the user copied
+/// into `mods/` but also one that came from a registry a moment ago. Whatever the bytes
+/// are, a scan must end, and everything it hands on to be printed - the mod id, class
+/// names, entry names, its own complaints - must be free of control characters; a mod id
+/// must be one that can serve as an identity.
+#[doc(hidden)]
+pub fn fuzz(data: &[u8]) {
+    let clean = |text: &str| !text.chars().any(char::is_control);
+    let mod_id_ok = |id: &str| {
+        (1..=64).contains(&id.len())
+            && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+    };
+    let check = |report: &JarReport| {
+        assert!(report.mod_id.as_deref().is_none_or(mod_id_ok), "{:?}", report.mod_id);
+        for (capability, classes) in &report.capabilities {
+            let rule = capability.trim_end_matches(" (named in a string)");
+            assert!(RULES.iter().any(|(name, _, _)| *name == rule), "{capability:?}");
+            assert!(!classes.is_empty() && classes.len() <= EXAMPLES);
+            assert!(report.counts.get(capability).is_some_and(|total| *total >= classes.len()));
+            assert!(classes.iter().all(|class| clean(class)), "{classes:?}");
+        }
+        for text in report.natives.iter().chain(&report.nested).chain(&report.unreadable) {
+            assert!(clean(text), "{text:?}");
+        }
+        assert!(clean(&report.identity("Some-Mod_1.2+x.jar")));
+    };
+    // As a jar. The budget is a fraction of the real one: starting points are small, and a
+    // mutation that inflates must not make a test run crawl.
+    let mut report = JarReport::default();
+    let mut budget = 16 << 20;
+    match scan_archive(std::io::Cursor::new(data), "", 0, &mut budget, &mut report) {
+        Ok(()) => check(&report),
+        Err(error) => assert!(clean(&error.to_string()), "{error}"),
+    }
+    // As a class file on its own.
+    let mut report = JarReport::default();
+    scan_class(&mut report, data, "fuzz/Input.class");
+    assert!(report.classes <= 1);
+    check(&report);
+    // As a mod's metadata.
+    for quilt in [false, true] {
+        assert!(mod_id(data, quilt).as_deref().is_none_or(mod_id_ok));
+    }
 }
 
 #[cfg(test)]
@@ -670,6 +730,40 @@ pub(crate) mod tests {
         assert_eq!(report.natives, ["META-INF/jars/helper-1.2.jar!/natives/libhelper.so", "windows/helper.dll"]);
         assert_eq!(report.unreadable.len(), 2, "{:?}", report.unreadable);
         assert!(scan_jar(Path::new("/nonexistent.jar")).is_err());
+    }
+
+    #[test]
+    fn two_jars_that_go_by_one_identity_are_both_reported() {
+        let dir = std::env::temp_dir()
+            .join(format!("bastion-capabilities-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let with_id = jar(&[
+            ("fabric.mod.json", br#"{"id":"alpha"}"#.to_vec()),
+            ("a/A.class", class_file("a/A", &["java/net/Socket"], &[], &[])),
+        ]);
+        // No mod id: its identity is its file name up to the version, which is "alpha" too.
+        let without_id = jar(&[("b/B.class", class_file("b/B", &["java/lang/ProcessBuilder"], &[], &[]))]);
+        std::fs::write(dir.join("alpha-1.0.jar"), &with_id).unwrap();
+        std::fs::write(dir.join("alpha-9.jar"), &without_id).unwrap();
+        std::fs::write(dir.join("alpha-fork.jar"), &with_id).unwrap();
+        std::fs::write(dir.join("other-2.jar"), &without_id).unwrap();
+
+        let scanned = scan_mods(&dir).unwrap();
+        let files: Vec<(&str, &str)> = scanned.iter().map(|(id, (file, _))| (id.as_str(), file.as_str())).collect();
+        assert_eq!(
+            files,
+            [
+                ("alpha", "alpha-1.0.jar"),
+                ("alpha (alpha-9.jar)", "alpha-9.jar"),
+                ("alpha (alpha-fork.jar)", "alpha-fork.jar"),
+                ("other", "other-2.jar"),
+            ]
+        );
+        assert!(scanned["alpha"].1.capabilities.contains_key("network"));
+        assert!(scanned["alpha (alpha-9.jar)"].1.capabilities.contains_key("runs programs"));
+        // What is recorded for the next comparison holds every jar as well.
+        assert_eq!(Recorded::of(&scanned).mods.len(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

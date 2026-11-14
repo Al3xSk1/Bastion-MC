@@ -1,7 +1,7 @@
 //! Authoring side of curated profiles: draft a manifest, lock the mods directory into it,
 //! sign it. None of this is trusted at launch time — only the resulting signature is.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -180,7 +180,7 @@ pub async fn new_profile(
     Ok(dir)
 }
 
-fn read_draft(paths: &Paths, id: &str) -> Result<(PathBuf, ProfileManifest)> {
+pub(super) fn read_draft(paths: &Paths, id: &str) -> Result<(PathBuf, ProfileManifest)> {
     let dir = paths.instance(id)?;
     let path = dir.join(MANIFEST_FILE);
     let bytes = util::read_small_file(&path, super::manifest::MAX_MANIFEST_BYTES)?;
@@ -193,8 +193,26 @@ fn read_draft(paths: &Paths, id: &str) -> Result<(PathBuf, ProfileManifest)> {
 /// Replace the manifest's mod list with what is in `mods/` right now, bump the serial and
 /// discard the old signature. Returns the new mod list for the user to review.
 pub fn lock(paths: &Paths, id: &str) -> Result<ProfileManifest> {
+    lock_with(paths, id, &BTreeMap::new())
+}
+
+/// [`lock`], recording where files came from. `sources` (file name → address) names the
+/// files that were just put into `mods/` by `profile add`. Every other entry keeps the
+/// source it had for as long as the file is byte for byte the one that was recorded: a
+/// source says where *these* bytes came from, so it does not survive a change of content.
+pub fn lock_with(paths: &Paths, id: &str, sources: &BTreeMap<String, String>) -> Result<ProfileManifest> {
     let (dir, mut manifest) = read_draft(paths, id)?;
-    let scanned = mods::scan_mods_dir(&dir.join("mods"))?;
+    let mut scanned = mods::scan_mods_dir(&dir.join("mods"))?;
+    for entry in &mut scanned {
+        let recorded = || {
+            manifest
+                .mods
+                .iter()
+                .find(|old| old.file == entry.file && old.sha256 == entry.sha256 && old.size == entry.size)
+                .and_then(|old| old.source.clone())
+        };
+        entry.source = sources.get(&entry.file).cloned().or_else(recorded);
+    }
     if scanned != manifest.mods {
         manifest.mods = scanned;
         manifest.serial += 1;
@@ -267,6 +285,41 @@ mod tests {
         assert_eq!(lock(&p, "perf").unwrap().serial, 3);
         assert!(!dir.join(SIGNATURE_FILE).exists());
         assert!(instance::load(&p, "perf").is_err(), "unsigned after re-lock");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_recorded_source_stays_with_the_bytes_it_describes() {
+        let (root, p) = paths("source");
+        let dir = instance::create(&p, "perf", None).unwrap();
+        std::fs::create_dir(dir.join("mods")).unwrap();
+        let mut draft = sample("perf");
+        draft.mods.clear();
+        std::fs::write(dir.join(MANIFEST_FILE), draft.to_bytes().unwrap()).unwrap();
+        std::fs::write(dir.join("mods/a.jar"), b"AAAA").unwrap();
+        std::fs::write(dir.join("mods/b.jar"), b"BBBB").unwrap();
+
+        let from = "https://cdn.modrinth.com/data/AABBCCDD/versions/EEFFGGHH/a.jar";
+        let sources = BTreeMap::from([("a.jar".to_string(), from.to_string())]);
+        let locked = lock_with(&p, "perf", &sources).unwrap();
+        assert_eq!(locked.serial, 2);
+        let source = |m: &ProfileManifest, file: &str| m.mods.iter().find(|e| e.file == file).unwrap().source.clone();
+        assert_eq!(source(&locked, "a.jar").as_deref(), Some(from));
+        assert_eq!(source(&locked, "b.jar"), None);
+
+        // A plain lock afterwards changes nothing: same serial, and the source is still there.
+        let again = lock(&p, "perf").unwrap();
+        assert_eq!(again.serial, 2, "a recorded source must not look like a changed mod list");
+        assert_eq!(source(&again, "a.jar").as_deref(), Some(from));
+
+        // Other bytes under the same name are not what the source described.
+        std::fs::write(dir.join("mods/a.jar"), b"AAAB").unwrap();
+        let changed = lock(&p, "perf").unwrap();
+        assert_eq!(changed.serial, 3);
+        assert_eq!(source(&changed, "a.jar"), None);
+        // A source that is not an https address never gets into a manifest.
+        let bad = BTreeMap::from([("b.jar".to_string(), "http://example.org/b.jar".to_string())]);
+        assert!(lock_with(&p, "perf", &bad).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

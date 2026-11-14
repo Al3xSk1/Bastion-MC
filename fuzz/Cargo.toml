@@ -87,3 +87,17 @@ path = "fuzz_targets/companion.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "registry"
+path = "fuzz_targets/registry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jar"
+path = "fuzz_targets/jar.rs"
+test = false
+doc = false
+bench = false
