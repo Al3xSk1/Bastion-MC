@@ -31,6 +31,19 @@
 //! diag <feature> <free text>
 //! ```
 //!
+//! **Protocol 2** (the phone; docs/notes/round4-contract.md): a connection whose hello says
+//! `2` — when this launch serves the phone — switches to frames after that line, in both
+//! directions: `u32 length (big-endian; kind byte and payload) | u8 kind | payload`. From the
+//! mod: COMMAND (0x01, a command line of at most [`MAX_COMMAND`] bytes, handed to the
+//! [`Dispatcher`]) and DIAG (0x02, a protocol 1 `diag` line of at most [`MAX_DIAG`] bytes).
+//! To the mod: STATE, FRAME and NOTICE ([`encode`]). A frame of another kind or over its
+//! length ends the connection (said once); at most [`PHONE_MESSAGES_PER_SECOND`] frames and
+//! [`PHONE_BYTES_PER_SECOND`] are read per second from all connections together (frames over
+//! the rate are counted and dropped; reading pauses for bytes). The newest connection that
+//! says hello 2 is the phone: what the services send goes there, and when it cannot keep up,
+//! a newer state of an app or picture of a slot replaces the one still waiting. A hello of
+//! protocol 1 is served exactly as before.
+//!
 //! Not guaranteed: that a hello is followed by anything, that diagnostics are true, or
 //! that silence means the mod is absent — it works without the channel.
 
@@ -41,16 +54,33 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     error::{Context, Error, Result},
     paths::APP,
+    phone::{Outbound, dispatch::Dispatcher},
     util,
 };
 
-/// Protocol version this launcher understands.
+/// The protocol of a hello that only reports (served by every launch).
 pub const PROTOCOL: u32 = 1;
+/// The protocol of the phone (framed, both directions).
+pub const PHONE_PROTOCOL: u32 = 2;
+/// Frame kinds (protocol 2).
+pub const KIND_COMMAND: u8 = 0x01;
+pub const KIND_DIAG: u8 = 0x02;
+pub const KIND_STATE: u8 = 0x81;
+pub const KIND_FRAME: u8 = 0x82;
+pub const KIND_NOTICE: u8 = 0x83;
+/// Longest payloads the mod may send, per kind.
+pub const MAX_COMMAND: usize = crate::phone::MAX_COMMAND_BYTES;
+pub const MAX_DIAG: usize = 512;
+/// What all connections together may send in protocol 2, per second.
+pub const PHONE_MESSAGES_PER_SECOND: u32 = 50;
+pub const PHONE_BYTES_PER_SECOND: usize = 200 * 1024;
+/// Notices waiting for a phone that does not keep up; older ones are dropped.
+const MAX_WAITING_NOTICES: usize = 32;
 /// Longest line, in bytes, without its `\n` (a `\r` before it counts towards the limit).
 pub const MAX_LINE: usize = 512;
 /// Connections open at the same time.
@@ -157,7 +187,11 @@ impl Message {
         match self {
             Message::Hello { protocol, version, features } => format!(
                 "hello: mod version {version}, protocol {protocol}{}, features: {}",
-                if *protocol == PROTOCOL { "" } else { " (this launcher speaks 1)" },
+                if *protocol == PROTOCOL || *protocol == PHONE_PROTOCOL {
+                    ""
+                } else {
+                    " (this launcher speaks 1 and 2)"
+                },
                 if features.is_empty() { "none".to_string() } else { features.join(", ") }
             ),
             Message::Diagnostic { feature, text } => format!("{feature}: {text}"),
@@ -216,6 +250,136 @@ impl Lines {
     }
 }
 
+// ---------------------------------------------------------------- protocol 2 frames
+
+/// Cuts a protocol 2 byte stream (from the mod) into frames while holding at most one frame
+/// of at most [`MAX_COMMAND`] bytes.
+#[derive(Default)]
+pub struct Frames {
+    header: [u8; 5],
+    have: usize,
+    kind: u8,
+    want: usize,
+    payload: Vec<u8>,
+}
+
+impl Frames {
+    /// Bytes currently held.
+    pub fn buffered(&self) -> usize {
+        self.have.min(5) + self.payload.len()
+    }
+
+    /// Feeds bytes; `each` gets every complete frame (kind, payload). The first frame that is
+    /// not one the mod may send ends the stream: the reason, and nothing after it is read.
+    pub fn feed(&mut self, data: &[u8], mut each: impl FnMut(u8, &[u8])) -> std::result::Result<(), String> {
+        let mut at = 0;
+        while at < data.len() {
+            if self.have < 5 {
+                let n = (5 - self.have).min(data.len() - at);
+                self.header[self.have..self.have + n].copy_from_slice(&data[at..at + n]);
+                self.have += n;
+                at += n;
+                if self.have < 5 {
+                    break;
+                }
+                let length = u32::from_be_bytes([self.header[0], self.header[1], self.header[2], self.header[3]]);
+                self.kind = self.header[4];
+                let max = match self.kind {
+                    KIND_COMMAND => MAX_COMMAND,
+                    KIND_DIAG => MAX_DIAG,
+                    kind => return Err(format!("a frame of a kind the mod does not send ({kind:#04x})")),
+                };
+                if length == 0 || (length - 1) as usize > max {
+                    return Err(format!("a frame of kind {:#04x} announcing {length} bytes", self.kind));
+                }
+                self.want = (length - 1) as usize;
+                self.payload.clear();
+            } else {
+                let n = (self.want - self.payload.len()).min(data.len() - at);
+                self.payload.extend_from_slice(&data[at..at + n]);
+                at += n;
+            }
+            if self.have == 5 && self.payload.len() == self.want {
+                each(self.kind, &self.payload);
+                self.have = 0;
+                self.payload.clear();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A message for the phone as it goes on the wire.
+pub fn encode(message: &Outbound) -> Vec<u8> {
+    let (kind, app, body): (u8, &str, Vec<u8>) = match message {
+        Outbound::State { app, json } => (KIND_STATE, app, json.as_bytes().to_vec()),
+        Outbound::Frame { app, slot, width, height, format, bytes } => {
+            let mut body = Vec::with_capacity(6 + bytes.len());
+            body.push(*slot);
+            body.extend_from_slice(&width.to_be_bytes());
+            body.extend_from_slice(&height.to_be_bytes());
+            body.push(*format as u8);
+            body.extend_from_slice(bytes);
+            (KIND_FRAME, app, body)
+        }
+        Outbound::Notice { app, text } => (KIND_NOTICE, app, text.as_bytes().to_vec()),
+    };
+    let length = 1 + app.len() + 1 + body.len();
+    let mut out = Vec::with_capacity(4 + length);
+    out.extend_from_slice(&(length as u32).to_be_bytes());
+    out.push(kind);
+    out.extend_from_slice(app.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// What waits for a phone that reads slowly: a newer state of an app, or picture of an
+/// app's slot, takes the place of the one still waiting; notices queue (the oldest go
+/// beyond [`MAX_WAITING_NOTICES`]).
+#[derive(Default)]
+pub struct Waiting {
+    queue: std::collections::VecDeque<Outbound>,
+}
+
+impl Waiting {
+    pub fn push(&mut self, message: Outbound) {
+        match &message {
+            Outbound::State { app, .. } => {
+                self.queue.retain(|w| !matches!(w, Outbound::State { app: a, .. } if a == app));
+            }
+            Outbound::Frame { app, slot, .. } => {
+                self.queue.retain(|w| !matches!(w, Outbound::Frame { app: a, slot: s, .. } if a == app && s == slot));
+            }
+            Outbound::Notice { .. } => {
+                let notices = self.queue.iter().filter(|w| matches!(w, Outbound::Notice { .. })).count();
+                if notices >= MAX_WAITING_NOTICES
+                    && let Some(oldest) = self.queue.iter().position(|w| matches!(w, Outbound::Notice { .. }))
+                {
+                    self.queue.remove(oldest);
+                }
+            }
+        }
+        self.queue.push_back(message);
+    }
+
+    pub fn pop(&mut self) -> Option<Outbound> {
+        self.queue.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+}
+
 // ---------------------------------------------------------------- the session
 
 /// Whose statement a log line is.
@@ -239,6 +403,12 @@ pub struct Stats {
     pub too_long: u64,
     /// Lines that were understood or quotable but not written: over the rate or the total.
     pub dropped: u64,
+    /// Protocol 2: frames read, commands among them, frames over the global rate, and
+    /// connections ended for breaking the framing.
+    pub frames: u64,
+    pub commands: u64,
+    pub over_rate: u64,
+    pub broken: u64,
 }
 
 /// Everything the launcher keeps about the channel, for all connections together. Time is
@@ -253,17 +423,52 @@ pub struct Session {
     logged: u64,
     /// The number of dropped lines at which the launcher next says that it is dropping.
     next_drop_note: u64,
+    /// The phone's dispatcher, when this launch serves protocol 2.
+    phone: Option<Dispatcher>,
+    /// Protocol 2 frames from all connections: a token bucket in thousandths of a frame.
+    frame_tokens: u64,
+    frame_refilled: Duration,
+    /// Bytes from all connections: a token bucket in bytes.
+    byte_tokens: u64,
+    byte_refilled: Duration,
+    /// Said once each: a frame over the rate, a connection that broke the framing.
+    noted_rate: bool,
+    noted_broken: bool,
 }
 
 /// One accepted connection.
 pub struct Connection {
     number: u64,
     lines: Lines,
+    mode: Mode,
+}
+
+/// What a connection speaks.
+enum Mode {
+    /// Lines (protocol 1, and every connection until its hello).
+    Text,
+    /// Frames, after a hello of protocol 2.
+    Phone(Frames),
+    /// It broke the framing: nothing more is read.
+    Broken,
 }
 
 impl Connection {
     pub fn buffered(&self) -> usize {
-        self.lines.buffered()
+        match &self.mode {
+            Mode::Phone(frames) => self.lines.buffered() + frames.buffered(),
+            _ => self.lines.buffered(),
+        }
+    }
+
+    /// Whether it speaks protocol 2 (it is, or was, the phone).
+    pub fn is_phone(&self) -> bool {
+        matches!(self.mode, Mode::Phone(_))
+    }
+
+    /// Whether it broke the framing (the reader closes it).
+    pub fn is_broken(&self) -> bool {
+        matches!(self.mode, Mode::Broken)
     }
 }
 
@@ -277,6 +482,62 @@ impl Session {
             refilled: Duration::ZERO,
             logged: 0,
             next_drop_note: 1,
+            phone: None,
+            frame_tokens: u64::from(PHONE_MESSAGES_PER_SECOND) * 1000,
+            frame_refilled: Duration::ZERO,
+            byte_tokens: PHONE_BYTES_PER_SECOND as u64,
+            byte_refilled: Duration::ZERO,
+            noted_rate: false,
+            noted_broken: false,
+        }
+    }
+
+    /// A session that serves the phone (protocol 2) through `dispatcher`.
+    pub fn with_phone(logger: Logger, dispatcher: Dispatcher) -> Self {
+        Session { phone: Some(dispatcher), ..Session::new(logger) }
+    }
+
+    /// The phone's dispatcher, if this session serves it.
+    pub fn phone(&self) -> Option<&Dispatcher> {
+        self.phone.as_ref()
+    }
+
+    /// A phone connection is ready to be written to: greet it (its state and every app's).
+    pub fn greet_phone(&mut self) {
+        if let Some(dispatcher) = self.phone.as_mut() {
+            dispatcher.hello();
+        }
+    }
+
+    /// `bytes` were read at `now`, from any connection: how long to pause so that all of
+    /// them together stay within [`PHONE_BYTES_PER_SECOND`].
+    pub fn charge(&mut self, bytes: usize, now: Duration) -> Duration {
+        let capacity = PHONE_BYTES_PER_SECOND as u64;
+        let elapsed = now.saturating_sub(self.byte_refilled).as_millis().min(u128::from(u32::MAX)) as u64;
+        self.byte_refilled = self.byte_refilled.max(now);
+        self.byte_tokens = (self.byte_tokens + elapsed * capacity / 1000).min(capacity);
+        let bytes = bytes as u64;
+        if self.byte_tokens >= bytes {
+            self.byte_tokens -= bytes;
+            Duration::ZERO
+        } else {
+            let missing = bytes - self.byte_tokens;
+            self.byte_tokens = 0;
+            Duration::from_millis(missing * 1000 / capacity + 1)
+        }
+    }
+
+    /// Whether one more protocol 2 frame may be acted on at `now`.
+    fn frame_allowed(&mut self, now: Duration) -> bool {
+        let capacity = u64::from(PHONE_MESSAGES_PER_SECOND) * 1000;
+        let elapsed = now.saturating_sub(self.frame_refilled).as_millis().min(u128::from(u32::MAX)) as u64;
+        self.frame_refilled = self.frame_refilled.max(now);
+        self.frame_tokens = (self.frame_tokens + elapsed * u64::from(PHONE_MESSAGES_PER_SECOND)).min(capacity);
+        if self.frame_tokens >= 1000 {
+            self.frame_tokens -= 1000;
+            true
+        } else {
+            false
         }
     }
 
@@ -292,7 +553,7 @@ impl Session {
         }
         self.open += 1;
         self.stats.accepted += 1;
-        Some(Connection { number: self.stats.accepted, lines: Lines::default() })
+        Some(Connection { number: self.stats.accepted, lines: Lines::default(), mode: Mode::Text })
     }
 
     pub fn close(&mut self, connection: Connection) {
@@ -327,10 +588,91 @@ impl Session {
         false
     }
 
-    /// Bytes from `connection`, read at `now`.
-    pub fn received(&mut self, connection: &mut Connection, data: &[u8], now: Duration) {
+    /// Bytes from `connection`, read at `now`. True when the connection has just become the
+    /// phone (its hello said protocol 2 and this session serves the phone): its writer is due.
+    pub fn received(&mut self, connection: &mut Connection, data: &[u8], now: Duration) -> bool {
+        let mut became_phone = false;
+        let mut rest = data;
+        while !rest.is_empty() {
+            match &mut connection.mode {
+                Mode::Broken => return became_phone,
+                Mode::Phone(_) => {
+                    let Mode::Phone(mut frames) = std::mem::replace(&mut connection.mode, Mode::Broken) else {
+                        unreachable!()
+                    };
+                    let number = connection.number;
+                    let fed = frames.feed(rest, |kind, payload| self.frame(number, kind, payload, now));
+                    match fed {
+                        Ok(()) => connection.mode = Mode::Phone(frames),
+                        Err(why) => self.broke(number, &why),
+                    }
+                    return became_phone;
+                }
+                Mode::Text => {
+                    // Up to and including the next line end; the rest may be frames.
+                    let end = rest.iter().position(|b| *b == b'\n').map_or(rest.len(), |at| at + 1);
+                    let (chunk, after) = rest.split_at(end);
+                    rest = after;
+                    if self.lines_received(connection, chunk, now) {
+                        connection.mode = Mode::Phone(Frames::default());
+                        became_phone = true;
+                    }
+                }
+            }
+        }
+        became_phone
+    }
+
+    /// A connection broke the framing: counted, said once, and it is read no more.
+    fn broke(&mut self, number: u64, why: &str) {
+        self.stats.broken += 1;
+        if !self.noted_broken {
+            self.noted_broken = true;
+            (self.logger)(
+                Voice::Launcher,
+                format!(
+                    "companion channel #{number}: closed — {} (further such connections are only counted)",
+                    util::sanitize_line(why.as_bytes(), 120)
+                ),
+            );
+        }
+    }
+
+    /// One protocol 2 frame from the mod.
+    fn frame(&mut self, number: u64, kind: u8, payload: &[u8], now: Duration) {
+        self.stats.frames += 1;
+        if !self.frame_allowed(now) {
+            self.stats.over_rate += 1;
+            if !self.noted_rate {
+                self.noted_rate = true;
+                (self.logger)(
+                    Voice::Launcher,
+                    format!(
+                        "companion channel #{number}: more than {PHONE_MESSAGES_PER_SECOND} messages a second; the \
+                         excess is dropped (and only counted from now on)"
+                    ),
+                );
+            }
+            return;
+        }
+        match kind {
+            KIND_COMMAND => {
+                self.stats.commands += 1;
+                if let Some(dispatcher) = self.phone.as_mut() {
+                    let _ = dispatcher.command(payload, now);
+                }
+            }
+            _ => self.line(number, payload, now),
+        }
+    }
+
+    /// Lines of the text protocol: true when one of them was a hello of protocol 2 that
+    /// switches this connection to frames (only where the phone is served).
+    fn lines_received(&mut self, connection: &mut Connection, data: &[u8], now: Duration) -> bool {
         let number = connection.number;
         let mut lines = std::mem::take(&mut connection.lines);
+        let mut switch = false;
+        let phone = self.phone.is_some();
         lines.feed(data, |piece| match piece {
             Piece::TooLong => {
                 self.stats.too_long += 1;
@@ -344,31 +686,42 @@ impl Session {
                     );
                 }
             }
-            Piece::Line(line) => match parse_line(line) {
-                Some(message) => {
-                    match message {
-                        Message::Hello { .. } => self.stats.hellos += 1,
-                        Message::Diagnostic { .. } => self.stats.diagnostics += 1,
-                    }
-                    if self.may_log(now) {
-                        (self.logger)(Voice::Claimed, format!("companion channel #{number}: {}", message.describe()));
-                    }
+            Piece::Line(line) => {
+                if let Some(Message::Hello { protocol: PHONE_PROTOCOL, .. }) = parse_line(line) {
+                    switch = phone;
                 }
-                None => {
-                    self.stats.strangers += 1;
-                    if self.stats.strangers <= QUOTED_STRANGERS && self.may_log(now) {
-                        (self.logger)(
-                            Voice::Claimed,
-                            format!(
-                                "companion channel #{number}: not part of the protocol, ignored: {:?}",
-                                util::sanitize_line(line, 80)
-                            ),
-                        );
-                    }
-                }
-            },
+                self.line(number, line, now);
+            }
         });
         connection.lines = lines;
+        switch
+    }
+
+    /// One message of the text protocol (or a DIAG frame's line): parsed, counted, logged.
+    fn line(&mut self, number: u64, line: &[u8], now: Duration) {
+        match parse_line(line) {
+            Some(message) => {
+                match message {
+                    Message::Hello { .. } => self.stats.hellos += 1,
+                    Message::Diagnostic { .. } => self.stats.diagnostics += 1,
+                }
+                if self.may_log(now) {
+                    (self.logger)(Voice::Claimed, format!("companion channel #{number}: {}", message.describe()));
+                }
+            }
+            None => {
+                self.stats.strangers += 1;
+                if self.stats.strangers <= QUOTED_STRANGERS && self.may_log(now) {
+                    (self.logger)(
+                        Voice::Claimed,
+                        format!(
+                            "companion channel #{number}: not part of the protocol, ignored: {:?}",
+                            util::sanitize_line(line, 80)
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     /// One line for the end of the launch log.
@@ -379,10 +732,13 @@ impl Session {
             s.accepted, s.hellos, s.diagnostics
         );
         for (count, what) in [
+            (s.commands, "phone command(s)"),
             (s.strangers, "line(s) that are not part of the protocol"),
             (s.too_long, "over-long line(s)"),
             (s.dropped, "line(s) not logged (rate limit)"),
             (s.refused, "connection(s) refused (too many)"),
+            (s.over_rate, "frame(s) over the rate"),
+            (s.broken, "connection(s) closed for breaking the framing"),
         ] {
             if count > 0 {
                 text.push_str(&format!(", {count} {what}"));
@@ -488,11 +844,27 @@ impl Endpoint {
     /// so it works after the launcher has confined itself; the name should be gone by then
     /// ([`Endpoint::unlink`], which does need an unconfined launcher).
     pub fn serve(self, logger: Logger) -> Result<Serving> {
-        let session = Arc::new(Mutex::new(Session::new(logger)));
+        self.serve_phone(logger, None)
+    }
+
+    /// As [`Endpoint::serve`], and with `phone` the phone (protocol 2) as well: its commands
+    /// go to the dispatcher, and what its outbox's receiving end yields goes to the newest
+    /// connection that said hello 2.
+    pub fn serve_phone(self, logger: Logger, phone: Option<Phone>) -> Result<Serving> {
+        let (session, writer) = match phone {
+            Some(Phone { dispatcher, outbound }) => {
+                let session = Arc::new(Mutex::new(Session::with_phone(logger, dispatcher)));
+                let (sockets, takeovers) = tokio::sync::mpsc::channel(4);
+                let task = tokio::spawn(write_phone(outbound, takeovers, session.clone()));
+                (session, Some((sockets, task)))
+            }
+            None => (Arc::new(Mutex::new(Session::new(logger))), None),
+        };
         let listener = self.listener.try_clone().ctx(|| "duplicating the companion socket")?;
         let listener = tokio::net::UnixListener::from_std(listener).ctx(|| "registering the companion socket")?;
-        let task = tokio::spawn(accept_loop(listener, session.clone()));
-        Ok(Serving { session, task, _endpoint: self })
+        let sockets = writer.as_ref().map(|(sockets, _)| sockets.clone());
+        let task = tokio::spawn(accept_loop(listener, session.clone(), sockets));
+        Ok(Serving { session, task, writer: writer.map(|(_, task)| task), _endpoint: self })
     }
 }
 
@@ -502,10 +874,18 @@ impl Drop for Endpoint {
     }
 }
 
+/// What the phone needs to be served: its dispatcher, and the receiving end of the outbox
+/// its apps send with.
+pub struct Phone {
+    pub dispatcher: Dispatcher,
+    pub outbound: tokio::sync::mpsc::Receiver<Outbound>,
+}
+
 /// The channel while the game runs.
 pub struct Serving {
     session: Arc<Mutex<Session>>,
     task: tokio::task::JoinHandle<()>,
+    writer: Option<tokio::task::JoinHandle<()>>,
     _endpoint: Endpoint,
 }
 
@@ -514,10 +894,82 @@ impl Serving {
         locked(&self.session).stats.clone()
     }
 
+    /// The phone's summary line, if the phone is served.
+    pub fn phone_summary(&self) -> Option<String> {
+        locked(&self.session).phone().map(Dispatcher::summary)
+    }
+
     /// Stop reading; the summary line for the log.
     pub fn finish(self) -> String {
         self.task.abort();
+        if let Some(writer) = &self.writer {
+            writer.abort();
+        }
         locked(&self.session).summary()
+    }
+}
+
+/// Writes what the phone's apps send to the newest phone connection. Bytes go out a write
+/// at a time, and between two writes everything that has arrived meanwhile is taken in, so
+/// that a phone that reads slowly gets the newest state and picture of each app rather than
+/// every one in between ([`Waiting`]). A new phone connection takes over: what was waiting
+/// is dropped, and the dispatcher greets the newcomer (which sends every state again).
+async fn write_phone(
+    mut outbound: tokio::sync::mpsc::Receiver<Outbound>,
+    mut takeovers: tokio::sync::mpsc::Receiver<tokio::net::unix::OwnedWriteHalf>,
+    session: Arc<Mutex<Session>>,
+) {
+    let mut socket: Option<tokio::net::unix::OwnedWriteHalf> = None;
+    let mut waiting = Waiting::default();
+    let mut current: Vec<u8> = Vec::new();
+    let mut written = 0usize;
+    loop {
+        while let Ok(message) = outbound.try_recv() {
+            waiting.push(message);
+        }
+        if socket.is_some() && written == current.len() {
+            match waiting.pop() {
+                Some(next) => {
+                    current = encode(&next);
+                    written = 0;
+                }
+                None => {
+                    current.clear();
+                    written = 0;
+                }
+            }
+        }
+        let busy = socket.is_some() && written < current.len();
+        tokio::select! {
+            result = async {
+                let socket = socket.as_mut().expect("busy means a socket");
+                socket.write(&current[written..]).await
+            }, if busy => {
+                match result {
+                    Ok(0) | Err(_) => {
+                        socket = None;
+                        current.clear();
+                        written = 0;
+                        waiting.clear();
+                    }
+                    Ok(n) => written += n,
+                }
+            }
+            message = outbound.recv() => match message {
+                Some(message) => waiting.push(message),
+                None => return,
+            },
+            takeover = takeovers.recv() => match takeover {
+                Some(next) => {
+                    socket = Some(next);
+                    current.clear();
+                    written = 0;
+                    waiting.clear();
+                    locked(&session).greet_phone();
+                }
+                None => return,
+            },
+        }
     }
 }
 
@@ -537,7 +989,11 @@ fn locked(session: &Mutex<Session>) -> MutexGuard<'_, Session> {
     session.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-async fn accept_loop(listener: tokio::net::UnixListener, session: Arc<Mutex<Session>>) {
+async fn accept_loop(
+    listener: tokio::net::UnixListener,
+    session: Arc<Mutex<Session>>,
+    phone: Option<tokio::sync::mpsc::Sender<tokio::net::unix::OwnedWriteHalf>>,
+) {
     let start = Instant::now();
     // Owned here: when this task ends, every connection's reader ends with it.
     let mut readers = tokio::task::JoinSet::new();
@@ -552,7 +1008,7 @@ async fn accept_loop(listener: tokio::net::UnixListener, session: Arc<Mutex<Sess
                 let admitted = locked(&session).open();
                 match admitted {
                     Some(connection) => {
-                        readers.spawn(read_connection(stream, connection, session.clone(), start));
+                        readers.spawn(read_connection(stream, connection, session.clone(), start, phone.clone()));
                     }
                     // Closed unread; a peer that keeps trying is slowed to a crawl.
                     None => {
@@ -567,21 +1023,38 @@ async fn accept_loop(listener: tokio::net::UnixListener, session: Arc<Mutex<Sess
 }
 
 async fn read_connection(
-    mut stream: tokio::net::UnixStream,
+    stream: tokio::net::UnixStream,
     mut connection: Connection,
     session: Arc<Mutex<Session>>,
     start: Instant,
+    phone: Option<tokio::sync::mpsc::Sender<tokio::net::unix::OwnedWriteHalf>>,
 ) {
+    let (mut reader, writer) = stream.into_split();
+    // Kept until the connection becomes the phone, then handed to the phone's writer.
+    let mut writer = Some(writer);
     let mut buffer = [0u8; 4096];
     let (mut window, mut in_window) = (Instant::now(), 0usize);
     loop {
-        match stream.read(&mut buffer).await {
+        match reader.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                locked(&session).received(&mut connection, &buffer[..n], start.elapsed());
+                let (became_phone, broken, pause) = {
+                    let mut session = locked(&session);
+                    let became = session.received(&mut connection, &buffer[..n], start.elapsed());
+                    let pause = session.charge(n, start.elapsed());
+                    (became, connection.is_broken(), pause)
+                };
+                if broken {
+                    break;
+                }
+                if became_phone && let (Some(phone), Some(half)) = (&phone, writer.take()) {
+                    let _ = phone.send(half).await;
+                }
                 in_window += n;
                 if in_window >= BYTES_PER_SECOND {
                     tokio::time::sleep_until((window + Duration::from_secs(1)).into()).await;
+                } else if pause > Duration::ZERO {
+                    tokio::time::sleep(pause).await;
                 }
                 if window.elapsed() >= Duration::from_secs(1) {
                     (window, in_window) = (Instant::now(), 0);
@@ -635,6 +1108,105 @@ pub fn fuzz(data: &[u8]) {
     }
 }
 
+/// A frame as the mod sends it (for tests and the fuzz harness's seeds).
+#[doc(hidden)]
+pub fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = ((1 + payload.len()) as u32).to_be_bytes().to_vec();
+    out.push(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// An app for the harness: two verbs, records what reaches it.
+struct Probe(Arc<Mutex<Vec<String>>>);
+
+const PROBE_LIMITS: &[crate::phone::VerbLimit] = &[
+    crate::phone::VerbLimit { verb: "play", per_minute: 60, burst: 3 },
+    crate::phone::VerbLimit { verb: "search", per_minute: 60, burst: 3 },
+];
+
+impl crate::phone::PhoneApp for Probe {
+    fn name(&self) -> &'static str {
+        "spotify"
+    }
+    fn limits(&self) -> &'static [crate::phone::VerbLimit] {
+        PROBE_LIMITS
+    }
+    fn hello(&mut self, out: &crate::phone::Outbox) {
+        out.state("spotify", &serde_json::json!({"hello": true}));
+    }
+    fn command(&mut self, command: crate::phone::Command, out: &crate::phone::Outbox) {
+        self.0.lock().unwrap().push(format!("{} {:?} {:?}", command.verb, command.args, command.text));
+        out.notice("spotify", "ok");
+    }
+}
+
+/// For `fuzzing`: arbitrary bytes after a hello of protocol 2, as one phone connection's
+/// input — whole, byte by byte, and in uneven pieces. Whatever the bytes, the outcome
+/// (what is logged, what reaches the app, the counts) does not depend on how they were cut,
+/// at most one bounded frame is held, nothing logged contains a control character, and
+/// what reaches the app is a command within the grammar, the vocabulary and the limits.
+#[doc(hidden)]
+pub fn fuzz_phone(data: &[u8]) {
+    type Outcome = (Vec<(Voice, String)>, Vec<String>, Stats, Vec<String>);
+    fn run(data: &[u8], cuts: impl Fn(usize) -> usize) -> Outcome {
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let (sink, note_sink) = (said.clone(), notes.clone());
+        let (out, mut outbound) = crate::phone::Outbox::new(1024);
+        let dispatcher = Dispatcher::new(
+            vec![Box::new(Probe(seen.clone()))],
+            out,
+            Arc::new(move |line| note_sink.lock().unwrap().push(line)),
+        );
+        let mut session =
+            Session::with_phone(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line))), dispatcher);
+        let mut connection = session.open().expect("the first connection is admitted");
+        let mut input = b"hello 2 0.1.0 phone\n".to_vec();
+        input.extend_from_slice(data);
+        let (mut at, mut round) = (0, 0);
+        let mut became = 0;
+        while at < input.len() {
+            let end = at.saturating_add(cuts(round).max(1)).min(input.len());
+            if session.received(&mut connection, &input[at..end], Duration::from_secs(1)) {
+                became += 1;
+            }
+            assert!(connection.buffered() <= MAX_LINE + MAX_COMMAND + 5, "{} bytes held", connection.buffered());
+            (at, round) = (end, round + 1);
+        }
+        assert_eq!(became, 1, "the hello switches the connection once");
+        assert!(connection.is_phone() || connection.is_broken());
+        let stats = session.stats().clone();
+        session.close(connection);
+        while outbound.try_recv().is_ok() {}
+        let said = said.lock().unwrap().clone();
+        let seen = seen.lock().unwrap().clone();
+        let notes = notes.lock().unwrap().clone();
+        (said, seen, stats, notes)
+    }
+    let whole = run(data, |_| usize::MAX);
+    for (_, line) in &whole.0 {
+        assert!(line.chars().count() <= 400 && !line.chars().any(char::is_control), "{line:?}");
+    }
+    for line in &whole.3 {
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+    }
+    assert!(whole.1.len() <= 6, "more commands reached the app than its buckets allow at one instant");
+    let seed = data.iter().fold(11usize, |h, b| h.wrapping_mul(31).wrapping_add(usize::from(*b)));
+    for pieces in [run(data, |_| 1), run(data, |round| 1 + (seed.wrapping_mul(round + 5) >> 3) % 61)] {
+        assert_eq!(pieces, whole, "the outcome depends on how the bytes arrived");
+    }
+    // Everything the launcher would send back encodes to frames the mod's limits accept.
+    let mut waiting = Waiting::default();
+    waiting.push(Outbound::Notice { app: "spotify", text: String::from_utf8_lossy(data).chars().take(64).collect() });
+    while let Some(message) = waiting.pop() {
+        let bytes = encode(&message);
+        let length = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(length + 4, bytes.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,8 +1241,10 @@ mod tests {
         );
         assert_eq!(hello(&["zoom", "hud"]).describe(), "hello: mod version 0.1.0, protocol 1, features: zoom, hud");
         assert_eq!(hello(&[]).describe(), "hello: mod version 0.1.0, protocol 1, features: none");
-        let newer = parse_line(b"hello 2 9.9 zoom").unwrap();
-        assert!(newer.describe().contains("protocol 2 (this launcher speaks 1)"), "{}", newer.describe());
+        let phone = parse_line(b"hello 2 9.9 zoom").unwrap();
+        assert_eq!(phone.describe(), "hello: mod version 9.9, protocol 2, features: zoom");
+        let newer = parse_line(b"hello 3 9.9 zoom").unwrap();
+        assert!(newer.describe().contains("protocol 3 (this launcher speaks 1 and 2)"), "{}", newer.describe());
     }
 
     #[test]
@@ -1026,6 +1600,236 @@ mod tests {
         assert!(listening.accept().is_ok());
         drop(endpoint);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn phone_session() -> (Session, Said, Arc<Mutex<Vec<String>>>, tokio::sync::mpsc::Receiver<Outbound>) {
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = said.clone();
+        let (out, outbound) = crate::phone::Outbox::new(64);
+        let dispatcher = Dispatcher::new(vec![Box::new(Probe(seen.clone()))], out, Arc::new(|_| {}));
+        let session =
+            Session::with_phone(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line))), dispatcher);
+        (session, said, seen, outbound)
+    }
+
+    #[test]
+    fn a_hello_of_protocol_two_switches_the_connection_to_frames_in_the_same_read() {
+        let (mut session, said, seen, _) = phone_session();
+        let mut connection = session.open().unwrap();
+        let mut bytes = b"hello 2 0.1.0 phone,home\n".to_vec();
+        bytes.extend(frame(KIND_COMMAND, b"spotify play"));
+        bytes.extend(frame(KIND_DIAG, b"diag home disabled: no adapter"));
+        bytes.extend(frame(KIND_COMMAND, b"spotify search -- Daft Punk"));
+        assert!(session.received(&mut connection, &bytes, Duration::ZERO), "it became the phone");
+        assert!(connection.is_phone());
+        assert_eq!(*seen.lock().unwrap(), ["play [] None", "search [] Some(\"Daft Punk\")"]);
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said[0].1, "companion channel #1: hello: mod version 0.1.0, protocol 2, features: phone, home");
+        assert_eq!(said[1].1, "companion channel #1: home: disabled: no adapter", "a DIAG frame is a protocol 1 line");
+        let stats = session.stats();
+        assert_eq!((stats.hellos, stats.diagnostics, stats.frames, stats.commands), (1, 1, 3, 2));
+        assert_eq!(
+            session.summary(),
+            "companion channel: 1 connection(s), 1 hello, 1 diagnostic(s), 2 phone command(s)"
+        );
+        // A protocol 1 hello on another connection stays a line protocol.
+        let mut other = session.open().unwrap();
+        assert!(!session.received(&mut other, b"hello 1 0.1.0 zoom\ndiag zoom ok\n", Duration::ZERO));
+        assert!(!other.is_phone());
+    }
+
+    #[test]
+    fn without_the_phone_a_hello_of_protocol_two_is_only_logged() {
+        let (mut session, said) = collecting();
+        let mut connection = session.open().unwrap();
+        let mut bytes = b"hello 2 0.1.0 phone\n".to_vec();
+        bytes.extend(frame(KIND_COMMAND, b"spotify play"));
+        assert!(!session.received(&mut connection, &bytes, Duration::ZERO));
+        assert!(!connection.is_phone());
+        assert_eq!(session.stats().hellos, 1);
+        assert!(said.lock().unwrap()[0].1.contains("protocol 2"));
+    }
+
+    #[test]
+    fn a_frame_the_mod_may_not_send_ends_the_connection_and_is_said_once() {
+        for bad in [
+            frame(KIND_STATE, b"spotify\0{}"),
+            frame(0x7f, b"x"),
+            vec![0, 0, 0, 0, KIND_COMMAND],
+            [((MAX_COMMAND + 2) as u32).to_be_bytes().to_vec(), vec![KIND_COMMAND]].concat(),
+            [((MAX_DIAG + 2) as u32).to_be_bytes().to_vec(), vec![KIND_DIAG]].concat(),
+        ] {
+            let (mut session, said, seen, _) = phone_session();
+            let mut connection = session.open().unwrap();
+            let mut bytes = b"hello 2 0.1.0 -\n".to_vec();
+            bytes.extend(frame(KIND_COMMAND, b"spotify play"));
+            bytes.extend(&bad);
+            bytes.extend(frame(KIND_COMMAND, b"spotify play"));
+            session.received(&mut connection, &bytes, Duration::ZERO);
+            assert!(connection.is_broken(), "{bad:?}");
+            assert_eq!(seen.lock().unwrap().len(), 1, "nothing after the bad frame is read");
+            // Nothing more is read from it, whatever comes.
+            session.received(&mut connection, &frame(KIND_COMMAND, b"spotify play"), Duration::ZERO);
+            assert_eq!(seen.lock().unwrap().len(), 1);
+            let notes: Vec<String> =
+                said.lock().unwrap().iter().filter(|(v, _)| *v == Voice::Launcher).map(|(_, l)| l.clone()).collect();
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].starts_with("companion channel #1: closed — "), "{notes:?}");
+            assert_eq!(session.stats().broken, 1);
+        }
+    }
+
+    #[test]
+    fn frames_over_the_global_rate_are_dropped_and_counted() {
+        let (mut session, said, _, _) = phone_session();
+        let mut connection = session.open().unwrap();
+        let mut bytes = b"hello 2 0.1.0 -\n".to_vec();
+        for _ in 0..80 {
+            bytes.extend(frame(KIND_DIAG, b"diag zoom again"));
+        }
+        session.received(&mut connection, &bytes, Duration::from_secs(1));
+        let stats = session.stats().clone();
+        assert_eq!(stats.frames, 80);
+        assert_eq!(stats.over_rate, 80 - u64::from(PHONE_MESSAGES_PER_SECOND));
+        assert_eq!(stats.diagnostics, u64::from(PHONE_MESSAGES_PER_SECOND));
+        let notes = said.lock().unwrap().iter().filter(|(_, l)| l.contains("messages a second")).count();
+        assert_eq!(notes, 1);
+        // A second later there is room for more.
+        session.received(&mut connection, &frame(KIND_DIAG, b"diag zoom later"), Duration::from_secs(2));
+        assert_eq!(session.stats().diagnostics, u64::from(PHONE_MESSAGES_PER_SECOND) + 1);
+        assert!(session.summary().contains("30 frame(s) over the rate"), "{}", session.summary());
+    }
+
+    #[test]
+    fn the_byte_budget_of_all_connections_asks_for_a_pause_when_spent() {
+        let (mut session, _) = collecting();
+        assert_eq!(session.charge(PHONE_BYTES_PER_SECOND, Duration::ZERO), Duration::ZERO);
+        let pause = session.charge(PHONE_BYTES_PER_SECOND / 2, Duration::ZERO);
+        assert!(pause >= Duration::from_millis(400) && pause <= Duration::from_millis(600), "{pause:?}");
+        assert_eq!(session.charge(1000, Duration::from_secs(5)), Duration::ZERO, "refilled");
+    }
+
+    #[test]
+    fn frames_to_the_phone_are_encoded_as_the_contract_says_and_newer_ones_replace_waiting_ones() {
+        let state = Outbound::State { app: "spotify", json: "{\"a\":1}".into() };
+        assert_eq!(encode(&state), [&[0, 0, 0, 16, KIND_STATE][..], b"spotify\0{\"a\":1}"].concat());
+        let picture = Outbound::Frame {
+            app: "clips",
+            slot: 3,
+            width: 2,
+            height: 1,
+            format: crate::phone::FrameFormat::Rgba8,
+            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        assert_eq!(
+            encode(&picture),
+            [&[0, 0, 0, 21, KIND_FRAME][..], b"clips\0", &[3, 0, 2, 0, 1, 3], &[1, 2, 3, 4, 5, 6, 7, 8]].concat()
+        );
+        let notice = Outbound::Notice { app: "realms", text: "approved".into() };
+        assert_eq!(encode(&notice), [&[0, 0, 0, 16, KIND_NOTICE][..], b"realms\0approved"].concat());
+
+        let mut waiting = Waiting::default();
+        waiting.push(Outbound::State { app: "spotify", json: "{\"n\":1}".into() });
+        waiting.push(picture.clone());
+        waiting.push(Outbound::State { app: "browser", json: "{}".into() });
+        waiting.push(Outbound::State { app: "spotify", json: "{\"n\":2}".into() });
+        waiting.push(Outbound::Frame {
+            app: "clips",
+            slot: 3,
+            width: 2,
+            height: 1,
+            format: crate::phone::FrameFormat::Rgba8,
+            bytes: vec![9; 8],
+        });
+        for i in 0..40 {
+            waiting.push(Outbound::Notice { app: "clips", text: format!("{i}") });
+        }
+        let all: Vec<Outbound> = std::iter::from_fn(|| waiting.pop()).collect();
+        let states: Vec<&str> = all
+            .iter()
+            .filter_map(|m| match m {
+                Outbound::State { json, .. } => Some(json.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, ["{}", "{\"n\":2}"], "the newer spotify state replaced the older one");
+        let frames: Vec<&[u8]> = all
+            .iter()
+            .filter_map(|m| match m {
+                Outbound::Frame { bytes, .. } => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, [&[9u8; 8][..]], "the newer picture of slot 3 replaced the older one");
+        let notices = all.iter().filter(|m| matches!(m, Outbound::Notice { .. })).count();
+        assert_eq!(notices, MAX_WAITING_NOTICES, "the oldest notices went");
+    }
+
+    #[tokio::test]
+    async fn a_real_socket_serves_the_phone_and_a_newer_phone_takes_over() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = std::env::temp_dir()
+            .join(format!("bmc-ph-{}", crate::util::hex_encode(&crate::util::random_bytes::<4>().unwrap())));
+        crate::util::create_private_dir_all(&root).unwrap();
+        let endpoint = Endpoint::create(None, &root).unwrap();
+        let path = endpoint.path().to_path_buf();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (out, outbound) = crate::phone::Outbox::new(64);
+        let dispatcher = Dispatcher::new(vec![Box::new(Probe(seen.clone()))], out.clone(), Arc::new(|_| {}));
+        let serving = endpoint.serve_phone(Arc::new(|_, _| {}), Some(Phone { dispatcher, outbound })).unwrap();
+
+        async fn read_frame(stream: &mut tokio::net::UnixStream) -> (u8, Vec<u8>) {
+            let mut header = [0u8; 5];
+            tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut header)).await.unwrap().unwrap();
+            let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+            let mut payload = vec![0; length - 1];
+            stream.read_exact(&mut payload).await.unwrap();
+            (header[4], payload)
+        }
+
+        let mut phone = tokio::net::UnixStream::connect(&path).await.unwrap();
+        phone.write_all(b"hello 2 0.1.0 phone\n").await.unwrap();
+        // Greeted: the phone state, then the app's.
+        let (kind, payload) = read_frame(&mut phone).await;
+        assert_eq!(
+            (kind, payload.as_slice()),
+            (KIND_STATE, &b"phone\0{\"apps\":[\"spotify\"],\"theme\":\"dark\"}"[..])
+        );
+        let (kind, payload) = read_frame(&mut phone).await;
+        assert_eq!((kind, payload.as_slice()), (KIND_STATE, &b"spotify\0{\"hello\":true}"[..]));
+        // A command, and the app's answer.
+        phone.write_all(&frame(KIND_COMMAND, b"spotify play")).await.unwrap();
+        let (kind, payload) = read_frame(&mut phone).await;
+        assert_eq!((kind, payload.as_slice()), (KIND_NOTICE, &b"spotify\0ok"[..]));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // A picture well over a socket buffer arrives whole.
+        let big = vec![7u8; 1024 * 1024];
+        assert!(out.frame("spotify", 0, 512, 512, crate::phone::FrameFormat::Rgba8, big.clone()));
+        let (kind, payload) = read_frame(&mut phone).await;
+        assert_eq!(kind, KIND_FRAME);
+        assert_eq!(payload.len(), 8 + 6 + big.len());
+        // A second phone takes over and is greeted; the first gets nothing more.
+        let mut second = tokio::net::UnixStream::connect(&path).await.unwrap();
+        second.write_all(b"hello 2 0.1.0 phone\n").await.unwrap();
+        let (kind, payload) = read_frame(&mut second).await;
+        assert_eq!(kind, KIND_STATE);
+        assert!(payload.starts_with(b"phone\0"));
+        let summary = serving.phone_summary().unwrap();
+        assert!(summary.contains("2 connection(s) greeted, 1 command(s), 1 accepted"), "{summary}");
+        assert_eq!(
+            serving.finish(),
+            "companion channel: 2 connection(s), 2 hello, 0 diagnostic(s), 1 phone command(s)"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_phone_fuzz_harness_accepts_ordinary_traffic() {
+        fuzz_phone(&[frame(KIND_COMMAND, b"spotify play"), frame(KIND_DIAG, b"diag zoom x")].concat());
+        fuzz_phone(&frame(KIND_COMMAND, b"spotify search -- x").repeat(20));
+        fuzz_phone(&[0xff; 40]);
+        fuzz_phone(b"");
     }
 
     #[test]

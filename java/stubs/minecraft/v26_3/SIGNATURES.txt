@@ -1,0 +1,197 @@
+# What the stubs below declare (run-time names), the same for every version of a family.
+class com/mojang/blaze3d/platform/InputConstants class extends=None implements=
+  m getKey (Ljava/lang/String;)Lcom/mojang/blaze3d/platform/InputConstants$Key; static
+  m isKeyDown (I)Z static
+class com/mojang/blaze3d/platform/InputConstants$Key class extends=None implements=
+  m getDisplayName ()Lnet/minecraft/network/chat/Component; 
+  m getValue ()I 
+class com/mojang/blaze3d/platform/NativeImage class extends=None implements=
+  m <init> (IIZ)V 
+  m close ()V 
+  m setPixel (III)V 
+  m setPixelABGR (III)V 
+class com/mojang/blaze3d/platform/TextInputManager class extends=None implements=
+  m startTextInput (Ljava/lang/Object;)V 
+  m stopTextInput ()V 
+  m stopTextInput (Ljava/lang/Object;)V 
+class com/mojang/blaze3d/platform/Window class extends=None implements=
+  m getGuiScale ()I 
+  m getGuiScaledHeight ()I 
+  m getGuiScaledWidth ()I 
+  m handle ()J 
+class com/mojang/blaze3d/vertex/PoseStack class extends=None implements=
+  m popPose ()V 
+  m pushPose ()V 
+  m scale (FFF)V 
+  m translate (FFF)V 
+class com/mojang/realmsclient/RealmsMainScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;)V 
+class com/mojang/renderpearl/api/pipeline/RenderPipeline class extends=None implements=
+class com/mojang/renderpearl/api/textures/GpuSampler interface extends=None implements=
+class com/mojang/renderpearl/api/textures/GpuTextureView interface extends=None implements=
+class it/unimi/dsi/fastutil/ints/Int2IntFunction missing extends=None implements=
+class net/minecraft/client/Minecraft class extends=None implements=
+  f font Lnet/minecraft/client/gui/Font; 
+  f gui Lnet/minecraft/client/gui/Gui; 
+  f options Lnet/minecraft/client/Options; 
+  f player Lnet/minecraft/client/player/LocalPlayer; 
+  m getInstance ()Lnet/minecraft/client/Minecraft; static
+  m getLanguageManager ()Lnet/minecraft/client/resources/language/LanguageManager; 
+  m getSoundManager ()Lnet/minecraft/client/sounds/SoundManager; 
+  m getTextureManager ()Lnet/minecraft/client/renderer/texture/TextureManager; 
+  m getWindow ()Lcom/mojang/blaze3d/platform/Window; 
+  m isDemo ()Z 
+  m stop ()V 
+  m textInputManager ()Lcom/mojang/blaze3d/platform/TextInputManager; 
+class net/minecraft/client/Options class extends=None implements=
+class net/minecraft/client/gui/Font class extends=None implements=
+  f lineHeight I 
+  m width (Ljava/lang/String;)I 
+  m width (Lnet/minecraft/network/chat/FormattedText;)I 
+  m width (Lnet/minecraft/util/FormattedCharSequence;)I 
+class net/minecraft/client/gui/Gui class extends=None implements=
+  f hud Lnet/minecraft/client/gui/Hud; 
+  m overlay ()Lnet/minecraft/client/gui/screens/Overlay; 
+  m screen ()Lnet/minecraft/client/gui/screens/Screen; 
+  m setScreen (Lnet/minecraft/client/gui/screens/Screen;)V 
+class net/minecraft/client/gui/GuiGraphicsExtractor class extends=None implements=
+  m blit (Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIII)V 
+  m blit (Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIII)V 
+  m blit (Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIIII)V 
+  m blit (Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIIIII)V 
+  m blit (Lcom/mojang/renderpearl/api/textures/GpuTextureView;Lcom/mojang/renderpearl/api/textures/GpuSampler;IIIIFFFF)V 
+  m blit (Lnet/minecraft/resources/Identifier;IIIIFFFF)V 
+  m disableScissor ()V 
+  m enableScissor (IIII)V 
+  m fill (IIIII)V 
+  m pose ()Lorg/joml/Matrix3x2fStack; 
+  m text (Lnet/minecraft/client/gui/Font;Ljava/lang/String;III)V 
+  m text (Lnet/minecraft/client/gui/Font;Ljava/lang/String;IIIZ)V 
+  m text (Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;III)V 
+  m text (Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIIZ)V 
+  m text (Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;III)V 
+  m text (Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;IIIZ)V 
+class net/minecraft/client/gui/Hud class extends=None implements=
+  m isHidden ()Z 
+class net/minecraft/client/gui/components/AbstractButton class extends=net/minecraft/client/gui/components/AbstractWidget implements=net/minecraft/client/gui/components/events/GuiEventListener
+  m onPress (Lnet/minecraft/client/input/InputWithModifiers;)V 
+class net/minecraft/client/gui/components/AbstractWidget class extends=None implements=net/minecraft/client/gui/components/events/GuiEventListener
+  m getMessage ()Lnet/minecraft/network/chat/Component; 
+class net/minecraft/client/gui/components/Button class extends=net/minecraft/client/gui/components/AbstractButton implements=net/minecraft/client/gui/components/events/GuiEventListener
+  f onPress Lnet/minecraft/client/gui/components/Button$OnPress; 
+  m onPress (Lnet/minecraft/client/input/InputWithModifiers;)V 
+class net/minecraft/client/gui/components/Button$OnPress interface extends=None implements=
+class net/minecraft/client/gui/components/events/ContainerEventHandler interface extends=None implements=net/minecraft/client/gui/components/events/GuiEventListener
+  m charTyped (Lnet/minecraft/client/input/CharacterEvent;)Z 
+  m children ()Ljava/util/List; 
+  m keyPressed (Lnet/minecraft/client/input/KeyEvent;)Z 
+  m keyReleased (Lnet/minecraft/client/input/KeyEvent;)Z 
+  m mouseClicked (Lnet/minecraft/client/input/MouseButtonEvent;Z)Z 
+  m mouseDragged (Lnet/minecraft/client/input/MouseButtonEvent;DD)Z 
+  m mouseReleased (Lnet/minecraft/client/input/MouseButtonEvent;)Z 
+  m mouseScrolled (DDDD)Z 
+class net/minecraft/client/gui/components/events/GuiEventListener interface extends=None implements=
+  m charTyped (Lnet/minecraft/client/input/CharacterEvent;)Z 
+  m keyPressed (Lnet/minecraft/client/input/KeyEvent;)Z 
+  m keyReleased (Lnet/minecraft/client/input/KeyEvent;)Z 
+  m mouseClicked (Lnet/minecraft/client/input/MouseButtonEvent;Z)Z 
+  m mouseDragged (Lnet/minecraft/client/input/MouseButtonEvent;DD)Z 
+  m mouseReleased (Lnet/minecraft/client/input/MouseButtonEvent;)Z 
+  m mouseScrolled (DDDD)Z 
+class net/minecraft/client/gui/screens/CreditsAndAttributionScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;)V 
+class net/minecraft/client/gui/screens/Overlay class extends=None implements=
+class net/minecraft/client/gui/screens/Screen class extends=None implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  f height I 
+  f width I 
+  m <init> (Lnet/minecraft/network/chat/Component;)V 
+  m children ()Ljava/util/List; 
+  m extractBackground (Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V 
+  m extractRenderState (Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V 
+  m init ()V 
+  m isPauseScreen ()Z 
+  m keyPressed (Lnet/minecraft/client/input/KeyEvent;)Z 
+  m onClose ()V 
+  m removed ()V 
+  m shouldCloseOnEsc ()Z 
+  m tick ()V 
+class net/minecraft/client/gui/screens/TitleScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> ()V 
+class net/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;)V 
+class net/minecraft/client/gui/screens/options/AccessibilityOptionsScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Options;)V 
+class net/minecraft/client/gui/screens/options/LanguageSelectScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Options;Lnet/minecraft/client/resources/language/LanguageManager;)V 
+class net/minecraft/client/gui/screens/options/OptionsScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Options;)V 
+class net/minecraft/client/gui/screens/worldselection/SelectWorldScreen class extends=net/minecraft/client/gui/screens/Screen implements=net/minecraft/client/gui/components/events/ContainerEventHandler,net/minecraft/client/gui/components/events/GuiEventListener
+  m <init> (Lnet/minecraft/client/gui/screens/Screen;)V 
+class net/minecraft/client/input/CharacterEvent class extends=None implements=
+  m codepoint ()I 
+class net/minecraft/client/input/InputWithModifiers interface extends=None implements=
+class net/minecraft/client/input/KeyEvent class extends=None implements=net/minecraft/client/input/InputWithModifiers
+  m <init> (III)V 
+  m key ()I 
+  m keycode ()I 
+  m modifiers ()I 
+class net/minecraft/client/input/MouseButtonEvent class extends=None implements=net/minecraft/client/input/InputWithModifiers
+  m button ()I 
+  m modifiers ()I 
+  m x ()D 
+  m y ()D 
+class net/minecraft/client/player/LocalPlayer class extends=None implements=
+class net/minecraft/client/renderer/RenderPipelines class extends=None implements=
+  f GUI_TEXTURED Lcom/mojang/renderpearl/api/pipeline/RenderPipeline; static
+class net/minecraft/client/renderer/texture/AbstractTexture class extends=None implements=
+  m close ()V 
+class net/minecraft/client/renderer/texture/DynamicTexture class extends=net/minecraft/client/renderer/texture/AbstractTexture implements=
+  m <init> (Ljava/lang/String;IIZ)V 
+  m <init> (Ljava/util/function/Supplier;IIZ)V 
+  m <init> (Ljava/util/function/Supplier;Lcom/mojang/blaze3d/platform/NativeImage;)V 
+  m close ()V 
+  m getPixels ()Lcom/mojang/blaze3d/platform/NativeImage; 
+  m upload ()V 
+class net/minecraft/client/renderer/texture/TextureManager class extends=None implements=
+  m register (Lnet/minecraft/resources/Identifier;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V 
+  m release (Lnet/minecraft/resources/Identifier;)V 
+class net/minecraft/client/resources/language/I18n class extends=None implements=
+  m get (Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String; static
+class net/minecraft/client/resources/language/LanguageManager class extends=None implements=
+class net/minecraft/client/resources/sounds/SimpleSoundInstance class extends=None implements=net/minecraft/client/resources/sounds/SoundInstance
+  m forUI (Lnet/minecraft/core/Holder;F)Lnet/minecraft/client/resources/sounds/SimpleSoundInstance; static
+class net/minecraft/client/resources/sounds/SoundInstance interface extends=None implements=
+class net/minecraft/client/sounds/SoundEngine class extends=None implements=
+class net/minecraft/client/sounds/SoundEngine$PlayResult enum extends=None implements=
+class net/minecraft/client/sounds/SoundManager class extends=None implements=
+  m play (Lnet/minecraft/client/resources/sounds/SoundInstance;)Lnet/minecraft/client/sounds/SoundEngine$PlayResult; 
+class net/minecraft/core/Holder interface extends=None implements=
+class net/minecraft/core/Holder$Reference class extends=None implements=net/minecraft/core/Holder
+class net/minecraft/network/chat/Component interface extends=None implements=
+  m getString ()Ljava/lang/String; 
+  m getString (I)Ljava/lang/String; 
+  m literal (Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent; static
+class net/minecraft/network/chat/FormattedText interface extends=None implements=
+class net/minecraft/network/chat/MutableComponent class extends=None implements=net/minecraft/network/chat/Component
+class net/minecraft/network/chat/Style class extends=None implements=
+  f EMPTY Lnet/minecraft/network/chat/Style; static
+class net/minecraft/resources/Identifier class extends=None implements=
+  m tryBuild (Ljava/lang/String;Ljava/lang/String;)Lnet/minecraft/resources/Identifier; static
+class net/minecraft/sounds/SoundEvents class extends=None implements=
+  f UI_BUTTON_CLICK Lnet/minecraft/core/Holder$Reference; static
+class net/minecraft/util/FormattedCharSequence interface extends=None implements=
+  m forward (Ljava/lang/String;Lnet/minecraft/network/chat/Style;)Lnet/minecraft/util/FormattedCharSequence; static
+  m forward (Ljava/lang/String;Lnet/minecraft/network/chat/Style;Lit/unimi/dsi/fastutil/ints/Int2IntFunction;)Lnet/minecraft/util/FormattedCharSequence; static
+class org/joml/Matrix3x2f class extends=None implements=
+  m scale (F)Lorg/joml/Matrix3x2f; 
+  m translate (FF)Lorg/joml/Matrix3x2f; 
+class org/joml/Matrix3x2fStack class extends=org/joml/Matrix3x2f implements=
+  m popMatrix ()Lorg/joml/Matrix3x2fStack; 
+  m pushMatrix ()Lorg/joml/Matrix3x2fStack; 
+hooks net/minecraft/client/Minecraft
+  @m runTick (Z)V  (runTick)
+hooks net/minecraft/client/gui/Gui
+  @m extractRenderState (Lnet/minecraft/client/DeltaTracker;ZZ)V  (extractRenderState)
+  @m setScreen (Lnet/minecraft/client/gui/screens/Screen;)V  (setScreen)
+hooks net/minecraft/client/gui/Hud
+  @m extractRenderState (Lnet/minecraft/client/gui/GuiGraphicsExtractor;Lnet/minecraft/client/DeltaTracker;)V  (extractRenderState)

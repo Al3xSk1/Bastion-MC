@@ -63,15 +63,42 @@ final class SelfTest {
 
     private void run() {
         try {
-            minecraft = loaded();
-            if (minecraft == null) {
-                say("failed: the game did not finish loading in time");
-                return;
+            // The platform, on every family: what is on screen, an overlay, the launcher link.
+            PlatformProbe platform = new PlatformProbe(SelfTest::say);
+            boolean live = bastion.companion.platform.Platforms.live();
+            if (live) {
+                if (!platform.awaitTitle()) {
+                    say("failed: the game did not ask for its title screen in time");
+                    return;
+                }
+                platform.title();
+                platform.link();
             }
-            client = new Client(new Game(loader));
-            onRenderThread(this::title);
-            if (mode.equals("world")) {
-                world();
+            // The features written for 26.3's names, measured through those names.
+            if (!live || "v26_3".equals(bastion.companion.platform.Platforms.current().family())) {
+                minecraft = loaded();
+                if (minecraft == null) {
+                    say("failed: the game did not finish loading in time");
+                    return;
+                }
+                client = new Client(new Game(loader));
+                onRenderThread(this::title);
+                if (mode.equals("world")) {
+                    world();
+                }
+            } else {
+                for (Feature feature : Hooks.ALL) {
+                    say(feature.id() + " not on this family");
+                }
+                if (mode.equals("world")) {
+                    platform.world();
+                }
+            }
+            if (live && mode.equals("world") && minecraft != null) {
+                say("platform world hud_frames=" + bastion.companion.platform.Core.get().hudFrames());
+            }
+            if (live && mode.equals("world")) {
+                platform.phoneKey();
             }
             say("done mode=" + mode);
         } catch (Throwable failure) {

@@ -1,0 +1,236 @@
+# The Minecraft classes and members the companion's adapters use, by Mojang's names.
+# genstubs.py writes stubs of exactly these (in the game's run-time names) for each version;
+# versions whose stubs come out identical belong to the same family.
+#
+# A class line names the class (alternatives separated by "|", for classes Mojang renamed);
+# each indented line is a member name (every overload), optionally followed by one Mojang
+# descriptor to take only that overload.
+
+net/minecraft/client/Minecraft
+    getInstance
+    setScreen
+    screen
+    player
+    getOverlay
+    getWindow
+    font
+    options
+    isDemo
+    stop
+    getSoundManager
+    getTextureManager
+    getLanguageManager
+    gui
+    runTick
+    textInputManager
+
+com/mojang/blaze3d/platform/TextInputManager
+    startTextInput
+    stopTextInput
+
+com/mojang/blaze3d/platform/Window
+    getGuiScale
+    getGuiScaledWidth
+    getGuiScaledHeight
+    getWindow
+    handle
+
+net/minecraft/client/gui/Gui
+    screen
+    setScreen
+    overlay
+    hud
+
+net/minecraft/client/gui/Hud
+    isHidden
+
+net/minecraft/client/Options
+    hideGui
+
+net/minecraft/client/gui/screens/Screen
+    <init> (Lnet/minecraft/network/chat/Component;)V
+    width
+    height
+    init ()V
+    tick
+    removed
+    isPauseScreen
+    shouldCloseOnEsc
+    onClose
+    render
+    extractRenderState
+    renderBackground
+    extractBackground
+    keyPressed
+    children
+
+net/minecraft/client/gui/components/events/GuiEventListener
+    mouseClicked
+    mouseReleased
+    mouseDragged
+    mouseScrolled
+    keyPressed
+    keyReleased
+    charTyped
+
+net/minecraft/client/gui/components/events/ContainerEventHandler
+    mouseClicked
+    mouseReleased
+    mouseDragged
+    mouseScrolled
+    keyPressed
+    keyReleased
+    charTyped
+    children
+
+net/minecraft/client/gui/screens/TitleScreen
+    <init> ()V
+
+net/minecraft/client/gui/components/AbstractWidget
+    getMessage
+
+net/minecraft/client/gui/components/Button
+    onPress
+
+net/minecraft/client/gui/components/AbstractButton
+    onPress
+
+net/minecraft/client/gui/screens/worldselection/SelectWorldScreen
+    <init>
+net/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen
+    <init>
+com/mojang/realmsclient/RealmsMainScreen
+    <init>
+net/minecraft/client/gui/screens/options/OptionsScreen | net/minecraft/client/gui/screens/OptionsScreen
+    <init>
+net/minecraft/client/gui/screens/options/LanguageSelectScreen | net/minecraft/client/gui/screens/LanguageSelectScreen
+    <init>
+net/minecraft/client/gui/screens/options/AccessibilityOptionsScreen | net/minecraft/client/gui/screens/AccessibilityOptionsScreen
+    <init>
+net/minecraft/client/gui/screens/CreditsAndAttributionScreen
+    <init>
+
+net/minecraft/client/gui/GuiGraphics | net/minecraft/client/gui/GuiGraphicsExtractor
+    fill (IIIII)V
+    drawString
+    text
+    enableScissor
+    disableScissor
+    pose
+    blit
+
+com/mojang/blaze3d/vertex/PoseStack
+    pushPose
+    popPose
+    translate (FFF)V
+    scale (FFF)V
+
+net/minecraft/client/gui/Font
+    width
+    lineHeight
+
+net/minecraft/util/FormattedCharSequence
+    forward
+
+net/minecraft/network/chat/Style
+    EMPTY
+
+net/minecraft/network/chat/Component
+    literal
+    getString
+
+net/minecraft/resources/ResourceLocation | net/minecraft/resources/Identifier
+    tryBuild
+
+com/mojang/blaze3d/platform/NativeImage
+    <init> (IIZ)V
+    setPixelRGBA
+    setPixelABGR
+    setPixel
+    close
+
+net/minecraft/client/renderer/texture/DynamicTexture
+    <init>
+    upload
+    getPixels
+    close
+
+net/minecraft/client/renderer/texture/AbstractTexture
+    close
+
+net/minecraft/client/renderer/texture/TextureManager
+    register (Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V
+    register (Lnet/minecraft/resources/Identifier;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V
+    release
+
+net/minecraft/client/renderer/RenderType
+    guiTextured
+
+net/minecraft/client/renderer/RenderPipelines
+    GUI_TEXTURED
+
+com/mojang/blaze3d/platform/InputConstants
+    getKey (Ljava/lang/String;)Lcom/mojang/blaze3d/platform/InputConstants$Key;
+    isKeyDown
+
+com/mojang/blaze3d/platform/InputConstants$Key
+    getValue
+    getDisplayName
+
+net/minecraft/client/input/KeyEvent
+    <init>
+    key
+    scancode
+    keycode
+    modifiers
+
+net/minecraft/client/input/MouseButtonEvent
+    x
+    y
+    button
+    modifiers
+
+net/minecraft/client/input/CharacterEvent
+    codepoint
+    modifiers
+
+net/minecraft/client/resources/language/I18n
+    get
+
+net/minecraft/client/resources/sounds/SimpleSoundInstance
+    forUI (Lnet/minecraft/core/Holder;F)Lnet/minecraft/client/resources/sounds/SimpleSoundInstance;
+
+net/minecraft/sounds/SoundEvents
+    UI_BUTTON_CLICK
+
+net/minecraft/client/sounds/SoundManager
+    play
+
+org/joml/Matrix3x2fStack
+    pushMatrix
+    popMatrix
+
+org/joml/Matrix3x2f
+    translate (FF)Lorg/joml/Matrix3x2f;
+    scale (F)Lorg/joml/Matrix3x2f;
+
+# Where the mixins inject (lines starting with "@"): not written into the stubs — mixins name
+# their targets as strings — but part of SIGNATURES.txt, so that versions whose injection
+# points differ fall into different families. Private members count here.
+net/minecraft/client/Minecraft
+    @setScreen
+    @runTick
+net/minecraft/client/gui/Gui
+    @render
+    @extractRenderState
+    @setScreen
+net/minecraft/client/gui/Hud
+    @extractRenderState
+
+# Types the adapters pass where a supertype is expected: listed (without members) so that
+# their stubs carry the supertype.
+net/minecraft/network/chat/MutableComponent
+net/minecraft/core/Holder
+net/minecraft/core/Holder$Reference
+net/minecraft/client/resources/sounds/SoundInstance
+net/minecraft/client/input/InputWithModifiers

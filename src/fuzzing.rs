@@ -151,6 +151,14 @@ pub fn companion(data: &[u8]) {
     crate::companion::channel::fuzz(data);
 }
 
+/// The phone's side of the companion channel (protocol 2): frames after a hello of protocol
+/// 2, through the dispatcher to an app. The same outcome however the bytes are cut, one
+/// bounded frame held at most, nothing logged with a control character, and nothing reaches
+/// an app outside the grammar, its vocabulary or its limits.
+pub fn phone(data: &[u8]) {
+    crate::companion::channel::fuzz_phone(data);
+}
+
 /// A harness: arbitrary bytes in, a panic if a property does not hold.
 pub type Harness = fn(&[u8]);
 
@@ -166,6 +174,7 @@ pub const ALL: &[(&str, Harness)] = &[
     ("zipdir", zipdir),
     ("udp", udp),
     ("companion", companion),
+    ("phone", phone),
     // Answers of the mod registry (`profile add`, `profile check`); the harness lives with its parser.
     ("registry", crate::profile::modrinth::fuzz),
     // Mod jars, class files and mod metadata as the capability scan reads them (`profile add`

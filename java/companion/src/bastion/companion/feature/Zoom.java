@@ -88,6 +88,11 @@ public final class Zoom extends Feature {
     }
 
     @Override
+    protected boolean writtenFor26_3() {
+        return true;
+    }
+
+    @Override
     protected void resolve(Game game) throws Throwable {
         client = new Client(game);
         Class<?> input = game.type("com.mojang.blaze3d.platform.InputConstants");

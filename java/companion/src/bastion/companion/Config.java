@@ -39,7 +39,7 @@ public final class Config {
         this.problem = problem;
     }
 
-    static Config load() {
+    public static Config load() {
         try {
             return read(DEFAULT_PATH);
         } catch (NoSuchFileException absent) {

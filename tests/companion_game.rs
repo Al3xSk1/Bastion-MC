@@ -56,6 +56,23 @@ use bastion_mc::{
 };
 use bastion_mc_proto::{Event, Source};
 
+#[path = "../src/companion/jar.rs"]
+#[allow(dead_code)]
+mod jar;
+
+/// The families, from families.txt. Read before the launch: the launch confines this process
+/// (Landlock), and the repository is not among what it may read afterwards.
+fn families() -> Vec<jar::Family> {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/", "java/stubs/tools/families.txt"))
+        .expect("families.txt");
+    jar::parse_families(&text).expect("families.txt parses")
+}
+
+/// The family `families` puts `version` in.
+fn family_of(families: &[jar::Family], version: &str) -> Option<String> {
+    families.iter().find(|f| f.versions.iter().any(|v| v == version)).map(|f| f.id.clone())
+}
+
 fn log_lines(reporter: &Reporter, source: Source) -> Vec<String> {
     reporter
         .captured()
@@ -110,6 +127,8 @@ struct KeyPresser {
 
 /// The keysym of the default zoom key (`c`) and how long it is held, as the helper reads it.
 const PRESS_ZOOM_KEY: &str = "0x63 1500";
+/// The default phone key (`r`), tapped.
+const PRESS_PHONE_KEY: &str = "0x72 300";
 
 impl KeyPresser {
     fn start() -> (KeyPresser, ChildStdin) {
@@ -146,6 +165,7 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
     assert!(world || !keypress, "BASTION_COMPANION_KEYPRESS needs BASTION_COMPANION_WORLD");
     let direct_x11 = std::env::var_os("BASTION_COMPANION_DIRECT_X11").is_some_and(|v| !v.is_empty());
     let root = PathBuf::from(root);
+    let families = families();
     let app = |kind: &str| root.join(kind).join("bastion-mc");
     let paths = Paths {
         config: app("config"),
@@ -161,11 +181,13 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
     if direct_x11 {
         cfg.sandbox.nested_compositor = IsolationMode::Off;
     }
-    // Every feature on, with the documented defaults, and the scripted self-test.
+    // Every feature on, with the documented defaults, the scripted self-test, and the phone
+    // served by the demo service (fake state for every app).
     cfg.companion = CompanionConfig {
         hud: true,
         fullbright: true,
         self_test: Some(if world { SelfTest::World } else { SelfTest::Title }),
+        demo_phone: true,
         ..CompanionConfig::default()
     };
     let (factor, gamma) = (cfg.companion.zoom_factor, cfg.companion.fullbright_gamma);
@@ -195,7 +217,7 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
         let (reporter, stop) = (reporter.clone(), stop.clone());
         tokio::spawn(async move {
             let deadline = Instant::now() + Duration::from_secs(if world { 600 } else { 300 });
-            let mut pressed = 0;
+            let (mut pressed, mut phone_pressed) = (0, false);
             while Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let lines = self_test_lines(&log_lines(&reporter, Source::Game));
@@ -203,6 +225,14 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
                 if let Some(orders) = orders.as_mut().filter(|_| watching > pressed) {
                     pressed = watching;
                     let _ = writeln!(orders, "{PRESS_ZOOM_KEY}").and_then(|_| orders.flush());
+                }
+                // The phone key, once the self-test watches for it (in the world, playing).
+                if let Some(orders) = orders.as_mut().filter(|_| !phone_pressed)
+                    && lines.iter().any(|l| l.starts_with("platform watching phone_key"))
+                {
+                    phone_pressed = true;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let _ = writeln!(orders, "{PRESS_PHONE_KEY}").and_then(|_| orders.flush());
                 }
                 if lines.iter().any(|l| l.starts_with("done") || l.starts_with("failed")) {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -259,7 +289,7 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
     assert!(
         injected.contains(&format!("bastion-companion {} added", companion::VERSION))
             && injected.contains(&format!("sha256 {digest}"))
-            && injected.contains("features: zoom, hud, fullbright;"),
+            && injected.contains("features: zoom, hud, fullbright, phone, home, darkmenus;"),
         "{injected}"
     );
 
@@ -284,6 +314,7 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
         if (about_us && severe)
             || lower.contains("bastion-companion.mixins.json")
             || lower.contains("bastion.companion.mixin")
+            || lower.contains("platform (") && lower.contains(" failed")
         {
             complaints.push(line.clone());
         }
@@ -291,23 +322,105 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
     assert!(complaints.is_empty(), "warnings or errors about the mod or from Mixin:\n{}", complaints.join("\n"));
     assert!(!tests.iter().any(|l| l.contains(" off") || l.contains("failed")), "{tests:#?}");
 
-    // The hello arrived at the launcher, and the launcher logged it as something claimed
-    // from inside the game.
-    let hello = format!(
-        "companion channel #1: hello: mod version {}, protocol 1, features: zoom, hud, fullbright",
-        companion::VERSION
-    );
+    // Which family runs, and that it is the one families.txt names for the version.
+    let platform = measured(&tests, "platform family=");
+    let (family, version) = (platform["family"].clone(), platform["version"].clone());
+    println!("family   | {family} (Minecraft {version})");
+    assert_eq!(platform["live"], "true", "an adapter runs: {tests:#?}");
+    assert_eq!(family_of(&families, &version).as_deref(), Some(family.as_str()), "the family of {version}");
+    let on_26_3 = family == "v26_3";
+
+    // The hello arrived — protocol 2, the phone — and the launcher logged it as something
+    // claimed from inside the game. Where the conveniences are written for another version
+    // they say once that they are not available, and the hello leaves them out.
+    let features = if on_26_3 { "zoom, hud, fullbright, phone, home, darkmenus" } else { "phone, home, darkmenus" };
+    let hello =
+        format!("companion channel #1: hello: mod version {}, protocol 2, features: {features}", companion::VERSION);
     assert!(game.contains(&hello), "no hello in the log\n{}", failure());
+    let diagnostics = if on_26_3 { 0 } else { 3 };
+    if !on_26_3 {
+        for feature in ["zoom", "hud", "fullbright"] {
+            let said = format!("companion channel #1: {feature}: disabled: not available on Minecraft {version}");
+            assert!(game.iter().any(|l| l.starts_with(&said)), "{said}\n{}", failure());
+        }
+    }
     let summary =
         launcher.iter().find(|l| l.starts_with("companion channel: ")).unwrap_or_else(|| panic!("{}", failure()));
-    assert_eq!(summary, "companion channel: 1 connection(s), 1 hello, 0 diagnostic(s)");
+    assert_eq!(
+        summary,
+        &format!("companion channel: 1 connection(s), 1 hello, {diagnostics} diagnostic(s), 6 phone command(s)")
+    );
 
-    // The game got as far as the title screen: that is the screen the self-test found once
-    // the game reported that it had finished loading.
-    let loaded = measured(&tests, "loaded ");
-    assert_eq!(loaded["screen"], "net.minecraft.client.gui.screens.TitleScreen", "{tests:#?}");
-    assert_eq!(loaded["player"], "none");
+    // The phone: its state at the hello, the demo's apps, commands in both directions.
+    let link = measured(&tests, "link connected=");
+    assert_eq!(link["connected"], "true");
+    assert_eq!(link["phone"], r#"{"apps":["spotify","browser","clips","realms","settings"],"theme":"dark"}"#);
+    let exchange = measured(&tests, "link sent=");
+    assert_eq!(exchange["sent"], "true", "{exchange:?}");
+    assert_eq!(exchange["refused_locally"], "true", "outside the grammar: not sent at all");
+    assert_eq!(exchange["notice"], "settings_synced_(demo)", "a notice came back");
+    assert_eq!(exchange["page"], "200x120", "the browser's page at the size asked (RGBA8)");
+    assert_eq!(exchange["art"], "128x128", "the album art (PNG)");
+    assert_eq!(exchange["browser_open"], "discord");
+    assert_eq!(measured(&tests, "link picture_drawn=")["picture_drawn"], "true");
+    for command in
+        ["settings sync-now", "browser open discord", "browser text -- hi phone", "browser mouse down 50 60 left"]
+    {
+        let line = format!("phone demo: received {command}");
+        assert!(launcher.contains(&line), "{line}\n{}", failure());
+    }
+    let phone = launcher.iter().find(|l| l.starts_with("phone: 5 app(s)")).unwrap_or_else(|| panic!("{}", failure()));
+    assert_eq!(
+        phone,
+        "phone: 5 app(s) (spotify, browser, clips, realms, settings), 1 connection(s) greeted, 6 command(s), 6 accepted"
+    );
+
+    // What is on screen once the game asked for its title screen: the home screen; and an
+    // overlay of the mod's drawn with every primitive, then closed again.
+    let screen = measured(&tests, "platform screen=");
+    assert_eq!(screen["home"], "true", "the home screen replaced the title screen: {screen:?}");
+    assert_eq!(screen["demo"], "true");
+    assert_eq!(screen["demo_available"], "true");
+    let overlay = measured(&tests, "platform overlay open=");
+    assert_eq!(overlay["open"], "true", "{overlay:?}");
+    assert!(number(&overlay, "frames") >= 2.0, "drawn every frame: {overlay:?}");
+    assert!(number(&overlay, "text_width") > 10.0 && number(&overlay, "line_height") >= 8.0, "{overlay:?}");
+    assert_eq!((overlay["texture"].as_str(), overlay["picture"].as_str()), ("true", "true"), "{overlay:?}");
+    let closed = measured(&tests, "platform overlay closed=");
+    assert_eq!(closed["closed"], "true");
+    assert_eq!(closed["screen_after"], closed["screen_before"], "the screen underneath came back: {closed:?}");
+    // A screen of the game's own, opened as the home screen's Options button does: its
+    // background is the dark menus' (the family's background hook), then back home.
+    let options = measured(&tests, "platform options screen=");
+    assert!(options["screen"].contains("class_429") || options["screen"].ends_with("OptionsScreen"), "{options:?}");
+    assert!(number(&options, "backgrounds_painted") >= 1.0, "the menu background was painted: {options:?}");
+    assert_eq!(options["back"], screen["screen"], "back to the home screen: {options:?}");
+
     assert!(tests.iter().any(|l| l.starts_with("done")), "the self-test did not finish: {tests:#?}\n{}", failure());
+
+    if keypress {
+        // The phone key, really pressed (XTEST), read by the family's own keyboard state.
+        let phone = measured(&tests, "platform phone_key ");
+        assert_eq!(phone["opened"], "true", "the phone key opened the phone: {phone:?}");
+        let presses = presses.as_ref().expect("the key helper ran");
+        assert!(presses.iter().any(|p| p.starts_with("pressed keysym=0x72 ")), "{presses:?}");
+    }
+    if !on_26_3 {
+        if world {
+            let entered = measured(&tests, "platform world entered=");
+            assert_eq!((entered["entered"].as_str(), entered["playing"].as_str()), ("true", "true"), "{entered:?}");
+            assert!(number(&entered, "hud_frames_in_1s") >= 1.0, "the HUD layer's hook runs every frame: {entered:?}");
+        }
+        assert_eq!(outcome.as_ref().ok(), Some(&130), "stopped on request\n{}", failure());
+        return;
+    }
+
+    // From here on 26.3, whose classes the conveniences are written for. The game got as far
+    // as the title screen (the home screen in its place): that is the screen the self-test
+    // found once the game reported that it had finished loading.
+    let loaded = measured(&tests, "loaded ");
+    assert_eq!(loaded["screen"], "bastion.companion.platform.mojang.HostScreen", "{tests:#?}");
+    assert_eq!(loaded["player"], "none");
 
     // Zoom, through the camera's own method.
     let zoom = measured(&tests, "zoom ");
@@ -343,6 +456,7 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
     close(number(&bright, "brightness_under_darkness_0.3"), gamma - option.min(0.3), 1e-3, "minus the darkness pulse");
 
     if world {
+        assert!(number(&measured(&tests, "platform world hud_frames="), "hud_frames") >= 1.0, "{tests:#?}");
         let entered = measured(&tests, "world entered ");
         println!("in the world: {entered:?}");
         // The self-test measures only once nothing has been in front of the world for a
@@ -382,8 +496,8 @@ async fn the_companion_loads_in_the_real_game_and_its_features_do_what_they_say(
             Some(presses) => {
                 // The key was really pressed, by the X server as far as the game can tell.
                 println!("key presses: {presses:?}; {typed}");
-                assert_eq!(presses.len(), 2, "one press while playing, one with the chat open: {presses:?}");
-                assert!(presses.iter().all(|p| p.starts_with("pressed keysym=0x63 ")), "{presses:?}");
+                let zoom: Vec<&String> = presses.iter().filter(|p| p.starts_with("pressed keysym=0x63 ")).collect();
+                assert_eq!(zoom.len(), 2, "one press while playing, one with the chat open: {presses:?}");
                 close(number(&playing, "fov_min"), idle / factor, 0.05, "the zoom key, really pressed while playing");
                 close(number(&playing, "fov_end"), idle, 0.0, "and released again");
                 close(number(&chat, "fov_min"), idle, 0.0, "the same key with the chat open does not zoom");

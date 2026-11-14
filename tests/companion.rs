@@ -168,13 +168,7 @@ fn run_program(
         if let Some(stream) = stream {
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-            let mut lines = BufReader::new(stream).lines();
-            while channel.len() < expect_lines {
-                match lines.next() {
-                    Some(Ok(line)) => channel.push(line),
-                    _ => break,
-                }
-            }
+            channel = read_protocol_two(stream, expect_lines);
         }
     }
     while !logged.lock().unwrap().contains(await_log) && Instant::now() < deadline {
@@ -188,6 +182,36 @@ fn run_program(
     let stderr = logged.lock().unwrap().clone();
     assert!(status.success(), "the program failed: {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
     Run { stdout, stderr, channel }
+}
+
+/// What the mod sends in protocol 2, as lines: its hello line, then every DIAG frame's line
+/// (COMMAND frames as `command <line>`), until `expect` of them have arrived or the
+/// connection ends.
+fn read_protocol_two(stream: UnixStream, expect: usize) -> Vec<String> {
+    let mut reader = BufReader::new(stream);
+    let mut out = Vec::new();
+    let mut hello = String::new();
+    if expect == 0 || reader.read_line(&mut hello).unwrap_or(0) == 0 {
+        return out;
+    }
+    out.push(hello.trim_end_matches('\n').to_string());
+    while out.len() < expect {
+        let mut header = [0u8; 5];
+        if reader.read_exact(&mut header).is_err() {
+            break;
+        }
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        assert!((1..=1025).contains(&length), "a frame of {length} bytes from the mod");
+        let mut payload = vec![0u8; length - 1];
+        reader.read_exact(&mut payload).unwrap();
+        let text = String::from_utf8(payload).expect("UTF-8");
+        match header[4] {
+            channel::KIND_DIAG => out.push(text),
+            channel::KIND_COMMAND => out.push(format!("command {text}")),
+            kind => panic!("the mod sent a frame of kind {kind:#04x}"),
+        }
+    }
+    out
 }
 
 /// The line the mod logs once it has started, whatever its settings.
@@ -216,7 +240,7 @@ fn where_the_game_is_not_what_it_expects_each_feature_switches_itself_off_and_sa
         .collect();
     assert_eq!(
         messages[0],
-        Message::Hello { protocol: channel::PROTOCOL, version: companion::VERSION.into(), features: Vec::new() }
+        Message::Hello { protocol: channel::PHONE_PROTOCOL, version: companion::VERSION.into(), features: Vec::new() }
     );
     let mut diagnosed = BTreeMap::new();
     for message in &messages[1..] {
@@ -431,7 +455,7 @@ fn with_a_stand_in_game_every_feature_does_what_it_says() {
     assert_eq!(
         messages,
         [
-            Message::Hello { protocol: channel::PROTOCOL, version: companion::VERSION.into(), features },
+            Message::Hello { protocol: channel::PHONE_PROTOCOL, version: companion::VERSION.into(), features },
             Message::Diagnostic {
                 feature: "hud".into(),
                 text: "disabled: the HUD hook failed (IllegalStateException: the renderer has changed)".into()
@@ -465,7 +489,7 @@ fn a_game_in_which_one_method_has_changed_loses_that_feature_and_keeps_the_other
         messages[..2],
         [
             Message::Hello {
-                protocol: channel::PROTOCOL,
+                protocol: channel::PHONE_PROTOCOL,
                 version: companion::VERSION.into(),
                 features: ["hud", "fullbright"].map(String::from).to_vec()
             },
@@ -681,7 +705,8 @@ s.close()
     let has_socket = running.payload_pid().await.is_some();
     assert!(has_socket, "the payload is running (it waits for its standard input to end)");
     plan.release_name();
-    let serving = plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
+    let serving =
+        plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line))), None).expect("a channel");
     let leftovers: Vec<_> = std::fs::read_dir(dir.join("rt")).unwrap().flatten().map(|e| e.path()).collect();
     assert!(
         leftovers.iter().all(|p| std::fs::read_dir(p).map(|d| d.count() == 0).unwrap_or(true)),
@@ -797,7 +822,9 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
         runtime: Some(dir.join("rt")),
     };
     util::create_private_dir_all(&dir.join("rt")).unwrap();
-    let plan = companion::plan(&CompanionConfig::default(), &fabric_instance(), jvm.major, &paths).expect("plan");
+    // Zoom alone (the planted file says otherwise), as in the launcher's own settings.
+    let only_zoom = CompanionConfig { phone: false, home: false, dark_menus: false, ..CompanionConfig::default() };
+    let plan = companion::plan(&only_zoom, &fabric_instance(), jvm.major, &paths).expect("plan");
     assert!(plan.injected(), "{}", plan.describe());
 
     let mut base = sandbox::base(&BaseOptions {
@@ -853,7 +880,15 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
     if running.payload_pid().await.is_some() {
         plan.release_name();
     }
-    let serving = plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
+    // The phone is served (without apps): the mod's protocol 2 frames are read.
+    let (outbox, outbound) = bastion_mc::phone::Outbox::new(16);
+    let dispatcher = bastion_mc::phone::dispatch::Dispatcher::new(Vec::new(), outbox, Arc::new(|_| {}));
+    let serving = plan
+        .serve(
+            Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line))),
+            Some(channel::Phone { dispatcher, outbound }),
+        )
+        .expect("a channel");
 
     // The program's standard error as it comes (the mod logs there: no SLF4J in this JVM),
     // its standard output until it says that the mod has started.
@@ -918,7 +953,7 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
         said[0],
         (
             Voice::Claimed,
-            format!("companion channel #1: hello: mod version {}, protocol 1, features: none", companion::VERSION)
+            format!("companion channel #1: hello: mod version {}, protocol 2, features: none", companion::VERSION)
         )
     );
     assert!(
@@ -930,10 +965,85 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+// ---------------------------------------------------------------- what the launcher sends the mod
+
+/// The mod's reader of protocol 2 (what the launcher sends: states, pictures, notices) and its
+/// JSON reader, in a plain JVM: well-formed frames kept as meant (a PNG, a JPEG and RGBA8
+/// decoded), malformed ones refused with nothing kept, and thousands of generated and mutated
+/// ones never raising anything but the refusal.
+#[test]
+fn the_mods_reader_of_the_launchers_frames_keeps_what_is_well_formed_and_refuses_the_rest() {
+    let dir = scratch("frames");
+    let jar = dir.join("bastion-companion.jar");
+    std::fs::write(&jar, companion::JAR).unwrap();
+    let classes = dir.join("classes");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/java/robust/bastion/companion/ChannelHarness.java");
+    let output = Command::new(javac())
+        .args(["--release", "17", "-proc:none", "-Xlint:all", "-cp"])
+        .arg(&jar)
+        .arg("-d")
+        .arg(&classes)
+        .arg(source)
+        .output()
+        .expect("javac");
+    assert!(output.status.success(), "javac failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 100_000;
+    let output = Command::new("java")
+        .args(["-Xmx256m", "-Djava.awt.headless=true", "-cp"])
+        .arg(format!("{}:{}", jar.display(), classes.display()))
+        .args(["bastion.companion.ChannelHarness", &seed.to_string(), "4000"])
+        .output()
+        .expect("java");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.lines().any(|l| l == "ok"),
+        "seed {seed}:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", stdout.lines().next().unwrap_or(""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The platform's version-independent core on a stand-in family: overlays and what comes
+/// back when they close, the home screen and the classic title, the phone key's edges, a
+/// failing overlay, the menu background, the HUD layer (`PlatformCoreCheck.java`).
+#[test]
+fn the_platform_core_keeps_its_rules_on_a_stand_in_family() {
+    let dir = scratch("core");
+    let jar = dir.join("bastion-companion.jar");
+    std::fs::write(&jar, companion::JAR).unwrap();
+    let classes = dir.join("classes");
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/java/robust/bastion/companion/PlatformCoreCheck.java");
+    let output = Command::new(javac())
+        .args(["--release", "17", "-proc:none", "-Xlint:all", "-cp"])
+        .arg(&jar)
+        .arg("-d")
+        .arg(&classes)
+        .arg(source)
+        .output()
+        .expect("javac");
+    assert!(output.status.success(), "javac failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new("java")
+        .args(["-Xmx128m", "-cp"])
+        .arg(format!("{}:{}", jar.display(), classes.display()))
+        .arg("bastion.companion.PlatformCoreCheck")
+        .output()
+        .expect("java");
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success() && stdout.lines().any(|l| l == "ok"), "{stdout}\n{stderr}");
+    // Each failure was reported once, at warning level, and nothing else was said.
+    for failed in ["the overlay (render) failed", "the menu background failed", "the HUD layer failed"] {
+        assert_eq!(stderr.matches(failed).count(), 1, "{failed}:\n{stderr}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // ---------------------------------------------------------------- the stand-ins
 
 fn find_jar(libraries: &Path, artifact: &str) -> PathBuf {
-    let dir = libraries.join("net/fabricmc").join(artifact);
+    let group = if artifact.starts_with("asm") { "org/ow2/asm" } else { "net/fabricmc" };
+    let dir = libraries.join(group).join(artifact);
     let mut found = Vec::new();
     for version in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())).flatten() {
         for file in std::fs::read_dir(version.path()).into_iter().flatten().flatten() {
@@ -989,8 +1099,9 @@ fn the_stand_ins_match_the_real_fabric_and_mixin_types() {
         return;
     };
     let libraries = PathBuf::from(root).join("data/bastion-mc/libraries");
-    let real = [find_jar(&libraries, "fabric-loader"), find_jar(&libraries, "sponge-mixin")];
-    println!("checked against {} and {}", real[0].display(), real[1].display());
+    let real =
+        [find_jar(&libraries, "fabric-loader"), find_jar(&libraries, "sponge-mixin"), find_jar(&libraries, "asm-tree")];
+    println!("checked against {}, {} and {}", real[0].display(), real[1].display(), real[2].display());
     let real_path = std::env::join_paths(&real).unwrap();
     let dir = scratch("stubs");
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1008,7 +1119,7 @@ fn the_stand_ins_match_the_real_fabric_and_mixin_types() {
     //    @Target and @Retention.
     let built = jar::build(root, &javac(), companion::VERSION, &dir.join("ours")).unwrap();
     assert!(built.jar == companion::JAR);
-    let stubs = dir.join("ours/stubs");
+    let stubs = dir.join("ours/stubs/common");
     let mut classes = Vec::new();
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -1026,7 +1137,10 @@ fn the_stand_ins_match_the_real_fabric_and_mixin_types() {
         classes,
         [
             "net.fabricmc.api.ClientModInitializer",
+            "org.objectweb.asm.tree.ClassNode",
             "org.spongepowered.asm.mixin.Mixin",
+            "org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin",
+            "org.spongepowered.asm.mixin.extensibility.IMixinInfo",
             "org.spongepowered.asm.mixin.injection.At",
             "org.spongepowered.asm.mixin.injection.Coerce",
             "org.spongepowered.asm.mixin.injection.Inject",

@@ -89,6 +89,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "phone"
+path = "fuzz_targets/phone.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "registry"
 path = "fuzz_targets/registry.rs"
 test = false

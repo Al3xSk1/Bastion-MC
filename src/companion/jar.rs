@@ -4,10 +4,27 @@
 //!
 //! **Hermetic.** Inputs are the sources under `java/companion`, the compile-only stand-ins
 //! under `java/stubs`, the project's `LICENSE`, and the system `javac`. No network, no build
-//! tool, no annotation processor — and no Minecraft: the mod reaches the game by name at run
-//! time, so Mojang's jar is not needed (and could not be shipped) to build it. The stand-ins
-//! are compiled into a directory of their own that is on the compiler's class path and never
-//! in the archive.
+//! tool, no annotation processor — and no Minecraft: Mojang's jar is not needed (and could not
+//! be shipped) to build it. The stand-ins are compiled into directories of their own that are
+//! on the compiler's class path and never in the archive.
+//!
+//! **Several Minecraft versions.** The mod is compiled in passes (see [`build_against`]):
+//!
+//! 1. `java/stubs/common` — Fabric Loader, Mixin and ASM types, names and signatures only;
+//! 2. `java/companion/src` — everything that does not name a game class (the features, the
+//!    platform API, the phone), against (1);
+//! 3. for each *family* of Minecraft versions listed in `java/stubs/tools/families.txt`: its
+//!    stubs `java/stubs/minecraft/<family>` (generated offline from Mojang's and Fabric's
+//!    published files by `java/stubs/tools/regenerate.py`, names and signatures only);
+//! 4. each family's *group* sources, `java/companion/platform/<group>`, against (1), (2) and
+//!    the stubs of **every** family of the group — which must all give the same class files
+//!    (the code names only what those families have in common, byte for byte); one copy is
+//!    packed;
+//! 5. each family's own sources, `java/companion/platform/<family>`, against (1), (2), its
+//!    group's classes and its stubs.
+//!
+//! Which family runs is decided in the game (`Families.java`, from a table generated here out
+//! of `families.txt`).
 //!
 //! **Reproducible.** The same sources and the same `javac` give the same bytes, wherever
 //! and whenever they are built: sources are passed in sorted order, classes carry no debug
@@ -32,7 +49,14 @@ pub const CLASS_RELEASE: u32 = 17;
 const MANIFEST: &str = "META-INF/MANIFEST.MF";
 const SOURCES: &str = "java/companion/src";
 const RESOURCES: &str = "java/companion/resources";
-const STUBS: &str = "java/stubs";
+/// Fabric Loader, Mixin and ASM stand-ins.
+const COMMON_STUBS: &str = "java/stubs/common";
+/// One directory of generated stand-ins per family of Minecraft versions.
+const MINECRAFT_STUBS: &str = "java/stubs/minecraft";
+/// The families: `<family> <group> <representative> <version>...` per line.
+pub const FAMILIES: &str = "java/stubs/tools/families.txt";
+/// Group and family sources: `java/companion/platform/<group or family>`.
+const PLATFORM_SOURCES: &str = "java/companion/platform";
 /// Where the mod's version is substituted in `fabric.mod.json`.
 const VERSION_MARK: &str = "@VERSION@";
 
@@ -40,6 +64,61 @@ pub struct Built {
     pub jar: Vec<u8>,
     /// What `javac -Xlint:all` had to say, if anything.
     pub warnings: String,
+}
+
+/// One family of Minecraft versions (a line of [`FAMILIES`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Family {
+    pub id: String,
+    pub group: String,
+    pub representative: String,
+    pub versions: Vec<String>,
+}
+
+fn is_identifier(word: &str) -> bool {
+    !word.is_empty()
+        && word.as_bytes()[0].is_ascii_alphabetic()
+        && word.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn is_version(word: &str) -> bool {
+    !word.is_empty() && word.len() <= 32 && word.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+}
+
+/// The families listed in `text` (the contents of [`FAMILIES`]), in order.
+pub fn parse_families(text: &str) -> Result<Vec<Family>, String> {
+    let mut out: Vec<Family> = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let words: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("{FAMILIES}, line {}: {why}", number + 1);
+        if words.len() < 4 {
+            return Err(bad("expected <family> <group> <representative> <version>..."));
+        }
+        let (id, group, representative) = (words[0], words[1], words[2]);
+        if !is_identifier(id) || !is_identifier(group) || id == group {
+            return Err(bad("family and group are Java identifiers, and different"));
+        }
+        let versions: Vec<String> = words[3..].iter().map(|v| v.to_string()).collect();
+        if !versions.iter().all(|v| is_version(v)) || !versions.iter().any(|v| v == representative) {
+            return Err(bad("versions are version numbers, and the representative is one of them"));
+        }
+        for earlier in &out {
+            if earlier.id == id || earlier.id == group || earlier.group == id {
+                return Err(bad("a family or group name is used twice"));
+            }
+            if let Some(v) = versions.iter().find(|v| earlier.versions.contains(v)) {
+                return Err(bad(&format!("{v} is in two families")));
+            }
+        }
+        out.push(Family { id: id.into(), group: group.into(), representative: representative.into(), versions });
+    }
+    if out.is_empty() {
+        return Err(format!("{FAMILIES} lists no family"));
+    }
+    Ok(out)
 }
 
 /// Every regular file below `dir`, as paths relative to it with `/` separators, sorted.
@@ -115,9 +194,24 @@ pub fn build(root: &Path, compiler: &OsStr, version: &str, work: &Path) -> Resul
     build_against(root, compiler, version, work, None)
 }
 
-/// As [`build`], but with `real` — the genuine Fabric Loader and Mixin jars — on the class
-/// path in place of the stand-ins. The result must be the same bytes: that is the test
-/// that the stand-ins are faithful.
+/// The Java source of the family table the mod picks its family from.
+fn family_table(families: &[Family]) -> String {
+    let mut rows = String::new();
+    for family in families {
+        let versions: Vec<String> = family.versions.iter().map(|v| format!("\"{v}\"")).collect();
+        rows.push_str(&format!("        {{\"{}\", \"{}\", {}}},\n", family.id, family.group, versions.join(", ")));
+    }
+    format!(
+        "package bastion.companion.platform;\n\n/** Generated from java/stubs/tools/families.txt by the build. */\nfinal class FamilyTable {{\n    \
+         /** Per family: its id, its group, then every Minecraft version in it. */\n    static final String[][] ROWS = {{\n{rows}    }};\n\n    \
+         private FamilyTable() {{\n    }}\n}}\n"
+    )
+}
+
+/// As [`build`], but with `real` — the genuine Fabric Loader, Mixin and ASM jars — on the
+/// class path in place of the common stand-ins. The result must be the same bytes: that is the
+/// test that those stand-ins are faithful. (The Minecraft stand-ins are always used: the
+/// game's jar is never an input.)
 pub fn build_against(
     root: &Path,
     compiler: &OsStr,
@@ -128,44 +222,147 @@ pub fn build_against(
     if version.is_empty() || !version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')) {
         return Err(format!("{version:?} is not usable as the mod's version"));
     }
+    let families_text = fs::read_to_string(root.join(FAMILIES)).map_err(|e| format!("reading {FAMILIES}: {e}"))?;
+    let families = parse_families(&families_text)?;
     let _ = fs::remove_dir_all(work);
-    let (stub_classes, classes, generated) = (work.join("stubs"), work.join("classes"), work.join("generated"));
+    let stubs = work.join("stubs");
+    let (common_stubs, classes, generated) = (stubs.join("common"), work.join("classes"), work.join("generated"));
     // An empty directory to name as the source path, so that javac looks for sources nowhere.
     let nowhere = work.join("empty");
 
-    // The mod's one generated source: its version.
+    // The mod's generated sources: its version, and the family table.
     let build_info = generated.join("bastion/companion/BuildInfo.java");
-    fs::create_dir_all(build_info.parent().expect("has a parent")).map_err(|e| format!("creating {work:?}: {e}"))?;
-    fs::write(
-        &build_info,
-        format!(
-            "package bastion.companion;\n\nfinal class BuildInfo {{\n    static final String VERSION = \"{version}\";\n\n    \
-             private BuildInfo() {{\n    }}\n}}\n"
+    let table = generated.join("bastion/companion/platform/FamilyTable.java");
+    for (path, text) in [
+        (
+            &build_info,
+            format!(
+                "package bastion.companion;\n\nfinal class BuildInfo {{\n    static final String VERSION = \"{version}\";\n\n    \
+                 private BuildInfo() {{\n    }}\n}}\n"
+            ),
         ),
-    )
-    .map_err(|e| format!("writing {}: {e}", build_info.display()))?;
+        (&table, family_table(&families)),
+    ] {
+        fs::create_dir_all(path.parent().expect("has a parent")).map_err(|e| format!("creating {work:?}: {e}"))?;
+        fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
 
-    let below = |dir: &str| -> Result<Vec<PathBuf>, String> {
-        let base = root.join(dir);
-        Ok(files_below(&base)?.into_iter().filter(|f| f.ends_with(".java")).map(|f| base.join(f)).collect())
+    let below = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        Ok(files_below(dir)?.into_iter().filter(|f| f.ends_with(".java")).map(|f| dir.join(f)).collect())
+    };
+    let path_of = |dirs: &[&Path]| -> Result<std::ffi::OsString, String> {
+        std::env::join_paths(dirs).map_err(|e| format!("class path: {e}"))
     };
     let mut warnings = String::new();
-    let class_path = match real {
-        Some(jars) => std::env::join_paths(jars).map_err(|e| format!("class path: {e}"))?,
+    // 1. The common stand-ins, or the real jars.
+    let common: Vec<PathBuf> = match real {
+        Some(jars) => jars.to_vec(),
         None => {
-            warnings = javac(compiler, nowhere.as_os_str(), &nowhere, &stub_classes, &below(STUBS)?)?;
-            stub_classes.into_os_string()
+            warnings =
+                javac(compiler, nowhere.as_os_str(), &nowhere, &common_stubs, &below(&root.join(COMMON_STUBS))?)?;
+            vec![common_stubs.clone()]
         }
     };
-    let mut sources = below(SOURCES)?;
+    let common_refs: Vec<&Path> = common.iter().map(PathBuf::as_path).collect();
+    // 2. The version-independent part of the mod.
+    let mut sources = below(&root.join(SOURCES))?;
     sources.push(build_info);
-    warnings.push_str(&javac(compiler, &class_path, &nowhere, &classes, &sources)?);
+    sources.push(table);
+    warnings.push_str(&javac(compiler, &path_of(&common_refs)?, &nowhere, &classes, &sources)?);
+
+    // 3. Every family's stand-ins.
+    for family in &families {
+        let dir = root.join(MINECRAFT_STUBS).join(&family.id);
+        let family_sources = below(&dir)?;
+        if family_sources.is_empty() {
+            return Err(format!("{} holds no stand-ins (java/stubs/tools/regenerate.py writes them)", dir.display()));
+        }
+        javac(compiler, nowhere.as_os_str(), &nowhere, &stubs.join(&family.id), &family_sources)?;
+    }
+
+    // 4. Each group, against every family of the group: the same class files each time.
+    let mut packed = vec![classes.clone()];
+    let mut groups: Vec<&str> = Vec::new();
+    for family in &families {
+        if !groups.contains(&family.group.as_str()) {
+            groups.push(&family.group);
+        }
+    }
+    for group in &groups {
+        let group_sources = below(&root.join(PLATFORM_SOURCES).join(group))?;
+        let out = work.join("group").join(group);
+        if group_sources.is_empty() {
+            fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
+            continue;
+        }
+        // The family whose class files were taken first, and those files.
+        type Compiled = (String, Vec<(String, Vec<u8>)>);
+        let mut first: Option<Compiled> = None;
+        for family in families.iter().filter(|f| f.group == *group) {
+            let each = work.join("group-check").join(group).join(&family.id);
+            let family_stubs = stubs.join(&family.id);
+            let mut path: Vec<&Path> = common_refs.clone();
+            path.push(&classes);
+            path.push(&family_stubs);
+            let said = javac(compiler, &path_of(&path)?, &nowhere, &each, &group_sources)
+                .map_err(|e| format!("the {group} sources against the stand-ins of {}: {e}", family.id))?;
+            let mut files = Vec::new();
+            for class in files_below(&each)? {
+                let bytes = fs::read(each.join(&class)).map_err(|e| format!("reading {class}: {e}"))?;
+                files.push((class, bytes));
+            }
+            match &first {
+                None => {
+                    warnings.push_str(&said);
+                    first = Some((family.id.clone(), files));
+                }
+                Some((id, expected)) => {
+                    if *expected != files {
+                        return Err(format!(
+                            "the {group} sources compile differently against the stand-ins of {} and of {id}: they \
+                             name something the two families do not have in common (move it into the families' own \
+                             sources)",
+                            family.id
+                        ));
+                    }
+                }
+            }
+        }
+        fs::create_dir_all(work.join("group")).map_err(|e| format!("creating {}: {e}", out.display()))?;
+        fs::rename(work.join("group-check").join(group).join(&first.expect("a group has families").0), &out)
+            .map_err(|e| format!("moving the {group} classes: {e}"))?;
+        packed.push(out);
+    }
+
+    // 5. Each family's own sources.
+    for family in &families {
+        let family_sources = below(&root.join(PLATFORM_SOURCES).join(&family.id))?;
+        if family_sources.is_empty() {
+            continue;
+        }
+        let out = work.join("family").join(&family.id);
+        let (group_classes, family_stubs) = (work.join("group").join(&family.group), stubs.join(&family.id));
+        let mut path: Vec<&Path> = common_refs.clone();
+        path.push(&classes);
+        path.push(&group_classes);
+        path.push(&family_stubs);
+        warnings.push_str(
+            &javac(compiler, &path_of(&path)?, &nowhere, &out, &family_sources)
+                .map_err(|e| format!("the sources of {}: {e}", family.id))?,
+        );
+        packed.push(out);
+    }
 
     let read = |path: PathBuf| fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()));
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    for class in files_below(&classes)? {
-        let bytes = read(classes.join(&class))?;
-        entries.push((class, bytes));
+    for dir in &packed {
+        for class in files_below(dir)? {
+            let bytes = read(dir.join(&class))?;
+            entries.push((class, bytes));
+        }
     }
     for resource in files_below(&root.join(RESOURCES))? {
         let mut bytes = read(root.join(RESOURCES).join(&resource))?;

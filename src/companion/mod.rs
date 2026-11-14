@@ -50,10 +50,12 @@ pub const JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bastion-compani
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Its class files need at least this Java release (`jar::CLASS_RELEASE`; a test compares).
 pub const MIN_JAVA: u32 = 17;
-/// Minecraft versions against whose classes every hook and lookup was checked, in a real
-/// launch (`tests/companion_game.rs`). To add one: run that test against it, then list it
-/// here.
-pub const TESTED_MINECRAFT: &[&str] = &["26.3"];
+/// Minecraft versions the mod was run on in a real launch (`tests/companion_game.rs`, title
+/// and world mode): the representative of each family of versions its adapters serve
+/// (`java/stubs/tools/families.txt`). The other versions of a family get the same adapter
+/// with `force`. To add one: run that test against it, then list it here.
+pub const TESTED_MINECRAFT: &[&str] =
+    &["1.20.1", "1.20.4", "1.21.1", "1.21.4", "1.21.5", "1.21.8", "1.21.10", "26.1.2", "26.2", "26.3"];
 
 /// Where the launcher puts the mod's files inside the sandbox.
 pub const SANDBOX_DIR: &str = "/bastion/companion";
@@ -91,10 +93,22 @@ pub struct CompanionConfig {
     pub fullbright: bool,
     /// What the game's brightness setting (0 to 1) is raised to.
     pub fullbright_gamma: f64,
+    /// The phone: pull it out in the game to reach the launcher's services.
+    pub phone: bool,
+    /// The key that pulls the phone out and puts it away, by Minecraft's name.
+    pub phone_key: String,
+    /// The redone home (title) screen.
+    pub home: bool,
+    /// Darker backgrounds behind the game's own menus.
+    pub dark_menus: bool,
     /// Test support, deliberately not settable from a configuration file: make the mod run
     /// its scripted self-test once the game has loaded (`tests/companion_game.rs`).
     #[serde(skip)]
     pub self_test: Option<SelfTest>,
+    /// Test support, deliberately not settable from a configuration file: serve the phone
+    /// with the demo service (`phone::demo`) — fake state for every app.
+    #[serde(skip)]
+    pub demo_phone: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +131,12 @@ impl Default for CompanionConfig {
             hud: false,
             fullbright: false,
             fullbright_gamma: 15.0,
+            phone: true,
+            phone_key: "key.keyboard.r".into(),
+            home: true,
+            dark_menus: true,
             self_test: None,
+            demo_phone: false,
         }
     }
 }
@@ -135,6 +154,10 @@ pub struct CompanionOverride {
     pub hud: Option<bool>,
     pub fullbright: Option<bool>,
     pub fullbright_gamma: Option<f64>,
+    pub phone: Option<bool>,
+    pub phone_key: Option<String>,
+    pub home: Option<bool>,
+    pub dark_menus: Option<bool>,
 }
 
 impl CompanionOverride {
@@ -152,8 +175,9 @@ const KEY_PREFIX: &str = "key.keyboard.";
 pub fn key_name(text: &str) -> Result<String> {
     let bad = |why: &str| {
         Error::Config(format!(
-            "companion zoom_key {text:?}: {why}. Use Minecraft's name for a keyboard key as it appears in \
-             options.txt, with or without the leading \"key.keyboard.\": \"c\", \"left.alt\", \"key.keyboard.f6\""
+            "companion key {text:?} (zoom_key or phone_key): {why}. Use Minecraft's name for a keyboard key as it \
+             appears in options.txt, with or without the leading \"key.keyboard.\": \"c\", \"left.alt\", \
+             \"key.keyboard.f6\""
         ))
     };
     if text.starts_with("key.mouse") {
@@ -173,6 +197,7 @@ pub fn key_name(text: &str) -> Result<String> {
 impl CompanionConfig {
     pub fn validate(&self) -> Result<()> {
         key_name(&self.zoom_key)?;
+        key_name(&self.phone_key)?;
         if !(1.1..=50.0).contains(&self.zoom_factor) {
             return Err(Error::Config("companion zoom_factor must be between 1.1 and 50".into()));
         }
@@ -195,22 +220,35 @@ impl CompanionConfig {
             hud: o.hud.unwrap_or(self.hud),
             fullbright: o.fullbright.unwrap_or(self.fullbright),
             fullbright_gamma: o.fullbright_gamma.unwrap_or(self.fullbright_gamma),
+            phone: o.phone.unwrap_or(self.phone),
+            phone_key: o.phone_key.unwrap_or_else(|| self.phone_key.clone()),
+            home: o.home.unwrap_or(self.home),
+            dark_menus: o.dark_menus.unwrap_or(self.dark_menus),
             self_test: self.self_test,
+            demo_phone: self.demo_phone,
         }
     }
 
     /// Every feature and whether it is switched on. The names are the mod's (`Feature.id()`).
-    pub fn features(&self) -> [(&'static str, bool); 3] {
-        [("zoom", self.zoom), ("hud", self.hud), ("fullbright", self.fullbright)]
+    pub fn features(&self) -> [(&'static str, bool); 6] {
+        [
+            ("zoom", self.zoom),
+            ("hud", self.hud),
+            ("fullbright", self.fullbright),
+            ("phone", self.phone),
+            ("home", self.home),
+            ("darkmenus", self.dark_menus),
+        ]
     }
 
     fn active(&self) -> Vec<&'static str> {
         self.features().into_iter().filter_map(|(name, on)| on.then_some(name)).collect()
     }
 
-    /// The file the mod reads its settings from: `key=value` lines. `channel` is the
-    /// socket's path inside the sandbox, if there is one.
-    pub fn settings(&self, channel: Option<&str>) -> Result<String> {
+    /// The file the mod reads its settings from: `key=value` lines. `minecraft` is the
+    /// version the launch starts (the mod picks its adapter by it), `channel` the socket's path
+    /// inside the sandbox, if there is one.
+    pub fn settings(&self, minecraft: &str, channel: Option<&str>) -> Result<String> {
         self.validate()?;
         let mut text = String::from(
             "# Written by bastion-mc for this launch, from [companion] in its configuration.\n\
@@ -224,6 +262,13 @@ impl CompanionConfig {
         set("hud", self.hud.to_string());
         set("fullbright", self.fullbright.to_string());
         set("fullbright.gamma", self.fullbright_gamma.to_string());
+        set("phone", self.phone.to_string());
+        set("phone.key", key_name(&self.phone_key)?);
+        set("home", self.home.to_string());
+        set("darkmenus", self.dark_menus.to_string());
+        if is_minecraft_version(minecraft) {
+            set("minecraft", minecraft.to_string());
+        }
         if let Some(path) = channel {
             set("channel", path.to_string());
         }
@@ -234,6 +279,11 @@ impl CompanionConfig {
         }
         Ok(text)
     }
+}
+
+/// A version as the settings file may carry it (one line, no `=`, nothing odd).
+fn is_minecraft_version(version: &str) -> bool {
+    (1..=32).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
 }
 
 // ---------------------------------------------------------------- whether to inject
@@ -340,7 +390,7 @@ pub fn plan(global: &CompanionConfig, instance: &Instance, java_major: u32, path
         return Ok(Plan { outcome: Err(skip) });
     }
     let endpoint = channel::Endpoint::create(paths.runtime.as_deref(), &paths.cache).map_err(|e| e.to_string());
-    let settings = cfg.settings(endpoint.is_ok().then(|| sandbox_path(SOCKET_NAME)).as_deref())?;
+    let settings = cfg.settings(&instance.minecraft, endpoint.is_ok().then(|| sandbox_path(SOCKET_NAME)).as_deref())?;
     let untested = (!TESTED_MINECRAFT.contains(&instance.minecraft.as_str())).then(|| instance.minecraft.clone());
     Ok(Plan { outcome: Ok(Injection { features: cfg.active(), untested, settings, endpoint }) })
 }
@@ -407,12 +457,13 @@ impl Plan {
         }
     }
 
-    /// Start reading the channel. Needs nothing but the socket that already exists, so it
-    /// works in a launcher that has confined itself — the launch calls it only then, because
-    /// nothing the game writes is read before. Remove the name first ([`Plan::release_name`]).
-    pub fn serve(self, logger: channel::Logger) -> Option<channel::Serving> {
+    /// Start reading the channel — and with `phone`, serving the phone (protocol 2). Needs
+    /// nothing but the socket that already exists, so it works in a launcher that has confined
+    /// itself — the launch calls it only then, because nothing the game writes is read before.
+    /// Remove the name first ([`Plan::release_name`]).
+    pub fn serve(self, logger: channel::Logger, phone: Option<channel::Phone>) -> Option<channel::Serving> {
         let endpoint = self.outcome.ok()?.endpoint.ok()?;
-        match endpoint.serve(logger.clone()) {
+        match endpoint.serve_phone(logger.clone(), phone) {
             Ok(serving) => Some(serving),
             Err(e) => {
                 logger(channel::Voice::Launcher, format!("companion channel: not served ({e})"));
@@ -626,10 +677,15 @@ mod tests {
         assert_eq!(mixins["injectors"]["defaultRequire"], 0);
         assert_eq!(mixins["compatibilityLevel"], format!("JAVA_{MIN_JAVA}"));
         let package = mixins["package"].as_str().unwrap().replace('.', "/");
+        // The families' mixins are listed as `<family>.<Name>`, in a package of their own.
         for class in mixins["client"].as_array().unwrap() {
-            let name = format!("{package}/{}.class", class.as_str().unwrap());
+            let name = format!("{package}/{}.class", class.as_str().unwrap().replace('.', "/"));
             assert!(entries.iter().any(|(n, _)| *n == name), "{name} is listed but not in the jar");
         }
+        assert_eq!(
+            mixins["plugin"], "bastion.companion.platform.MixinPlugin",
+            "the families' mixins are chosen at run time"
+        );
         let listed = mixins["client"].as_array().unwrap().len();
         let present = entries.iter().filter(|(n, _)| n.starts_with(&format!("{package}/"))).count();
         assert_eq!(listed, present, "every mixin class in the jar is listed");
@@ -681,11 +737,12 @@ mod tests {
     fn the_settings_file_says_what_the_configuration_says() {
         let cfg = CompanionConfig::default();
         assert_eq!(
-            cfg.settings(Some("/bastion/companion/channel")).unwrap(),
+            cfg.settings("26.3", Some("/bastion/companion/channel")).unwrap(),
             "# Written by bastion-mc for this launch, from [companion] in its configuration.\n\
              # Read-only: nothing in the game can change it.\n\
              zoom=true\nzoom.key=key.keyboard.c\nzoom.factor=4\nzoom.wheel=true\nhud=false\nfullbright=false\n\
-             fullbright.gamma=15\nchannel=/bastion/companion/channel\n"
+             fullbright.gamma=15\nphone=true\nphone.key=key.keyboard.r\nhome=true\ndarkmenus=true\nminecraft=26.3\n\
+             channel=/bastion/companion/channel\n"
         );
         let custom = CompanionConfig {
             zoom_key: "left.alt".into(),
@@ -694,10 +751,14 @@ mod tests {
             hud: true,
             fullbright: true,
             fullbright_gamma: 8.0,
+            phone: false,
+            phone_key: "m".into(),
+            home: false,
+            dark_menus: false,
             self_test: Some(SelfTest::World),
             ..CompanionConfig::default()
         };
-        let text = custom.settings(None).unwrap();
+        let text = custom.settings("1.20.1", None).unwrap();
         for line in [
             "zoom.key=key.keyboard.left.alt",
             "zoom.factor=2.5",
@@ -705,12 +766,25 @@ mod tests {
             "hud=true",
             "fullbright=true",
             "fullbright.gamma=8",
+            "phone=false",
+            "phone.key=key.keyboard.m",
+            "home=false",
+            "darkmenus=false",
+            "minecraft=1.20.1",
             "selftest=world",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} is missing from:\n{text}");
         }
         assert!(!text.contains("channel="), "no channel, no path");
-        assert!(!cfg.settings(None).unwrap().contains("selftest"), "the self-test is never on by configuration");
+        assert!(
+            !cfg.settings("26.3", None).unwrap().contains("selftest"),
+            "the self-test is never on by configuration"
+        );
+        // A version that could break out of its line is not written at all (the mod then has
+        // no adapter, which it says).
+        for odd in ["26.3\nselftest=world", "", "1 2", "26.3=x"] {
+            assert!(!cfg.settings(odd, None).unwrap().contains("minecraft="), "{odd:?}");
+        }
         // Every line is a comment or key=value with a value that cannot break out of its line.
         for line in text.lines() {
             assert!(line.starts_with('#') || line.split_once('=').is_some_and(|(k, v)| !k.is_empty() && !v.is_empty()));
@@ -747,9 +821,13 @@ mod tests {
         for factor in [1.0, 0.0, -4.0, 50.5, f64::NAN, f64::INFINITY] {
             cfg.zoom_factor = factor;
             assert!(cfg.validate().is_err(), "zoom_factor {factor}");
-            assert!(cfg.settings(None).is_err());
+            assert!(cfg.settings("26.3", None).is_err());
         }
         cfg.zoom_factor = 4.0;
+        cfg.phone_key = "key.mouse.left".into();
+        assert!(cfg.validate().is_err(), "the phone key is a keyboard key too");
+        cfg.phone_key = "r".into();
+        cfg.validate().unwrap();
         for gamma in [0.5, 100.5, f64::NAN] {
             cfg.fullbright_gamma = gamma;
             assert!(cfg.validate().is_err(), "fullbright_gamma {gamma}");
@@ -809,7 +887,7 @@ mod tests {
             Err(Skip::OtherLoader("Quilt".into()))
         );
 
-        for untested in ["26.4", "26.3.1", "26.2", "1.21.4", "26.3 ", ""] {
+        for untested in ["26.4", "26.3.1", "26.1", "1.21.3", "1.19.4", "26.3 ", ""] {
             assert_eq!(
                 decide(&cfg, &fabric(untested), untested, 27),
                 Err(Skip::Untested(untested.into())),
@@ -818,15 +896,24 @@ mod tests {
         }
         // The force switch lifts the version list and nothing else.
         let forced = CompanionConfig { force: true, ..cfg.clone() };
-        assert_eq!(decide(&forced, &fabric("1.21.4"), "1.21.4", 21), Ok(()));
-        assert_eq!(decide(&forced, &Kind::Vanilla, "1.21.4", 21), Err(Skip::NoLoader));
+        assert_eq!(decide(&forced, &fabric("1.21.3"), "1.21.3", 21), Ok(()));
+        assert_eq!(decide(&forced, &Kind::Vanilla, "1.21.3", 21), Err(Skip::NoLoader));
+        // Every family's representative is listed, and each is in the family table.
+        let families = jar::parse_families(include_str!("../../java/stubs/tools/families.txt")).unwrap();
+        assert_eq!(TESTED_MINECRAFT.len(), families.len());
+        for family in &families {
+            assert!(TESTED_MINECRAFT.contains(&family.representative.as_str()), "{}", family.id);
+            assert_eq!(decide(&cfg, &fabric(&family.representative), &family.representative, 21), Ok(()));
+        }
         assert_eq!(decide(&forced, &fabric("1.16.5"), "1.16.5", 8), Err(Skip::Java(8)));
         assert_eq!(decide(&forced, &fabric("1.20.1"), "1.20.1", 17), Ok(()));
 
         let off = CompanionConfig { enabled: false, force: true, ..cfg.clone() };
         assert_eq!(decide(&off, &fabric("26.3"), "26.3", 27), Err(Skip::Disabled));
-        let idle = CompanionConfig { zoom: false, ..cfg.clone() };
+        let idle = CompanionConfig { zoom: false, phone: false, home: false, dark_menus: false, ..cfg.clone() };
         assert_eq!(decide(&idle, &fabric("26.3"), "26.3", 27), Err(Skip::NothingOn));
+        let phone_only = CompanionConfig { zoom: false, home: false, dark_menus: false, ..cfg.clone() };
+        assert_eq!(decide(&phone_only, &fabric("26.3"), "26.3", 27), Ok(()), "the phone alone is reason enough");
         let hud_only = CompanionConfig { zoom: false, hud: true, ..cfg.clone() };
         assert_eq!(decide(&hud_only, &fabric("26.3"), "26.3", 27), Ok(()));
     }
@@ -911,7 +998,10 @@ mod tests {
         let line = plan.describe();
         let digest = util::hex_encode(&util::hash_bytes(util::HashAlg::Sha256, JAR));
         assert!(line.contains(&format!("sha256 {digest}")), "{line}");
-        assert!(line.contains("features: zoom;") && line.contains("enforces nothing"), "{line}");
+        assert!(
+            line.contains("features: zoom, phone, home, darkmenus;") && line.contains("enforces nothing"),
+            "{line}"
+        );
         assert!(!line.contains("untested"), "{line}");
 
         // Dropping the plan (a launch that failed before the sandbox started) leaves no socket behind.
@@ -938,7 +1028,7 @@ mod tests {
             (instance(Kind::Vanilla, "26.3", Default::default()), "no mod loader"),
             (
                 instance(fabric("26.4"), "26.4", Default::default()),
-                "Minecraft 26.4 is not a version it was tested with (26.3)",
+                "Minecraft 26.4 is not a version it was tested with (1.20.1, 1.20.4,",
             ),
             (
                 instance(fabric("26.3"), "26.3", CompanionOverride { enabled: Some(false), ..Default::default() }),

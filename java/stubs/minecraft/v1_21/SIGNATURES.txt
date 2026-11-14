@@ -1,0 +1,167 @@
+# What the stubs below declare (run-time names), the same for every version of a family.
+class it/unimi/dsi/fastutil/ints/Int2IntFunction missing extends=None implements=
+class net/minecraft/class_1011 class extends=None implements=
+  m <init> (IIZ)V 
+  m close ()V 
+  m method_4305 (III)V 
+class net/minecraft/class_1041 class extends=None implements=
+  m method_4486 ()I 
+  m method_4490 ()J 
+  m method_4495 ()D 
+  m method_4502 ()I 
+class net/minecraft/class_1043 class extends=net/minecraft/class_1044 implements=
+  m <init> (IIZ)V 
+  m <init> (Lnet/minecraft/class_1011;)V 
+  m close ()V 
+  m method_4524 ()V 
+  m method_4525 ()Lnet/minecraft/class_1011; 
+class net/minecraft/class_1044 class extends=None implements=
+  m close ()V 
+class net/minecraft/class_1058 class extends=None implements=
+class net/minecraft/class_1060 class extends=None implements=
+  m method_4615 (Lnet/minecraft/class_2960;)V 
+  m method_4616 (Lnet/minecraft/class_2960;Lnet/minecraft/class_1044;)V 
+class net/minecraft/class_1074 class extends=None implements=
+  m method_4662 (Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String; static
+class net/minecraft/class_1076 class extends=None implements=
+class net/minecraft/class_1109 class extends=None implements=net/minecraft/class_1113
+  m method_47978 (Lnet/minecraft/class_6880;F)Lnet/minecraft/class_1109; static
+class net/minecraft/class_1113 interface extends=None implements=
+class net/minecraft/class_1144 class extends=None implements=
+  m method_4873 (Lnet/minecraft/class_1113;)V 
+class net/minecraft/class_2561 interface extends=None implements=
+  m getString ()Ljava/lang/String; 
+  m method_10858 (I)Ljava/lang/String; 
+  m method_43470 (Ljava/lang/String;)Lnet/minecraft/class_5250; static
+class net/minecraft/class_2583 class extends=None implements=
+  f field_24360 Lnet/minecraft/class_2583; static
+class net/minecraft/class_2960 class extends=None implements=
+  m method_43902 (Ljava/lang/String;Ljava/lang/String;)Lnet/minecraft/class_2960; static
+class net/minecraft/class_310 class extends=None implements=
+  f field_1690 Lnet/minecraft/class_315; 
+  f field_1705 Lnet/minecraft/class_329; 
+  f field_1724 Lnet/minecraft/class_746; 
+  f field_1755 Lnet/minecraft/class_437; 
+  f field_1772 Lnet/minecraft/class_327; 
+  m method_1483 ()Lnet/minecraft/class_1144; 
+  m method_1507 (Lnet/minecraft/class_437;)V 
+  m method_1526 ()Lnet/minecraft/class_1076; 
+  m method_1530 ()Z 
+  m method_1531 ()Lnet/minecraft/class_1060; 
+  m method_1551 ()Lnet/minecraft/class_310; static
+  m method_1592 ()V 
+  m method_18506 ()Lnet/minecraft/class_4071; 
+  m method_22683 ()Lnet/minecraft/class_1041; 
+class net/minecraft/class_315 class extends=None implements=
+  f field_1842 Z 
+class net/minecraft/class_327 class extends=None implements=
+  f field_2000 I 
+  m method_1727 (Ljava/lang/String;)I 
+  m method_27525 (Lnet/minecraft/class_5348;)I 
+  m method_30880 (Lnet/minecraft/class_5481;)I 
+class net/minecraft/class_329 class extends=None implements=
+class net/minecraft/class_332 class extends=None implements=
+  m method_25290 (Lnet/minecraft/class_2960;IIFFIIII)V 
+  m method_25291 (Lnet/minecraft/class_2960;IIIFFIIII)V 
+  m method_25293 (Lnet/minecraft/class_2960;IIIIFFIIII)V 
+  m method_25294 (IIIII)V 
+  m method_25298 (IIIIILnet/minecraft/class_1058;)V 
+  m method_25302 (Lnet/minecraft/class_2960;IIIIII)V 
+  m method_25303 (Lnet/minecraft/class_327;Ljava/lang/String;III)I 
+  m method_27535 (Lnet/minecraft/class_327;Lnet/minecraft/class_2561;III)I 
+  m method_35720 (Lnet/minecraft/class_327;Lnet/minecraft/class_5481;III)I 
+  m method_44379 (IIII)V 
+  m method_44380 ()V 
+  m method_48465 (IIIIILnet/minecraft/class_1058;FFFF)V 
+  m method_51430 (Lnet/minecraft/class_327;Lnet/minecraft/class_5481;IIIZ)I 
+  m method_51433 (Lnet/minecraft/class_327;Ljava/lang/String;IIIZ)I 
+  m method_51439 (Lnet/minecraft/class_327;Lnet/minecraft/class_2561;IIIZ)I 
+  m method_51448 ()Lnet/minecraft/class_4587; 
+class net/minecraft/class_339 class extends=None implements=net/minecraft/class_364
+  m method_25369 ()Lnet/minecraft/class_2561; 
+class net/minecraft/class_3417 class extends=None implements=
+  f field_15015 Lnet/minecraft/class_6880$class_6883; static
+class net/minecraft/class_364 interface extends=None implements=
+  m method_16803 (III)Z 
+  m method_25400 (CI)Z 
+  m method_25401 (DDDD)Z 
+  m method_25402 (DDI)Z 
+  m method_25403 (DDIDD)Z 
+  m method_25404 (III)Z 
+  m method_25406 (DDI)Z 
+class net/minecraft/class_3675 class extends=None implements=
+  m method_15981 (Ljava/lang/String;)Lnet/minecraft/class_3675$class_306; static
+  m method_15987 (JI)Z static
+class net/minecraft/class_3675$class_306 class extends=None implements=
+  m method_1444 ()I 
+  m method_27445 ()Lnet/minecraft/class_2561; 
+class net/minecraft/class_4069 interface extends=None implements=net/minecraft/class_364
+  m method_16803 (III)Z 
+  m method_25396 ()Ljava/util/List; 
+  m method_25400 (CI)Z 
+  m method_25401 (DDDD)Z 
+  m method_25402 (DDI)Z 
+  m method_25403 (DDIDD)Z 
+  m method_25404 (III)Z 
+  m method_25406 (DDI)Z 
+class net/minecraft/class_4071 class extends=None implements=
+class net/minecraft/class_4185 class extends=net/minecraft/class_4264 implements=net/minecraft/class_364
+  f field_22767 Lnet/minecraft/class_4185$class_4241; 
+  m method_25306 ()V 
+class net/minecraft/class_4185$class_4241 interface extends=None implements=
+class net/minecraft/class_4189 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;Lnet/minecraft/class_315;)V 
+class net/minecraft/class_426 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;Lnet/minecraft/class_315;Lnet/minecraft/class_1076;)V 
+class net/minecraft/class_4264 class extends=net/minecraft/class_339 implements=net/minecraft/class_364
+  m method_25306 ()V 
+class net/minecraft/class_429 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;Lnet/minecraft/class_315;)V 
+class net/minecraft/class_4325 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;)V 
+class net/minecraft/class_437 class extends=None implements=net/minecraft/class_4069,net/minecraft/class_364
+  f field_22789 I 
+  f field_22790 I 
+  m <init> (Lnet/minecraft/class_2561;)V 
+  m method_25393 ()V 
+  m method_25394 (Lnet/minecraft/class_332;IIF)V 
+  m method_25396 ()Ljava/util/List; 
+  m method_25404 (III)Z 
+  m method_25419 ()V 
+  m method_25420 (Lnet/minecraft/class_332;IIF)V 
+  m method_25421 ()Z 
+  m method_25422 ()Z 
+  m method_25426 ()V 
+  m method_25432 ()V 
+class net/minecraft/class_442 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> ()V 
+class net/minecraft/class_4587 class extends=None implements=
+  m method_22903 ()V 
+  m method_22905 (FFF)V 
+  m method_22909 ()V 
+  m method_46416 (FFF)V 
+class net/minecraft/class_500 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;)V 
+class net/minecraft/class_5250 class extends=None implements=net/minecraft/class_2561
+class net/minecraft/class_526 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;)V 
+class net/minecraft/class_5348 interface extends=None implements=
+class net/minecraft/class_5481 interface extends=None implements=
+  m method_30747 (Ljava/lang/String;Lnet/minecraft/class_2583;)Lnet/minecraft/class_5481; static
+  m method_34908 (Ljava/lang/String;Lnet/minecraft/class_2583;Lit/unimi/dsi/fastutil/ints/Int2IntFunction;)Lnet/minecraft/class_5481; static
+class net/minecraft/class_6880 interface extends=None implements=
+class net/minecraft/class_6880$class_6883 class extends=None implements=net/minecraft/class_6880
+class net/minecraft/class_746 class extends=None implements=
+class net/minecraft/class_8219 class extends=net/minecraft/class_437 implements=net/minecraft/class_4069,net/minecraft/class_364
+  m <init> (Lnet/minecraft/class_437;)V 
+class org/joml/Matrix3x2f class extends=None implements=
+  m scale (F)Lorg/joml/Matrix3x2f; 
+  m translate (FF)Lorg/joml/Matrix3x2f; 
+class org/joml/Matrix3x2fStack class extends=org/joml/Matrix3x2f implements=
+  m popMatrix ()Lorg/joml/Matrix3x2fStack; 
+  m pushMatrix ()Lorg/joml/Matrix3x2fStack; 
+hooks net/minecraft/class_310
+  @m method_1507 (Lnet/minecraft/class_437;)V  (setScreen)
+  @m method_1523 (Z)V  (runTick)
+hooks net/minecraft/class_329
+  @m method_1753 (Lnet/minecraft/class_332;Lnet/minecraft/class_9779;)V  (render)

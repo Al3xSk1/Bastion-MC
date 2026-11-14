@@ -444,6 +444,25 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             },
             text("diag zoom \u{1b}[2J\u{1b}]0;title\u{7}\u{202e}text\n").repeat(40),
         ],
+        "phone" => {
+            use bastion_mc::companion::channel::{KIND_COMMAND, KIND_DIAG, frame};
+            let mut many = Vec::new();
+            for i in 0..40 {
+                many.extend(frame(KIND_COMMAND, format!("spotify play {i}").as_bytes()));
+            }
+            vec![
+                frame(KIND_COMMAND, b"spotify play"),
+                [frame(KIND_COMMAND, b"spotify search -- Daft Punk"), frame(KIND_DIAG, b"diag zoom disabled: no")]
+                    .concat(),
+                [frame(KIND_COMMAND, b"browser open discord"), frame(KIND_COMMAND, b"spotify wipe")].concat(),
+                frame(KIND_COMMAND, b"spotify play \xff\n\x1b[2J"),
+                // A kind the mod never sends, and a length over the limit, each mid-stream.
+                [frame(KIND_COMMAND, b"spotify play"), frame(0x81, b"spotify\0{}")].concat(),
+                [0, 0, 0x10, 0, KIND_COMMAND].to_vec(),
+                [0, 0, 0, 0, KIND_COMMAND].to_vec(),
+                many,
+            ]
+        }
         "registry" => {
             // A build, a project, a list of builds and a hash lookup, shaped like Modrinth's answers.
             let sha512 = "090e8b47b413523b8682c3953beb6d99e5a92473a8d0580bdbf6a057352aadb8ad8b7a2d08f36c99c14ed3294923102c45724c88b24d697a05b729925ce03de3";
@@ -526,6 +545,7 @@ fn every_harness_has_a_test_here() {
         "zipdir",
         "udp",
         "companion",
+        "phone",
         "registry",
         "jar",
     ];
@@ -584,6 +604,11 @@ fn datagram_relay_decisions() {
 #[test]
 fn companion_channel_reader() {
     run("companion");
+}
+
+#[test]
+fn phone_frames_and_dispatch() {
+    run("phone");
 }
 
 #[test]

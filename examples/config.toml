@@ -129,10 +129,12 @@ extra_hosts = []
 verify_assets_on_launch = true
 parallel = 8
 
-# The companion mod: zoom and a few other conveniences, built into the launcher and added to
-# Fabric profiles for the session (Minecraft 26.3; the signed mods directory is not
-# touched). It enforces nothing. An instance can set any of these keys for itself under
-# [companion] in its instance.toml.
+# The companion mod: the phone, the home screen, dark menus, zoom and a few other
+# conveniences, built into the launcher and added to Fabric profiles for the session
+# (Minecraft 1.20.1, 1.20.4, 1.21.1, 1.21.4, 1.21.5, 1.21.8, 1.21.10, 26.1.2, 26.2, 26.3; the
+# other versions from 1.20.1 to 26.3 with force; zoom, hud and fullbright on 26.3 only; the
+# signed mods directory is not touched). It enforces nothing. An instance can set any of these
+# keys for itself under [companion] in its instance.toml.
 [companion]
 enabled = true
 force = false              # also add it for Minecraft versions it was not tested with
@@ -143,3 +145,7 @@ zoom_wheel = true
 hud = false                # frames per second, position and facing in a corner
 fullbright = false         # brighten dark places. Some servers do not allow this.
 fullbright_gamma = 15.0    # 1 to 100; the game's own brightness slider ends at 1
+phone = true               # the in-game phone (Spotify, the browser, clips, Realms, settings)
+phone_key = "key.keyboard.r"   # pulls the phone out and puts it away
+home = true                # the redone home (title) screen
+dark_menus = true          # darker backgrounds behind the game's own menus

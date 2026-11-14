@@ -31,6 +31,15 @@ public abstract class Feature {
         return live;
     }
 
+    /**
+     * Whether this feature reaches the game through 26.3's names (the zoom, the HUD readout
+     * and fullbright do): it is then started on that version only, and elsewhere reported as
+     * not available. Features built on the platform API run on every family.
+     */
+    protected boolean writtenFor26_3() {
+        return false;
+    }
+
     /** Read settings. Called once, before {@link #resolve}. */
     protected void configure(Config config) {
     }

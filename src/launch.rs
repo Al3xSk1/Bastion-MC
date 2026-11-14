@@ -50,7 +50,7 @@ use crate::{
     },
     net::http::HttpClient,
     paths::{Paths, validate_file_name},
-    persist,
+    persist, phone,
     profile::{manifest::ProfileManifest, mods, packs},
     sandbox::{
         self, BaseOptions, GAME_DIR, Mount, Network, Resolv, SUPPORT_DIR, SandboxSpec, cgroup, display, nested,
@@ -980,6 +980,22 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     );
     log.line(Source::Launcher, &companion.describe());
 
+    // The phone's services (round 4; docs/notes/round4-contract.md), prepared now — before
+    // step 9 — because the confined launcher can start no helper and connect no new socket.
+    // Only when the phone can be served: the companion is added and has its channel. One
+    // block per service; each says in the log what it prepared, or why it is off.
+    let mut services: Vec<Box<dyn phone::Service>> = Vec::new();
+    if companion.has_channel() {
+        // The demo (fake state for every app) is a test switch, never a configuration key.
+        if cfg.companion.demo_phone || std::env::var_os("BASTION_PHONE_DEMO").is_some_and(|v| v == "1") {
+            let sink = log.clone();
+            services.extend(phone::demo::services(Arc::new(move |line: String| sink.line(Source::Launcher, &line))));
+        }
+    }
+    for service in &services {
+        log.line(Source::Launcher, &service.describe());
+    }
+
     // Resource limits. Asked of the user manager now, so that "it cannot" is known before
     // the game starts rather than discovered as a sandbox that fails to come up.
     let limits = match cfg.sandbox.cgroup {
@@ -1233,6 +1249,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             }
             keep.write.push(paths.cache.clone()); // scratch and unpacked natives, removed at exit
             keep.tcp_connect.extend(outbound_ports);
+            // What the phone's services still need: directories they write, ports they connect
+            // to — nothing else can be added.
+            for service in &services {
+                service.confinement_needs(&mut keep);
+            }
             // What the broker forwards to Mojang goes through the proxy, if one is set.
             keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
             let demand = if mode == ConfineMode::Require { confine::Demand::Whole } else { confine::Demand::Possible };
@@ -1326,14 +1347,32 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     let out = tokio::spawn(relay_output(running.child.stdout.take().expect("piped"), Source::Game, log.clone()));
     let err = tokio::spawn(relay_output(running.child.stderr.take().expect("piped"), Source::Game, log.clone()));
     // The companion's channel (its socket's name on the host went in step 8). What arrives
-    // on it was written by something inside the game and is logged as such.
-    let companion_channel = companion.serve({
+    // on it was written by something inside the game and is logged as such. With it, the
+    // phone: the services' apps — made only now, in the confined launcher — behind the
+    // dispatcher, which enforces each app's vocabulary and limits.
+    let phone = companion.has_channel().then(|| {
+        let apps: Vec<Box<dyn phone::PhoneApp>> =
+            std::mem::take(&mut services).into_iter().map(|s| s.into_app()).collect();
+        let (outbox, outbound) = phone::Outbox::new(256);
         let sink = log.clone();
-        Arc::new(move |voice, line: String| match voice {
-            companion::channel::Voice::Launcher => sink.line(Source::Launcher, &line),
-            companion::channel::Voice::Claimed => sink.line(Source::Game, &line),
-        })
+        let dispatcher = phone::dispatch::Dispatcher::new(
+            apps,
+            outbox,
+            Arc::new(move |line: String| sink.line(Source::Launcher, &line)),
+        );
+        companion::channel::Phone { dispatcher, outbound }
     });
+    drop(services);
+    let companion_channel = companion.serve(
+        {
+            let sink = log.clone();
+            Arc::new(move |voice, line: String| match voice {
+                companion::channel::Voice::Launcher => sink.line(Source::Launcher, &line),
+                companion::channel::Voice::Claimed => sink.line(Source::Game, &line),
+            })
+        },
+        phone,
+    );
 
     let mut interrupted = false;
     let status = tokio::select! {
@@ -1410,6 +1449,9 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
 
     if let Some(channel) = companion_channel {
+        if let Some(summary) = channel.phone_summary() {
+            log.line(Source::Launcher, &summary);
+        }
         log.line(Source::Launcher, &channel.finish());
     }
 

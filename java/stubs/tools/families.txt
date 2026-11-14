@@ -1,0 +1,21 @@
+# The families of Minecraft versions the companion's adapters serve: versions whose stubs
+# (java/stubs/tools/needed.txt, written by genstubs.py) declare the same signatures — the
+# members the adapters call and override, and the methods their mixins inject into.
+#
+# The build reads this file: each family's stubs are java/stubs/minecraft/<family>; its
+# sources are java/companion/platform/<family> (compiled against those stubs) and those of
+# its group, java/companion/platform/<group> (compiled against the stubs of every family of
+# the group, which must give the same class files). The mod picks the family of the running
+# version from the third column on.
+#
+# <family>  <group>       <representative>  <every version of the family>
+v1_20_1     intermediary  1.20.1            1.20.1
+v1_20_2     intermediary  1.20.4            1.20.2 1.20.3 1.20.4 1.20.5 1.20.6
+v1_21       intermediary  1.21.1            1.21 1.21.1
+v1_21_2     intermediary  1.21.4            1.21.2 1.21.3 1.21.4
+v1_21_5     intermediary  1.21.5            1.21.5
+v1_21_6     intermediary  1.21.8            1.21.6 1.21.7 1.21.8
+v1_21_9     intermediary  1.21.10           1.21.9 1.21.10 1.21.11
+v26_1       mojang        26.1.2            26.1 26.1.1 26.1.2
+v26_2       mojang        26.2              26.2
+v26_3       mojang        26.3              26.3

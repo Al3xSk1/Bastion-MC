@@ -45,6 +45,11 @@ public final class Fullbright extends Feature {
     }
 
     @Override
+    protected boolean writtenFor26_3() {
+        return true;
+    }
+
+    @Override
     protected void resolve(Game game) throws Throwable {
         client = new Client(game);
         Class<?> minecraft = game.type("net.minecraft.client.Minecraft");

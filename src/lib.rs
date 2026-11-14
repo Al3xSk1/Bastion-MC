@@ -21,6 +21,7 @@ pub mod mojang;
 pub mod net;
 pub mod paths;
 pub mod persist;
+pub mod phone;
 pub mod profile;
 pub mod proofs;
 pub mod running;
