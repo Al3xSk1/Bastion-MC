@@ -9,8 +9,8 @@ import bastion.companion.Feature;
 import bastion.companion.Game;
 
 /**
- * Two or three lines in the top-left corner while in a world: frames per second, and the
- * player's position and facing.
+ * One line or three in the top-left corner while in a world: frames per second, and (unless
+ * the game withholds them) the player's position and facing.
  *
  * Position and facing are what the debug screen (F3) shows, and are withheld under the
  * same condition: when the server (or the player's own option) asks for reduced debug

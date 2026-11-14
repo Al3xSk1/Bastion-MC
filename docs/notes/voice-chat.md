@@ -556,11 +556,10 @@ changes (second engineer), 20 of 20 after them.
   command line does not contain the clone's path, and the rule for this machine is to kill
   only processes whose command line does, so it was left alone and is reported here.
   `kill 742946` removes it.
-* **`docs/notes/broker-test-race.patch`** — a ready fix for flake (4) below, **not applied**
-  on this branch: it changes only `tests/broker.rs` (the stand-in game server echoes) and
-  `tests/java/BrokerProbe.java` (the probe waits for the echo, at most 15 s), which belong
-  to the broker work. `git apply docs/notes/broker-test-race.patch` after the merge, or hand
-  it to whoever owns those files; then delete the patch file.
+* **`docs/notes/broker-test-race.patch`** — a fix for flake (4) below, written here and
+  not applied on this branch. *(Integrator, 2026-11-13: not needed and removed — the
+  review-fixes package had already made that test independent of the race, commit
+  `4a62271`.)*
 * **Tests that existed before and fail now and then — four causes, none of them in this
   package's code.** If one of them fails during integration, run it again before looking
   for a reason in a branch.
@@ -601,8 +600,8 @@ changes (second engineer), 20 of 20 after them.
   queued the connection at the relay's listener, which can be before the relay has accepted
   it, connected to the server and registered it (`gate.opened`). A real client cannot hit
   this: it joins only after the server's reply has come back through that connection.
-  **Not applied here** (the two files belong to the broker work of this round); **the fix
-  is ready as `docs/notes/broker-test-race.patch`** — `git apply` it after merging: the
+  **Not applied here** (the two files belong to the broker work of this round; at the
+  merge the review fixes turned out to cover it already, and the patch was removed): the
   stand-in game server in `tests/broker.rs` echoes what it reads, and the probe waits for
   the echo (at most 15 s) before `join_warm`; the echo can only arrive once the relay is
   splicing, which is after it registered the connection. Verified by widening the race on

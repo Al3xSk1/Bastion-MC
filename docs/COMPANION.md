@@ -228,10 +228,12 @@ that private directory, where other programs running as you could connect and be
 if they were the game. A launch that stops with an error before the launcher has confined
 itself removes the name on its way out. The name stays if the launcher cannot establish
 that the program in the sandbox exists (it then confines itself and can no longer remove
-it), or if the launcher is killed or crashes before that point; a later launch then
-removes it (a socket at least a minute old on which nobody listens). The launcher starts
-reading the socket only after it has confined itself — like every other input from the
-game.
+it — and says so, with a warning in the log and to the front end), or if the launcher is
+killed or crashes before that point; a later launch that adds the companion then removes
+it (a socket at least a minute old on which nobody listens). The launcher starts reading
+the socket only after it has confined itself — like every other input from the game; a
+test in the default suite (`tests/companion.rs`) serves and reads the channel from a
+process confined exactly that way, after the name was removed.
 
 Version 1 has no message from the launcher to the mod, and no message that could ask the
 launcher for anything. A design for approval prompts that would use the channel — with the

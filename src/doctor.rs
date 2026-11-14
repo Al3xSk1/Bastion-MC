@@ -463,7 +463,14 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
             j
         }
         Ok(_) => {
-            r.fail("system JVMs", format!("none under {}; install e.g. jre21-openjdk", java::JVM_ROOT));
+            r.fail(
+                "system JVMs",
+                format!(
+                    "none under {}; install e.g. jdk25-openjdk (runtimes are found by their release file, which \
+                     Arch's jre packages of Java 17 and newer do not ship)",
+                    java::JVM_ROOT
+                ),
+            );
             Vec::new()
         }
         Err(e) => {
@@ -520,7 +527,9 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
             format!(
                 "TLS 1.3 only; {} system trust anchors; {} pinned host pattern(s)",
                 roots.len(),
-                cfg.tls.pins.len()
+                crate::net::tls::PinSet::from_config(&cfg.tls.pins, cfg.tls.builtin_pins)
+                    .map(|pins| pins.host_count().to_string())
+                    .unwrap_or_else(|e| format!("invalid ({e})"))
             ),
         ),
         Err(e) => r.fail("TLS", e.to_string()),

@@ -1,9 +1,12 @@
-//! XDG Base Directory layout. Nothing is ever written outside these four roots.
+//! XDG Base Directory layout. Everything the launcher keeps lives under these four roots. The
+//! only files outside them are short-lived sockets under `$XDG_RUNTIME_DIR/bastion-mc/` (the
+//! game's Wayland security context, `wl-*`, and the companion channel, `companion-*`), whose
+//! names go once the sandbox holds them; see `sandbox::display` and `companion::channel`.
 //!
 //! ```text
 //! $XDG_CONFIG_HOME/bastion-mc/   config.toml, trusted-keys.d/
 //! $XDG_DATA_HOME/bastion-mc/     instances/<id>/, libraries/, versions/, assets/, vault/
-//! $XDG_CACHE_HOME/bastion-mc/    scratch/ (per-launch game root), natives/
+//! $XDG_CACHE_HOME/bastion-mc/    scratch/ (per-launch game root and unpacked natives), running/
 //! $XDG_STATE_HOME/bastion-mc/    logs/, profile-serials/, accounts/, canary/, default-account
 //! ```
 

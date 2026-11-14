@@ -97,7 +97,7 @@ fn javac(
         .output()
         .map_err(|e| {
             let name = compiler.to_string_lossy();
-            format!("cannot run javac ({name}): {e}. Install a JDK (Arch: `pacman -S jdk-openjdk`) or set JAVAC.")
+            format!("cannot run javac ({name}): {e}. Install a JDK of version 17 or newer (Arch: `pacman -S jdk25-openjdk`, or jdk-openjdk) or set JAVAC.")
         })?;
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.status.success() {

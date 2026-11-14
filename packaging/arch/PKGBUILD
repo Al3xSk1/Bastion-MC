@@ -150,21 +150,24 @@ package_bastion-mc() {
     'glibc'
     'gcc-libs'
     'bubblewrap>=0.11.0'   # --ro-bind-fd, --disable-userns, --size, --args
-    'java-runtime'         # system OpenJDK only; the launcher never downloads a JVM
+    'java-runtime'         # system OpenJDK only (found by its release file: the jdk packages, or jre8); the launcher never downloads a JVM
   )
   optdepends=(
     'bastion-mc-gui: graphical front end'
-    'jre8-openjdk: Minecraft 1.16.5 and older'
-    'jre17-openjdk: Minecraft 1.17 - 1.20.4'
-    'jre21-openjdk: Minecraft 1.20.5 - 1.21.x'
-    'jre-openjdk: current Minecraft releases'
+    'jre8-openjdk-headless: Minecraft 1.16.5 and older'
+    'jdk17-openjdk: Minecraft 1.17 - 1.20.4 (for Java 17+ only the jdk packages ship the release file the launcher reads)'
+    'jdk21-openjdk: Minecraft 1.20.5 - 1.21.x'
+    'jdk25-openjdk: Minecraft 26.x'
     'age: encrypted refresh-token vault (hardware keys via age plugins)'
     'gamescope: isolate the game from the X11 session (nested compositor)'
   )
   cd "$_srcdir"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc"
-  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md docs/THREAT_MODEL.md docs/TOKEN_INJECTION.md \
-    docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md
+  # The documents as a tree, so that the README's relative links work where it is installed.
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/" docs/README.md docs/THREAT_MODEL.md \
+    docs/TOKEN_INJECTION.md docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md docs/COMPANION.md docs/MODS.md
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/images/" docs/images/*.png
   install -Dm0644 examples/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   # Root-owned trust anchors for profile signatures. When this directory contains *.pub

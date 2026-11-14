@@ -166,11 +166,20 @@ pub fn select(installed: &[Jvm], required: u32, policy: JavaMatch, override_home
             let have: Vec<String> = installed.iter().map(|j| j.major.to_string()).collect();
             Error::Config(format!(
                 "this game version needs Java {required}{}; installed under {JVM_ROOT}: [{}]. \
-                 Install it with pacman (jre{required}-openjdk, or jre-openjdk if {required} is the current release){}. \
-                 The launcher never downloads a JVM.",
+                 Install it with pacman ({}){}. The launcher finds a runtime by the `release` file in its directory, \
+                 which Arch's jre packages of Java 17 and newer do not ship. The launcher never downloads a JVM.",
                 if policy == JavaMatch::Newer { " or newer" } else { "" },
                 have.join(", "),
-                if policy == JavaMatch::Exact { ", or set java.match = \"newer\" to accept a newer runtime" } else { "" },
+                if required <= 8 {
+                    "jre8-openjdk-headless or jdk8-openjdk".to_string()
+                } else {
+                    format!("jdk{required}-openjdk, or jdk-openjdk if {required} is the current release")
+                },
+                if policy == JavaMatch::Exact {
+                    ", or set java.match = \"newer\" to accept a newer runtime"
+                } else {
+                    ""
+                },
             ))
         })?
     };

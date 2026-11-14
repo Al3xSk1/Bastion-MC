@@ -73,6 +73,11 @@ pub struct PinSet {
 }
 
 impl PinSet {
+    /// How many host patterns (exact names and suffixes) carry pins.
+    pub fn host_count(&self) -> usize {
+        self.exact.len() + self.suffix.len()
+    }
+
     /// User pins from the configuration, plus the built-in Microsoft/Mojang set unless
     /// disabled. A user entry for the same pattern replaces the built-in one.
     pub fn from_config(map: &BTreeMap<String, Vec<String>>, builtin: bool) -> Result<Self> {

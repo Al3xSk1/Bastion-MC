@@ -38,15 +38,16 @@ AMD GPU, X11 session).
 | Microsoft → Xbox → Minecraft sign-in, and everything that needs a signed-in account (the broker against the real Mojang API, `skin`/`cape`, the canary on a real profile, joining a real multiplayer server) | implemented and tested against scripted replies and a stand-in Mojang; **not yet run against the live services** (needs your client ID) |
 | NVIDIA, Java 8-era versions end to end, real `age` binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) | implemented, **not exercised** on the development machine |
 
-**What "576 tests" counts.** The integrator's run of `cargo test --workspace --no-fail-fast`
-on the merged tree of the third round (no display, separate XDG directories) printed 30
-`test result` lines — 27 test binaries and 3 doc-test runs, 5 of them without tests — that
-add up to 576 passed, 0 failed, 0 ignored: the launcher 446 (319 unit, 127 integration), the
-front end 124 (118 unit, 4 emulator, 2 live) and the event protocol 6. Not every one of them
+**What "581 tests" counts.** The integrator's run of `cargo test --workspace --no-fail-fast`
+on the merged tree of the third round, after the review of the merge points (no display,
+separate XDG directories), printed 30 `test result` lines — 27 test binaries and 3 doc-test
+runs, 5 of them without tests — that add up to 581 passed, 0 failed, 0 ignored: the
+launcher 451 (322 unit, 129 integration), the front end 124 (118 unit, 4 emulator, 2 live)
+and the event protocol 6. Not every one of them
 tests something in such a run: 18 are opt-in and return at once without their environment
-variables (see [Tests](#tests)), 5 are halves that other tests start again as child
+variables (see [Tests](#tests)), 6 are halves that other tests start again as child
 processes, and a few return early, with a message, on a machine that lacks what they need.
-With `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1` the same 576 passed; the display suites, the
+With `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1` the same 581 passed; the display suites, the
 real-game tests and two demo launches were run separately on the same tree. The complete
 lists of what is not defended and what was not exercised are THREAT_MODEL §5 and §7; what
 is open, and what needs something only you have, is in [`TODO.md`](TODO.md).
@@ -139,7 +140,7 @@ network: filtered — HTTPS to *.{minecraft.net, mojang.com, minecraftservices.c
 auth: demo mode — no account, no token
 [launcher] display: the nested compositor's clipboard bridge is cut — the cut-off reported from inside the compositor that the bridge's calls land in it
 [launcher] limits: in force — memory.max, memory.swap.max, pids.max (and cpu.max, where a quota is set) of the sandbox's control group were read back from the kernel
-[launcher] launcher: confined itself, on all threads — Landlock: no program execution, files only under the instance's persist/ and the cache, TCP only to port(s) 53, 443; system-call filter: no kernel keyring, no new namespaces
+[launcher] launcher: confined itself, on all threads — Landlock: no program execution, files read-only under /etc, /usr and /proc and writable only under the instance's persist/ and the cache, TCP only to port(s) 53, 443; system-call filter: no kernel keyring, no new namespaces
 ```
 
 Ctrl-C in the terminal stops the game ("game stopped on request", exit status 130). Two

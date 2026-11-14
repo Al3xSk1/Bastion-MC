@@ -190,8 +190,8 @@ pub(super) fn read_draft(paths: &Paths, id: &str) -> Result<(PathBuf, ProfileMan
     Ok((dir, manifest))
 }
 
-/// Replace the manifest's mod list with what is in `mods/` right now, bump the serial and
-/// discard the old signature. Returns the new mod list for the user to review.
+/// Replace the manifest's mod list with what is in `mods/` right now, bump the serial if the
+/// list changed, and discard the old signature (always). Returns the new mod list for the user to review.
 pub fn lock(paths: &Paths, id: &str) -> Result<ProfileManifest> {
     lock_with(paths, id, &BTreeMap::new())
 }

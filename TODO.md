@@ -19,7 +19,7 @@ the big ideas so they are not re-argued from scratch.
 Verification state of the merged tree (the integrator's runs, 2026-11-13, with separate XDG
 directories and only private displays): `cargo fmt --check` clean (re-checked on the final
 commit); `cargo clippy --workspace --all-targets` without warnings; `cargo test
---workspace` 576 passed, 0 failed (README "Status" says what that number counts), and the
+--workspace` 581 passed, 0 failed (README "Status" says what that number counts), and the
 same with `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1`; the nested-compositor suite 4/4
 against gamescope 3.17 with the clipboard test; the Wayland suite 2/2 against headless
 sway; `tests/nested_game.rs` (vanilla) and `tests/companion_game.rs` (the signed Fabric
@@ -70,9 +70,16 @@ account, `age`, root or another kernel, and the libFuzzer targets themselves.
 - [ ] **Stale markers**: a launcher killed with SIGKILL leaves `cache/running/<pid>` and its
       scratch directory; both are swept by the next launch or by `scram` (tested). The same
       holds for the companion channel's socket name in `$XDG_RUNTIME_DIR/bastion-mc/` when
-      the launcher could not establish that the program in the sandbox exists, or was killed
-      or crashed before that point: the next launch sweeps it (tested). Nothing to do unless
+      the launcher could not establish that the program in the sandbox exists (the launch
+      then says so: a warning in the log and to the front end), or was killed or crashed
+      before that point: the next launch that adds the companion sweeps it (tested). Nothing to do unless
       you want a `bastion-mc clean` command.
+- [ ] **Create the companion socket just before the sandbox starts.** Today
+      `companion::plan` creates it while the sandbox is assembled, before the sign-in, the
+      resource-limit probe and the nested compositor's start, so its name exists for seconds
+      in `$XDG_RUNTIME_DIR/bastion-mc/` (other programs of yours could connect and be logged
+      as the game). Creating the endpoint right before `sandbox::spawn` shortens that to the
+      moment bubblewrap needs to bind it (review of the documents).
 - [ ] **Leftover Wayland socket names are not swept** (integration review). The game's
       security-context socket (`$XDG_RUNTIME_DIR/bastion-mc/wl-*`) loses its name in step 8
       only when the program in the sandbox could be identified (`src/launch.rs`); otherwise
@@ -346,10 +353,26 @@ is right.
   — which found that "open" meant "not yet closed by both sides" (fixed: the first hang-up
   ends it) —, and Simple Voice Chat loading with its native libraries.
 
-### Integration (`1dbb587`, `c383196`)
-- `profile add` says, after adding Simple Voice Chat, that its UDP needs a server rule
-  naming the port and that installing the mod opens nothing (`VOICE_CHAT_HINT` in
-  `src/profile/catalog.rs`; tested both ways).
+### Integration (`1dbb587`, `c383196`, `c588bea`, and the commit after the documents)
+- `profile add` says, after adding Simple Voice Chat, what becomes of its UDP in the
+  instance's network mode: in `filtered` a server rule must name the port, datagrams go
+  only while a game connection to that server is open and only to its address (so a
+  separate `voice_host` does not work); in `open` UDP is not restricted at all; in `none`
+  voice cannot work. Installing the mod opens nothing (`voice_chat_hint` in
+  `src/profile/catalog.rs`; tested per mode, and with an instance in `open` mode).
+- Review of the merge points (four reviewers, one skeptic per serious finding; none was a
+  defect of a single package): a display-output hold given up unreleased (step 9 refused)
+  now discards the held output instead of letting an unconfined launcher read it; the
+  launch warns when the companion socket keeps its name; a default-suite test serves and
+  reads the companion channel from a process confined as `launcher.confine = "require"`
+  does it; the system calls the relays need after confinement are pinned in the filter's
+  test; the front end waits 90 s for the launcher to stop (its own shutdown is bounded at
+  about a minute) and keeps protection details up to 1000 characters.
+- From the review of the documents: the Java refusal, `doctor` and the PKGBUILD name the
+  packages the launcher can find (`jdk<N>-openjdk`; `jre8-openjdk-headless` for Java 8);
+  `doctor` counts the built-in certificate pins; the confinement line in the launch log
+  says that /etc, /usr and /proc stay readable; a game ended by a signal is logged as such;
+  the package installs every document the README links to, as a tree.
 - PKGBUILD: `makedepends` `java-environment>=17` (the companion jar is compiled with
   `--release 17`).
 - `src/confine.rs` header: the companion channel and relayed datagrams are among what the

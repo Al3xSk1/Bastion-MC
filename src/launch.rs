@@ -1247,8 +1247,9 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 Ok(applied) if applied.is_whole() => log.line(
                     Source::Launcher,
                     &format!(
-                        "launcher: confined itself, on all threads — Landlock: no program execution, files only under \
-                         {}, TCP only to port(s) {}; system-call filter: no kernel keyring, no new namespaces",
+                        "launcher: confined itself, on all threads — Landlock: no program execution, files read-only \
+                         under /etc, /usr and /proc and writable only under {}, TCP only to port(s) {}; system-call \
+                         filter: no kernel keyring, no new namespaces",
                         if opts.burner {
                             "the cache (nothing of the instance)"
                         } else {
@@ -1467,7 +1468,20 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         );
         return Err(Error::Sandbox("the game was killed by the seccomp tripwire; see the log".into()));
     }
-    log.line(Source::Launcher, &format!("game exited with status {code}"));
+    match std::os::unix::process::ExitStatusExt::signal(&status) {
+        Some(signal) => log.line(
+            Source::Launcher,
+            &format!(
+                "the sandbox was ended by signal {signal}{} (reported as status {code})",
+                match signal {
+                    9 => " (SIGKILL: for example the memory limit, or the system stopping the scope)",
+                    15 => " (SIGTERM: for example the system stopping the scope)",
+                    _ => "",
+                }
+            ),
+        ),
+        None => log.line(Source::Launcher, &format!("game exited with status {code}")),
+    }
     reporter.emit(Event::Exited { code });
     Ok(code)
 }

@@ -282,8 +282,9 @@ servers = [
 * There is no switch that allows UDP for all servers. `launch --join` alone allows none: it
   allowlists the game connection for one session and nothing more. A mistyped key in a
   server's table is an error, not ignored.
-* After `profile add` has added Simple Voice Chat it reminds you of this: installing the mod
-  opens nothing.
+* After `profile add` has added Simple Voice Chat it tells you what becomes of its UDP in
+  that instance's network mode — in `filtered`, this rule; in `open`, nothing restricts it;
+  in `none`, voice cannot work. Installing the mod opens nothing.
 
 What the launcher then does:
 
