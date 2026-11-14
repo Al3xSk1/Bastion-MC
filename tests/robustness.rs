@@ -515,8 +515,20 @@ fn run(name: &str) {
 
 #[test]
 fn every_harness_has_a_test_here() {
-    let tested =
-        ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp", "companion", "registry", "jar"];
+    let tested = [
+        "persist",
+        "sni",
+        "dns",
+        "broker",
+        "xauthority",
+        "wayland",
+        "profile",
+        "zipdir",
+        "udp",
+        "companion",
+        "registry",
+        "jar",
+    ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();

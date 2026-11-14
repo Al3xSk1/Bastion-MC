@@ -679,8 +679,7 @@ s.close()
     let has_socket = running.payload_pid().await.is_some();
     assert!(has_socket, "the payload is running (it waits for its standard input to end)");
     plan.release_name();
-    let serving =
-        plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
+    let serving = plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
     let leftovers: Vec<_> = std::fs::read_dir(dir.join("rt")).unwrap().flatten().map(|e| e.path()).collect();
     assert!(
         leftovers.iter().all(|p| std::fs::read_dir(p).map(|d| d.count() == 0).unwrap_or(true)),
@@ -852,8 +851,7 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
     if running.payload_pid().await.is_some() {
         plan.release_name();
     }
-    let serving =
-        plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
+    let serving = plan.serve(Arc::new(move |voice, line| sink.lock().unwrap().push((voice, line)))).expect("a channel");
 
     // The program's standard error as it comes (the mod logs there: no SLF4J in this JVM),
     // its standard output until it says that the mod has started.
