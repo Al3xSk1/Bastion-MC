@@ -15,6 +15,25 @@ terminates the game's HTTPS to Mojang's API (a per-session certificate authority
 exists only in the sandbox's trust store) and puts the real token on the requests that are
 switched on; see `THREAT_MODEL.md`, row J13.
 
+**Realms** takes the token differently: not as `Authorization: Bearer` but in a session
+cookie, `sid=token:<access token>:<profile id>`, so the game's cookie carries the
+placeholder too. With `[realms] approve` set (it is off by default), the broker also
+terminates Realms' hosts — `pc.realms.minecraft.net`,
+`java.frontendlegacy.realms.minecraft-services.net`, and 26.3's
+`java.frontend.realms.minecraft-services.net` — and, for the requests on its fixed table
+only, rebuilds the cookie from scratch around the real token: `Broker::handle_realms` in
+[`src/egress/broker.rs`](../src/egress/broker.rs) calls `rebuild_cookie` in
+[`src/realms/table.rs`](../src/realms/table.rs). The game's cookie must hold exactly one
+`sid`, with the placeholder and nothing else as the token and the session's own profile
+(another profile is refused and flagged); what goes out is
+`sid=token:<real token>:<profile>`, `user` and `version` copied only in the shapes the
+client gives them, every other cookie dropped. The 26.3 frontend carries the raw token in an
+`x-mojangauth` header instead, which is replaced the same way, for its one request on the
+table (redeeming an invite code). Replies that contain the token are withheld, as for
+Mojang's API. Without approvals, Realms is not brokered: in `filtered` mode the game's
+requests reach Realms as they are, with the placeholder, and Realms refuses them. See
+`THREAT_MODEL.md`, rows J21 and J22.
+
 | Launch | What the frame carries as the access token | Where the real token is |
 |---|---|---|
 | `filtered` network, broker on (default) | the placeholder | in the launcher, in secret memory, for the length of the session; never in the sandbox |
@@ -51,7 +70,7 @@ process with your UID and is inherited by every child).
         │                          "BSTN" ver count  len main-class  len arg … len arg
         │ write(), shutdown(SHUT_WR)
         ▼
-   socketpair(AF_UNIX) ════════ fd 0 ═══════►  bwrap ─► init ─► java -cp … BastionBootstrap
+   socketpair(AF_UNIX) ════════ fd 0 ═══════►  bwrap ─► init ─► java -cp … bastion.boot.BastionBootstrap
         │                                                         │ (no program arguments)
  frame.wipe()                                                     │ read frame from fd 0
  with the broker (default): the real token                        │ zero the byte buffers
@@ -61,9 +80,13 @@ process with your UID and is inherited by every child).
 ```
 
 1. **The JVM is started with no program arguments.** Its command line is the JVM options,
-   the class path and the literal class name `BastionBootstrap`
-   ([`java/BastionBootstrap.java`](../java/BastionBootstrap.java), 118 lines, Java 8
-   bytecode, compiled from source by `build.rs` — no binary blob in the repository).
+   the class path and the literal class name `bastion.boot.BastionBootstrap`
+   ([`java/BastionBootstrap.java`](../java/BastionBootstrap.java), 122 lines, Java 8
+   bytecode, compiled from source by `build.rs` — no binary blob in the repository). It has
+   a package of its own because the obfuscated client jars (1.20.1 to 1.21.11) are signed
+   and put their classes in the default package, and the JVM refuses classes of different
+   signers in one package: with the class in the default package, vanilla instances of those
+   versions did not start (`THREAT_MODEL.md`, §7 E31).
 2. **fd 0 of the JVM is one end of an `AF_UNIX` `SOCK_STREAM` socketpair** created by the
    launcher ([`sandbox::spawn`](../src/sandbox/mod.rs)). bubblewrap and the init stage pass
    it through untouched; every other descriptor is closed before the JVM is executed.
@@ -121,7 +144,7 @@ disappears with its last descriptor.
 | Debug output | `Secret`'s `Debug` prints a length only; `Authorization` headers are marked sensitive |
 | Peeking at the launcher | non-dumpable + Yama: `/proc/<pid>/mem`, `process_vm_readv` and ptrace are refused for other same-UID processes, including the parent shell |
 | Lifetime | Microsoft token → dropped after the Xbox call; Xbox token → after XSTS; XSTS → after Minecraft login; Minecraft token → with the broker: held until the game exits, then wiped; without: wiped once the frame is written |
-| While the game runs | the launcher confines itself, on all threads and before it reads anything the game sends: Landlock (no program execution, no writing outside the instance's `persist/` directory and the cache, no reading beyond those, `/etc`, `/usr`, `/proc` and the name resolver's configuration, TCP only to the ports it relays to and to a configured proxy) and a system-call filter (no kernel keyring, where the refresh token rests by default) |
+| While the game runs | the launcher confines itself, on all threads and before it reads anything the game sends: Landlock (no program execution, no writing outside the instance's `persist/` directory and the cache — and the directories the phone's services write, when they are on —, no reading beyond those, `/etc`, `/usr`, `/proc` and the name resolver's configuration, TCP only to the ports it relays to and to a configured proxy) and a system-call filter (no kernel keyring, where the refresh token rests by default) |
 
 ## What other processes see
 
@@ -145,7 +168,10 @@ With sound on, `PULSE_SERVER` is added; with the session's own X11 display hande
 (`allow_x11`, no gamescope) also `XAUTHORITY`; on Wayland `WAYLAND_DISPLAY` takes the place
 of `DISPLAY`. No token, no player name, no UUID, no home directory, no instance name, no
 real user name. The launcher's own log records the game arguments with the token shown as
-`<redacted>`.
+`<redacted>`. This listing is from before the bootstrap class moved into its package: the
+JVM's command line now ends in `bastion.boot.BastionBootstrap` (that is the name the launcher
+passes, and the one `tests/jvm.rs` finds in `sun.java.command`; the `/proc` listing above was
+not taken again since).
 
 ## Where the guarantee ends
 
@@ -167,8 +193,31 @@ Stating these plainly is part of the design:
   need it. It is built and on by default in `filtered` mode (the table at the top). The
   three points above describe a launch *without* it. With it, what remains is that code in
   the game can make the requests the broker is willing to authenticate — one server join
-  per open game connection, and reads of the account's privileges and block list — but
-  cannot take the credential out of the sandbox, because it was never in it.
+  per open game connection, and reads of the account's privileges and block list (and,
+  with Realms approvals on, the Realms requests on the broker's table) — but cannot take
+  the credential out of the sandbox, because it was never in it.
+
+## The phone's secrets
+
+This document is about the Minecraft access token. The in-game phone's services
+([`PHONE.md`](PHONE.md)) have secrets of their own, and none of them travels to the game, by
+this path or any other: what the phone gets is state, pictures and short notices.
+
+* **Spotify**, with the Web API set up: the refresh token is held during a session by the
+  token keeper, a process of the launcher's own (`bastion-mc __spotify-keeper`), started
+  before the launcher confines itself — with the launcher's process hardening, but in no
+  sandbox, because it has to save each refresh token Spotify rotates to the token store. It
+  reads only one-byte requests from the launcher, over a socket pair, and answers with an
+  access token and its lifetime: at most every 20 seconds, 60 times a session. The launcher
+  keeps that access token in locked memory, like the Minecraft token, and makes the Web API
+  requests itself. A launcher taken over could ask for fresh access tokens, never the
+  refresh token (`THREAT_MODEL.md`, H19).
+* **The browser's sessions** (a signed-in Discord) stay in its profile, outside the game's
+  sandbox; nothing the browser sends the phone contains a cookie or a token (H8, H12).
+* **The Realms TOTP secret** (`[realms] approve = "totp"`) is read from the token store
+  before the launcher confines itself and kept in locked memory for the session, to check
+  the codes the phone sends. In `code` mode the code is shown outside the game and never
+  sent to it (J22).
 
 ## Checking it yourself
 
@@ -178,7 +227,7 @@ cargo test --test jvm      # real JVM in the sandbox; asserts the token is in ar
 cargo test --test sandbox launch_channel_is_not_observable
 
 # against a running game
-pid=$(pgrep -f ' BastionBootstrap$')
+pid=$(pgrep -f ' bastion\.boot\.BastionBootstrap$')
 tr '\0' '\n' < /proc/$pid/cmdline | grep -c -e --accessToken      # 0
 ls -l /proc/$pid/fd/0                                             # socket:[…]
 cat /proc/$pid/fd/0                                               # No such device or address

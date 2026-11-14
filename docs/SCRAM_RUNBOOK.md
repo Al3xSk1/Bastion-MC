@@ -23,17 +23,21 @@ did not make) and this machine is not in doubt, you can continue here.
 
 What it does: first it stops whatever could still store a sign-in — a running game and
 its launcher (the session token is gone with them), a sign-in that is still waiting for
-you, a skin, cape, canary or vault command. Then it removes every stored refresh token
-from the kernel keyring, deletes the age vault files, and forgets which player each local
-account was. Last, and for at most 15 seconds, it deletes what stopped games left behind.
-It prints what it did.
+you, a skin, cape, canary or vault command, a Spotify sign-in or token keeper. Then it
+removes every stored refresh token from the kernel keyring — those of your Minecraft
+accounts and the Spotify token of the in-game phone — and the secret for approving Realms
+joins; deletes the age vault files; deletes the in-game browser's profile, which holds the
+sessions of the sites you signed in to there (a Discord session, for example); and forgets
+which player each local account was. Last, and for at most 15 seconds, it deletes what
+stopped games left behind. It prints what it did.
 
 Read what it prints. A line that starts with `COULD NOT` means that something is still
 there or could not be checked, and it says what to do — for example end a process
 yourself, or run the command in another login session of yours that still holds a key
-(or log out of it). Do that, then run `bastion-mc scram` again. (The graphical front end
-runs the same command from its Security page, and shows such a result as SCRAM
-INCOMPLETE.)
+(or log out of it). Do that, then run `bastion-mc scram` again. One such line you may meet:
+the browser's profile is not deleted while a `bastion-mc browser login` window still uses
+it; close that window first. (The graphical front end runs the same command from its
+Security page, and shows such a result as SCRAM INCOMPLETE.)
 
 What it does **not** do:
 
@@ -45,6 +49,11 @@ What it does **not** do:
 - It does not "securely wipe" files. On SSDs and on copy-on-write file systems (btrfs)
   overwriting a file does not guarantee the old blocks are gone. What protects a deleted
   vault file is that it was encrypted and that the token in it gets revoked in phase 2.
+- It signs you out of no website. A site the in-game browser was signed in to keeps that
+  session on its side until you end it there — on Discord under Settings, Devices. Unlike a
+  vault file, the browser's profile is not encrypted: if this machine may be compromised,
+  end those sessions from a clean device. A Spotify app you allowed keeps its access until
+  you remove it under "Manage apps" in your Spotify account.
 - The profile canary's history is kept: it is evidence for phase 3, and not a credential.
 
 ## Phase 2 — the Microsoft account (ten minutes, from a clean device)
@@ -114,6 +123,10 @@ Have ready:
 
 - Sign in to the launcher again (`bastion-mc login`) and check `bastion-mc skin show`.
 - `bastion-mc canary accept` pins the restored profile.
+- If you used the in-game phone's services: sign in to Spotify again with
+  `bastion-mc spotify login`, make a new Realms secret with `bastion-mc realms totp-setup`
+  and delete the old "bastion-mc:Realms" entry from your authenticator app, and sign in to
+  each site again with `bastion-mc browser login <site>` once its old sessions are ended.
 - If the refresh-token store is the kernel keyring, consider the age vault with a hardware
   key (README, "Where the refresh token rests").
 - Find out how it happened before you play again: a password reused elsewhere, a

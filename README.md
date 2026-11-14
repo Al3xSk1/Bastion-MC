@@ -11,43 +11,63 @@ game sends. No built-in OAuth client ID, no telemetry, no update check. It talks
 Microsoft, Xbox Live and Mojang directly, with *your* Azure application. Its documents say
 what is defended, how each claim was tested, and what is not defended.
 
+Fabric instances also get the launcher's own companion mod (Minecraft 1.20.1 to 26.3; ten
+versions of that range were run in the real game): an in-game phone (Spotify, Discord and
+other sites you list in a browser that runs in a sandbox of its own, clips, approvals of
+Realms joins, settings sync), a redone title screen and darker menus. The mod is interface
+only: the launcher decides what each command from the phone may do, and no token, cookie or
+other secret of these services enters the game.
+
 ## Status
 
 **Pre-release.** Version 0.1.0. There is no release, no signed tag and no binary download:
 it is built from source. Everything below was built and checked on one development
 machine. The Microsoft → Xbox → Minecraft sign-in has never run against Microsoft, so
-nothing that needs a signed-in account has run against the live services yet.
+nothing that needs a signed-in account has run against the live services yet. Neither has
+anything of the fourth round that needs an account of yours: the Spotify Web API, a
+signed-in Discord in the phone's browser, Realms.
 
 Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on any of it. It lists
 what is defended, how each claim is tested, and — in §5 — what is **not** defended.
 
 Built and tested on Arch Linux (kernel 7.2, Landlock ABI 10, bubblewrap 0.13.1, OpenJDK 27,
-AMD GPU, X11 session).
+AMD GPU, X11 session; for the phone's services Firefox 159.0.1, ffmpeg 9.0.2 and
+xdg-dbus-proxy).
 
 | | |
 |---|---|
-| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod | 576 tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker and JVM suites start the real sandbox; 4 confine a real multi-threaded process the way the launcher confines itself, and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 12 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
+| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod, the phone's channel and dispatcher, the phone's services (browser, Spotify, clips, Realms, settings sync) | 576 <!-- COUNTS --> tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker and JVM suites start the real sandbox, those of Spotify and Realms the D-Bus proxy and the Realms dialer in theirs; 4 <!-- COUNTS --> confine a real multi-threaded process the way the launcher confines itself, and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 24 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
 | Display isolation | Wayland security context: against a real headless sway (the game's socket is listed: 37 interfaces, none of the 16 known privileged ones). Nested compositor: against real gamescope 3.17 on a private X display, including the clipboard cut-off in all four directions and the control run without it. Both with real Minecraft 26.3 started through them. **Not** on a real Wayland desktop session, and playability inside gamescope is not assessed. Both suites were run again on the merged tree of the third round |
-| Graphical front end | 118 unit tests (32 of them lay out, click and render the widgets in software) and 4 tests of the whole application against a stand-in launcher, run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland |
+| Graphical front end | 118 <!-- COUNTS --> unit tests (32 <!-- COUNTS --> of them lay out, click and render the widgets in software; since the fourth round also the Realms approval prompt, laid out at four window sizes) and 4 <!-- COUNTS --> tests of the whole application against a stand-in launcher, run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree of the third round); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland; the Realms prompt never shown for a real join |
 | Arch packages (`makepkg`) | both build, their `check()` passes and both binaries pass the hardening check — run again on the merged tree of the third round, from a tarball of that tree (the PKGBUILD's own `source` fetches the repository) |
 | Real Minecraft 26.3 client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile | runs: hardware OpenGL, window, audio, HTTPS through the relay and the broker, mods loaded from the sealed mount; also as a `--burner` session. Run again after the review fixes (launcher confined before it reads anything from the game; THREAT_MODEL §7 E16), and on the merged tree of the third round, without sound: vanilla and Fabric through the nested compositor, with the companion mod, and with ViaFabric and Simple Voice Chat (whose native libraries load inside the sandbox) |
-| Companion mod (zoom, HUD read-out, fullbright) | in the real game (Fabric Loader 0.20.1): it loads, reports to the launcher while the launcher is confined, and the effect of each feature was measured in a running demo world, on the nested-compositor, direct-X11 and Wayland display paths; on the X11 paths also with the zoom key pressed through XTEST on a private display. **Not**: a person at the keyboard, another Minecraft version, a multiplayer server |
+| Companion mod: zoom, HUD read-out, fullbright (third round) | in the real game (Minecraft 26.3, Fabric Loader 0.20.1): it loads, reports to the launcher while the launcher is confined, and the effect of each feature was measured in a running demo world, on the nested-compositor, direct-X11 and Wayland display paths; on the X11 paths also with the zoom key pressed through XTEST on a private display. **Not**: a person at the keyboard, a multiplayer server; on the nine other families of versions these three switch themselves off (they are written for 26.3's classes) |
+| Companion mod on every Fabric release from 1.20.1 to 26.3 (ten families), protocol 2 of its channel, the phone's dispatcher | in the real game (demo mode, Fabric Loader 0.20.1, the nested compositor on a private X display), on the representative of each family — 1.20.1, 1.20.4, 1.21.1, 1.21.4, 1.21.5, 1.21.8, 1.21.10, 26.1.2, 26.2, 26.3 — in four rounds each: at the title screen; in the demo world; in the demo world with the phone key really pressed (XTEST); at the title screen with the final jar, including a menu of the game's own with the dark background. Each time: no warning from Mixin, the family the table names, a hello of protocol 2, commands in and state, notices and pictures out through the dispatcher — all of it against the demo service (fake apps, a test switch). The channel and the dispatcher also under generated and mutated frames. **Not**: the other versions of each family (built against the same stand-ins, never started), Fabric Loader other than 0.20.1, Quilt, the direct-X11 and Wayland display paths |
+| The in-game phone, the home screen, the dark menus | `tests/phone_ui.rs` in the default suite, against a stand-in game (no Minecraft): every command the phone sent parses with the launcher's own parser and fits its app's vocabulary; every draw call on 13 window sizes stays inside its place; hostile and mutated launcher messages crash nothing. In the real game on all ten families at two window sizes, in the demo world on 26.3 and 1.21.4, at GUI scale 1 on 26.3 — against the demo service, with keys, typing and a click sent through XTEST, every screenshot looked at. **Not**: the real services behind the phone (each was run without it, see the next rows), mouse drags in the game, the title screen with an account (only demo mode), Wayland, a person at the keyboard |
+| The phone's browser: Firefox, headless, in a sandbox of its own; `browser login` | Firefox 159.0.1 in its sandbox against stand-in HTTPS sites served by the test (opt-in, 6 of 6 passed): pictures, typing, clicks, a form sent, links and images from unlisted hosts refused, the request and API-call budgets, the frame rate, and the sign-in window on a private display, whose session the headless browser then had; the `browser login` command itself on that display, as an X11 client and on the same headless compositor's Wayland socket; with `BASTION_NET_TESTS=1` example.com and Discord's sign-in page, not signed in; a real demo launch (vanilla 26.3): Firefox started before the launcher confined itself, the launch's self-test opened a site and got a picture, and no file of the browser's profile could be found from the game's sandbox. **Not**: Discord signed in (needs your Discord account), the phone in the game driving it, captchas, two-factor prompts, passkeys, other Firefox versions, the relay through `launcher_proxy` |
+| Spotify on the phone: the desktop app over MPRIS, the Web API | against stand-ins only: a private D-Bus daemon with a stand-in player (an independent implementation, GDBus) behind the real `xdg-dbus-proxy` in its sandbox — properties, every transport command, the proxy refusing other objects, other names and the player's root interface, a process confined as the launcher is driving it; the Web API against a stand-in HTTPS server (refresh, Premium refused, no active device, 429 with `Retry-After`, the sign-in with PKCE); in a real demo launch, phone commands from a test script reached the stand-in player through the proxy after the launcher had confined itself. **Not**: the real Spotify app, Spotify's real Web API and image server (needs your Spotify client ID and account; playback control there needs Premium), the token in the real keyring |
+| Clips: ffmpeg in a sandbox of its own, saved from the phone | saving checked with ffprobe; saving from a process confined as the launcher is; the recorder in its sandbox recording a window on a private display; real demo launches of 26.3, through the nested compositor and as a client of the session's X display: phone commands from a test script saved an 8-second clip (240 frames) with its thumbnail, and a frame from each clip shows the game. **Not**: saving from the phone in the game, finding the window by its process on a desktop X server (the private servers here cannot tell), Wayland (not supported), sound (never recorded) |
+| Realms: brokered, every join approved outside the game, a one-time pass | against a stand-in Realms service over TLS, with the real broker: the cookie rebuilt around the real token, other headers and cookies dropped, owner operations refused before they leave, a join held until the code is typed, the pass's address in the answer; the real dialer in its sandbox; the real relay with a client in a private network namespace (no connection before the approval, one after it, none a second time); the front end's prompt in its tests. **Not**: the live Realms service, a launch with `approve` set (it needs a signed-in account and a Realm), `realms totp-setup` against the real keyring |
+| Settings sync across instances | unit tests on real `options.txt` files written by 1.20.1, 1.21.4 and 26.3, translations in both directions, concurrent updates under the lock; real demo launches: a field of view changed with the keyboard (XTEST) in a 1.21.4 instance was written to the synced copy by the confined launcher at exit, then taken into a 26.3 and a 1.20.1 instance. **Not**: a real launch with any other setting, a burner launch (unit-tested) |
+| Vanilla instances of 1.20.1 to 1.21.11 | did not start before this round (the JVM refused the signed client's classes next to the launch bootstrap in the default package); the bootstrap is in a package of its own now (`bastion.boot`): vanilla 1.21.4 started and reached its texture atlases (stopped, exit status 130), and the four suites that start the bootstrap in a real JVM pass. **Not**: the other versions of that range as vanilla instances; the round's other real-game runs were made before the move |
+| `scram`: the browser's profile, the Spotify token, the Realms TOTP secret | deleting the profile, and refusing to while a `browser login` window holds it, in `tests/scram.rs`; reading the Spotify token's entry in the kernel's key list, in unit tests. **Not**: removing the Spotify token or the TOTP secret from a real keyring (the tests limit scram to accounts they created, so they cannot reach these two keys) |
 | Mod catalog (`profile add`, `profile check`) | against scripted registry answers (28 kinds of refusal, each of which leaves `mods/`, the manifest and the signature as they were) and against a stand-in registry over TLS; the six aliases looked up live at Modrinth; real demo launches with mods it fetched: they load, and their update checks (and Sodium's `lspci`) are refused by the sandbox. **Not**: ViaFabric translating a connection, a Quilt profile, Modrinth through Tor |
 | Voice-chat relay (UDP) | 14 tests — 13 in the real sandbox (one of them with a real JVM) and one in a process confined the way the launcher confines itself —, unit tests of its decision table, one generated-input harness; inside a real launch, with the launcher confined, it relayed datagrams for a stand-in client placed in the game's network namespace. **Not**: a real voice session (needs a server and a signed-in account), capture (sound is off on the development machine) |
 | `network.launcher_proxy` for the game's connections to Mojang's services (review finding B-M3, fixed in the third round) | against a stand-in SOCKS5 proxy, in the real sandbox; **not** against Tor |
-| Microsoft → Xbox → Minecraft sign-in, and everything that needs a signed-in account (the broker against the real Mojang API, `skin`/`cape`, the canary on a real profile, joining a real multiplayer server) | implemented and tested against scripted replies and a stand-in Mojang; **not yet run against the live services** (needs your client ID) |
+| Microsoft → Xbox → Minecraft sign-in, and everything that needs a signed-in account (the broker against the real Mojang API, `skin`/`cape`, the canary on a real profile, joining a real multiplayer server, Realms) | implemented and tested against scripted replies and a stand-in Mojang; **not yet run against the live services** (needs your client ID). Realms was tested against a stand-in Realms service, and needs a Realm as well |
+| Accounts of other services: the Spotify Web API, Discord signed in in the phone's browser | implemented and tested against stand-ins (rows above); **not run against the live services** (needs your Spotify client ID and account, Premium for playback control, and your Discord account) |
 | NVIDIA, Java 8-era versions end to end, real `age` binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) | implemented, **not exercised** on the development machine |
 
-**What "581 tests" counts.** The integrator's run of `cargo test --workspace --no-fail-fast`
-on the merged tree of the third round, after the review of the merge points (no display,
-separate XDG directories), printed 30 `test result` lines — 27 test binaries and 3 doc-test
-runs, 5 of them without tests — that add up to 581 passed, 0 failed, 0 ignored: the
-launcher 451 (322 unit, 129 integration), the front end 124 (118 unit, 4 emulator, 2 live)
-and the event protocol 6. Not every one of them
-tests something in such a run: 18 are opt-in and return at once without their environment
-variables (see [Tests](#tests)), 6 are halves that other tests start again as child
+**What "581 <!-- COUNTS --> tests" counts.** The integrator's run of `cargo test --workspace --no-fail-fast`
+on the merged tree of the third round <!-- COUNTS -->, after the review of the merge points (no display,
+separate XDG directories), printed 30 <!-- COUNTS --> `test result` lines — 27 <!-- COUNTS --> test binaries and 3 <!-- COUNTS --> doc-test
+runs, 5 <!-- COUNTS --> of them without tests — that add up to 581 <!-- COUNTS --> passed, 0 failed, 0 ignored: the
+launcher 451 <!-- COUNTS --> (322 <!-- COUNTS --> unit, 129 <!-- COUNTS --> integration), the front end 124 <!-- COUNTS --> (118 <!-- COUNTS --> unit, 4 <!-- COUNTS --> emulator, 2 <!-- COUNTS --> live)
+and the event protocol 6 <!-- COUNTS -->. Not every one of them
+tests something in such a run: 18 <!-- COUNTS --> are opt-in and return at once without their environment
+variables (see [Tests](#tests)), 6 <!-- COUNTS --> are halves that other tests start again as child
 processes, and a few return early, with a message, on a machine that lacks what they need.
-With `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1` the same 581 passed; the display suites, the
+With `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1` the same 581 <!-- COUNTS --> passed; the display suites, the
 real-game tests and two demo launches were run separately on the same tree. The complete
 lists of what is not defended and what was not exercised are THREAT_MODEL §5 and §7; what
 is open, and what needs something only you have, is in [`TODO.md`](TODO.md).
@@ -61,11 +81,21 @@ is open, and what needs something only you have, is in [`TODO.md`](TODO.md).
   - [Network filtering and the credential broker](#network-filtering-and-the-credential-broker)
   - [Display isolation](#display-isolation)
   - [The launcher's own confinement](#the-launchers-own-confinement)
+  - [The phone's helpers](#the-phones-helpers)
   - [Accounts and the token store](#accounts-and-the-token-store)
   - [Emergency: canary and scram](#emergency-canary-and-scram)
 - [The graphical front end](#the-graphical-front-end)
 - [Mods](#mods)
 - [The companion mod](#the-companion-mod)
+  - [Minecraft versions](#minecraft-versions)
+- [The in-game phone](#the-in-game-phone)
+  - [Spotify](#spotify)
+  - [Discord and the browser](#discord-and-the-browser)
+  - [Clips](#clips)
+  - [Realms and Settings on the phone](#realms-and-settings-on-the-phone)
+- [The home screen and dark menus](#the-home-screen-and-dark-menus)
+- [Realms](#realms)
+- [Settings sync](#settings-sync)
 - [Accounts](#accounts)
 - [Emergency](#emergency)
 - [Configuration](#configuration)
@@ -84,6 +114,7 @@ you have an OAuth application of your own ([Accounts](#accounts) explains signin
 ```
 pacman -S bubblewrap jdk25-openjdk      # Java 25 for Minecraft 26.3: the jdk package, see below
 pacman -S gamescope                     # X11 sessions: gives the game a display of its own
+pacman -S xdg-dbus-proxy firefox ffmpeg # optional, for the phone: Spotify, its browser, clips
 ```
 
 Kernel ≥ 6.12 with `landlock` in the LSM list and unprivileged user namespaces (the Arch
@@ -152,11 +183,11 @@ under `[sandbox]` tries it silently). `bastion-mc status` lists accounts and ins
 `bastion-mc-gui` (built by `cargo build --release --workspace`) is the
 [window](#the-graphical-front-end) for the same things.
 
-(This sequence was run on the merged tree on the development machine, with a debug build —
-through gamescope on a private X display, with `audio = "none"`, and with `match = "newer"`
-because the machine has no Java 25: it has Java 21 from a jre package, which the launcher
-does not find, and Java 27 from `jdk-openjdk` — together with `doctor`, `status`,
-`versions` and `config example`.)
+(This sequence was run on the merged tree of the third round on the development machine,
+with a debug build — through gamescope on a private X display, with `audio = "none"`, and
+with `match = "newer"` because the machine has no Java 25: it has Java 21 from a jre
+package, which the launcher does not find, and Java 27 from `jdk-openjdk` — together with
+`doctor`, `status`, `versions` and `config example`.)
 
 ## How it protects you, layer by layer
 
@@ -182,8 +213,12 @@ task limits; an empty root filesystem, a synthetic `/etc`, no route out of the n
 namespace except through the launcher's allowlisting relay. The holes are one audio socket,
 the GPU, and a display of the game's own: on Wayland a socket the compositor knows to be
 sandboxed, on X11 a nested compositor. When the launcher adds its companion mod to a Fabric
-profile, the sandbox also gets one socket to the launcher, on which the mod reports; the
-launcher only logs what arrives there ([The companion mod](#the-companion-mod)).
+profile, the sandbox also gets one socket to the launcher. The mod's reports arrive there and
+are only logged; the phone's commands arrive there too, and the launcher does for them only
+what the named app's fixed vocabulary and rate limits allow
+([The in-game phone](#the-in-game-phone)). None of the phone's helpers — the browser, the
+D-Bus proxy, the clip recorder, the Realms dialer — runs inside the game's sandbox
+([The phone's helpers](#the-phones-helpers)).
 
 Inside an instance only `saves/`, `logs/` and `config/` are writable by the game; `mods/`,
 `resourcepacks/` and `shaderpacks/` reach it as sealed read-only mounts of verified files.
@@ -204,7 +239,9 @@ settings, and everything it writes is deleted when it exits — the launcher say
 the deletion worked, and says what is left when it did not. The copy is bounded by the
 free space of the cache. For a downloaded map or pack you want to look at before it gets
 near your real saves. (The full game starts only for an account that passed the ownership
-check at its last sign-in here; otherwise demo mode.)
+check at its last sign-in here; otherwise demo mode.) Such a session starts no browser for
+the phone and takes no part in settings sync or Realms
+([The in-game phone](#the-in-game-phone)).
 
 ### Network filtering and the credential broker
 
@@ -227,6 +264,11 @@ on: account reads, and one join per game connection it opens — a join that is 
 login on any server, not only the one the connection goes to (THREAT_MODEL J13 and §5).
 [`docs/TOKEN_INJECTION.md`](docs/TOKEN_INJECTION.md) follows the token's path in detail.
 
+**Realms** is refused unless you choose how its joins are approved (`[realms] approve`). Then
+the broker also answers for the Realms hosts, and every join waits for an approval you give
+outside the game before the game gets one connection to that Realm's server
+([Realms](#realms)).
+
 **Voice chat** is the only UDP the launcher relays out of the sandbox, and only to a port
 that a server's rule names: [Voice chat on a server](#voice-chat-on-a-server).
 
@@ -237,7 +279,10 @@ what the credential broker forwards, skin textures, and the game's own HTTPS con
 Mojang's services. **Not** proxied: connections to multiplayer servers, the lookup of their
 names (your resolver sees those), and voice. With `mode = "open"` nothing the game sends is
 proxied. The launch log states which of these applies. (`profile add` and `profile check`
-reach Modrinth through the same proxy.)
+reach Modrinth through the same proxy, and so do the phone's Spotify Web API and covers, the
+broker's requests to Realms and the phone browser's connections to its sites; none of these
+three was tried through a proxy here. A Realm's server is connected directly, like a
+multiplayer server.)
 
 ### Display isolation
 
@@ -291,25 +336,65 @@ the game can record your microphone (THREAT_MODEL D3).
 ### The launcher's own confinement
 
 Before it reads anything the game sends, the launcher gives up — on all its threads —
-writing anywhere but one settings directory of the instance (`persist/`) and its cache,
-reading anything else but `/etc`, `/usr`, `/proc` and the name resolver's configuration,
-program execution, most of the network, and the kernel keyring where the sign-in token
-rests (Landlock, and a system-call filter for what Landlock does not cover). The whole of
-it needs Landlock ABI 9. On an older kernel `launcher.confine = "auto"` applies what it can
-and says what is missing — in the launch log, in `doctor` and in the front end —, and
+writing anywhere but one settings directory of the instance (`persist/`), its cache and,
+for the phone's services that are on, the settings-sync directory, the clips folder and the
+clip buffer; reading anything else but `/etc`, `/usr`, `/proc` and the name resolver's
+configuration; program execution; most of the network; and the kernel keyring where the
+sign-in token rests (Landlock, and a system-call filter for what Landlock does not cover).
+Every helper of the phone's services is started, and every socket to one connected, before
+that point; the launch log's confinement line names the directories added for them. The
+whole of it needs Landlock ABI 9. On an older kernel `launcher.confine = "auto"` applies what
+it can and says what is missing — in the launch log, in `doctor` and in the front end —, and
 `"require"` refuses to launch. Not restricted even then: UDP (the DNS responder and the
 voice relay answer to the game's ephemeral ports), TCP by destination (the rules are per
 port), signals to your other processes (stopping the game needs them), and the access
-token the broker holds for the session — a compromised launcher has it.
+token the broker holds for the session — a compromised launcher has it, and can ask the
+Spotify token keeper for fresh Spotify access tokens and the Realms dialer for its few
+connections.
 
 **What is shown as protected was looked at, not assumed**: the resource limits are read
 back from the kernel, the game's Wayland socket is listed, the clipboard cut-off reports
 from inside the compositor — and where a check fails the launcher says so, or refuses.
 
+### The phone's helpers
+
+The phone's services need programs of their own. Each is started before the launcher
+confines itself, and all but one run in a sandbox of their own (bubblewrap, Landlock and a
+system-call filter) that shares nothing with the game's sandbox except what the feature
+needs:
+
+* **The browser**: the installed Firefox, headless — no home directory, no display, no D-Bus,
+  no sound. Its only way out is the launcher's relay, which answers name lookups for the
+  hosts of the site that is open and for nothing else, takes a connection only when its TLS
+  handshake names one of those hosts, and holds each site to its budgets. Its system-call
+  filter is a denylist, so that Firefox's own sandbox for its content processes keeps
+  working. The profile (your site sessions) is in `~/.local/share/bastion-mc/browser/`,
+  outside the game's sandbox, and the confined launcher cannot read it either.
+* **The D-Bus proxy** (Spotify over MPRIS): `xdg-dbus-proxy` passes the Spotify app's player
+  and properties interfaces on its one object path, and nothing else of your session bus.
+* **The clip recorder**: ffmpeg, with the game's display to read — with the nested
+  compositor that is the game's own display; as a client of your X display (`allow_x11`) it
+  is your whole X session, as the game has it then — and a buffer directory in memory to
+  write. No network.
+* **The Realms dialer**: makes the one connection to a Realm's server after you approved the
+  join — public addresses only, at most 8 a session — because the confined launcher cannot
+  connect to a port it did not know in advance.
+* **The Spotify token keeper** is the one helper without a sandbox: it needs the kernel
+  keyring or the age vault, where the refresh token rests. It refreshes the access token
+  when the launcher asks — at most every 20 seconds and 60 times a session — and hands over
+  only that, never the refresh token.
+
+The game reaches none of these programs. It reaches the launcher's apps through the phone,
+with the words of each app's vocabulary and nothing else
+([The in-game phone](#the-in-game-phone)).
+
 ### Accounts and the token store
 
 Each account is a label of your choice with its own stored refresh token
-([Accounts](#accounts)). Where that token rests is a choice with consequences.
+([Accounts](#accounts)). Where that token rests is a choice with consequences. The same
+store keeps, under names of their own, the Spotify refresh token (`bastion-mc spotify
+login`) and the secret of the Realms TOTP approval (`bastion-mc realms totp-setup`); with
+`token_store = "none"` neither can be kept.
 
 #### Where the refresh token rests
 
@@ -349,8 +434,9 @@ binary or device here (see [Status](#status)).
 
 For the day something goes wrong: a canary that notices when the account's name, skin or
 cape changed behind your back ([The profile canary](#the-profile-canary)), `bastion-mc scram`
-to remove every credential from the machine in one step (and to say what it could not
-remove), and a built-in recovery runbook with verified links ([Emergency](#emergency)).
+to remove every credential the launcher keeps from the machine in one step — the sign-ins,
+the Spotify token, the Realms TOTP secret, the phone browser's profile — and to say what it
+could not remove, and a built-in recovery runbook with verified links ([Emergency](#emergency)).
 
 ## The graphical front end
 
@@ -384,7 +470,10 @@ What the launcher is doing is named at the top right of every page.
   stages of a launch; what the running or the last launch is protected by. *Play* can be
   pressed exactly when a launch can start — otherwise the line under the gauge says why
   not. Stopping is a separate button, so a second press on the launch control can never
-  stop a game.
+  stop a game. While a Realms join waits for your approval, the page shows the prompt: the
+  Realm, the server address the game would connect to, in `code` mode the six-digit code
+  (in two groups of three), and how long it is still valid; when the prompt ends it says
+  how ([Realms](#realms)).
 
   The gauge, from the outside in: the **sequence** (one arc per stage — files, verify,
   sign-in, sandbox, game; the stage being worked on has a highlight travelling along it),
@@ -452,13 +541,15 @@ rail shows its marks only (with the page names as tool tips), and pages fold int
 columns or scroll. Nothing moves on screen while nothing happens: the window has no timer
 when it is idle, 25 steps a second while a launch is being prepared and five while the
 game runs (both only while the Launch page is shown), and one a second while a sign-in
-prompt or a scram is counting.
+prompt, a waiting Realms prompt or a scram is counting.
 
 Rendering uses the GPU when one is usable and falls back to software otherwise
 (`ICED_BACKEND=tiny-skia` forces software). No font or image is bundled: text uses Adwaita
 Sans and the system's monospace face where they are installed and whatever sans-serif and
 monospace faces there are otherwise; every symbol is drawn as geometry. It knows nothing of
-voice chat or of the companion mod beyond the log lines in its console.
+voice chat, the companion mod or the phone's services beyond the log lines in its console,
+except the Realms prompt above. It offers none of the fourth round's commands
+(`browser login`, `spotify …`, `realms totp-setup`): they are run in a terminal.
 
 It is a separate program on purpose, not a mode of the launcher:
 
@@ -664,23 +755,397 @@ reads packs with, lists members that a check based on the declared count never s
 
 ## The companion mod
 
-Fabric profiles get a small mod of the launcher's own, **bastion-companion**, without you
-installing anything: **zoom** (hold C; on by default), a **HUD read-out** of frames per
-second, position and facing (off by default), and **fullbright** (off by default; some
-servers do not allow it — that is yours to check). It is compiled from source together with
-the launcher, embedded in the launcher binary, and added for one session at a time as two
-read-only files outside `mods/`, which stays exactly what you signed.
+Fabric profiles get a mod of the launcher's own, **bastion-companion**, without you
+installing anything: the [in-game phone](#the-in-game-phone) (press R), the
+[redone home screen and darker menus](#the-home-screen-and-dark-menus), and three
+conveniences — **zoom** (hold C; on by default), a **HUD read-out** of frames per second,
+position and facing (off by default), and **fullbright** (off by default; some servers do
+not allow it — that is yours to check) — these three on Minecraft 26.3 only. It is compiled
+from source together with the launcher, embedded in the launcher binary, and added for one
+session at a time as two read-only files outside `mods/`, which stays exactly what you
+signed.
 
 It is a convenience, **not a security feature**: it runs inside the game next to every other
-mod and enforces nothing. What it tells the launcher over its socket is written into the
-launch log, marked as coming from the game, and never acted on. It is added only to Fabric
-profiles of Minecraft versions it was tested with — 26.3 at present (`force = true` adds it
-to others, untried in a real game) — and every launch says whether it was added and why
-not. Its settings are the launcher's, under `[companion]` in `config.toml`, and any of them
-can be set per instance in `instance.toml`; `enabled = false` keeps it out. There is no
-settings screen in the game, on purpose. Everything else — keys, settings, how it reaches
-the game, the channel, the build, what was verified — is in
-[`docs/COMPANION.md`](docs/COMPANION.md).
+mod and enforces nothing. What it reports over its socket is written into the launch log,
+marked as coming from the game, and never acted on. What the phone asks for over the same
+socket is done only as far as the named app's fixed vocabulary and limits allow — exactly as
+for any other code in the game that sends the same words. The launcher adds the mod by itself
+to Fabric profiles of the ten Minecraft versions it was run with
+([Minecraft versions](#minecraft-versions); `force = true` adds it to the other versions
+from 1.20.1 to 26.3), and every launch says whether it was added and why not. Its settings
+are the launcher's, under `[companion]` in `config.toml`, and any of them can be set per
+instance in `instance.toml`; `enabled = false` keeps it out. No screen in the game changes
+them, on purpose. Everything else — keys, settings, how it reaches the game, the channel,
+the build, what was verified — is in [`docs/COMPANION.md`](docs/COMPANION.md); the phone and
+its services in detail are in [`docs/PHONE.md`](docs/PHONE.md).
+
+### Minecraft versions
+
+The companion mod — and with it the phone, the home screen and the dark menus — runs on
+every Fabric release from 1.20.1 to 26.3. Minecraft's own code changed several times in that
+span (how the interface is drawn, how pictures become textures, how keys and the mouse
+arrive, where the open screen lives), so the mod has one adapter per *family* of versions
+that are alike in what it needs, and picks the adapter when the game starts:
+
+| Family | Versions | Run in the real game |
+|---|---|---|
+| `v1_20_1` | 1.20.1 | 1.20.1 |
+| `v1_20_2` | 1.20.2 – 1.20.6 | 1.20.4 |
+| `v1_21` | 1.21, 1.21.1 | 1.21.1 |
+| `v1_21_2` | 1.21.2 – 1.21.4 | 1.21.4 |
+| `v1_21_5` | 1.21.5 | 1.21.5 |
+| `v1_21_6` | 1.21.6 – 1.21.8 | 1.21.8 |
+| `v1_21_9` | 1.21.9 – 1.21.11 | 1.21.10 |
+| `v26_1` | 26.1 – 26.1.2 | 26.1.2 |
+| `v26_2` | 26.2 | 26.2 |
+| `v26_3` | 26.3 | 26.3 |
+
+The launcher adds the mod by itself to the versions in the last column. For the other
+versions of a family, set `force = true` under `[companion]`: the mod then uses the family's
+adapter, but that exact version was never started here. Versions outside every family
+(older than 1.20.1, newer than 26.3) get no adapter: with `force` the mod loads, says in the
+game log that it has none, and the phone, the home screen and the dark menus stay off. Zoom,
+the HUD read-out and fullbright are written for 26.3's classes; on every other version they
+switch themselves off and say so once in the launch log. The adapters are compiled against
+stand-ins of Minecraft's classes — names and signatures only, no code — that were generated
+from Mojang's and Fabric's published files, each checked against its publisher's hash
+(`java/stubs/tools/regenerate.py --check` does it again); the build reads only those
+stand-ins, with no Minecraft jar and no network.
+
+**Vanilla instances** need no mod. Until this round, vanilla 1.20.1 to 1.21.11 did not start
+at all: their client jars are signed and keep their classes in the default package, where
+the launcher's unsigned launch bootstrap was too, and the JVM refused the game's classes
+(`SecurityException: … signer information does not match …`). The bootstrap now lives in a
+package of its own (`bastion.boot`). Vanilla 1.21.4 was started after that change; the other
+versions of the range were not. Each version needs the Java release it declares — 17 up to
+1.20.4, 21 from 1.20.5 to 1.21.11, 25 for 26.x (the packages `jdk17-openjdk`,
+`jdk21-openjdk`, `jdk25-openjdk`) — or `match = "newer"` under `[java]`, which is how the
+development machine ran every one of the versions above, on Java 27.
+
+## The in-game phone
+
+In a Fabric instance with the companion mod, press **R** — in a world or on the home screen
+— and a phone slides up at the right of the screen; press R again, or Escape on its home
+screen, to put it away. The game keeps running behind it (it is not a pause menu), and the
+mouse is free while it is out. Everything works with the mouse or the keyboard alone: arrow
+keys or Tab move the highlight, Enter or Space use it, Escape or Backspace go back. While a
+text field has the cursor, keys are letters: R types an "r" there. The status bar shows the
+time, how many notices the launcher sent (a clip saved, a join approved …) and whether the
+phone is connected to the launcher; a notice that arrives while the phone is away peeks in
+at the edge of the screen. The clock shows the time zone of the game's sandbox, which has none
+unless `expose_timezone = true` under `[sandbox]`, so it may show UTC.
+
+The phone shows only the apps the launcher set up for this launch:
+
+| App | On the phone when | Needs |
+|---|---|---|
+| Spotify | the D-Bus proxy to the desktop app started (`[spotify] mpris = true`, the default), or the Web API is signed in | `xdg-dbus-proxy`, the Spotify desktop app; for the Web API your own Spotify client ID |
+| Discord | the browser is on and lists a site named `discord` | `[browser]`, Firefox |
+| Browser | `[browser] enabled = true` | Firefox, and sites listed |
+| Clips | `[clips] enabled = true` | ffmpeg, and the game on an X11 display (the nested compositor or yours) |
+| Realms | every launch but a burner session; it can approve a join only with `[realms] approve` set | a signed-in account, the filtered network with the credential broker |
+| Settings | every launch but a burner session | — |
+
+Spotify, clips and the browser are started only for a launch that adds the companion mod:
+without a phone there is nothing to use them with. Settings sync and the brokering of Realms
+work without it — in a vanilla instance too —, but approving a Realms join needs the phone. A
+`--burner` session starts no browser, takes no part in settings sync or Realms, and its
+Spotify has neither the Web API nor album art; clips are recorded as in any other launch,
+and a clip saved there stays (it is the launcher's file, not the game's).
+
+```toml
+[companion]
+phone = true                  # the in-game phone
+phone_key = "key.keyboard.r"  # Minecraft's name for the key, as in options.txt; "r" works too
+```
+
+R because no Minecraft version from 1.20.1 to 26.3 binds it by default, Simple Voice Chat
+does not use it, and it sits in the same place on QWERTY, QWERTZ and AZERTY keyboards.
+`phone = false` takes the phone out of the game and nothing more: while the companion is
+added to the instance, Spotify, the browser and clips are still prepared (each as its own
+section says), and any code in the game can use them over the channel. To switch a service
+off, use its own settings (`mpris = false` and no `client_id` under `[spotify]`,
+`enabled = false` under `[browser]` or `[clips]`), or keep the companion out
+(`enabled = false` under `[companion]`).
+
+**What the game can see and do through the phone.** The phone is code inside the game, next
+to every other mod, and carries no authority: any mod can read what it shows, read what you
+type into it, draw a fake one, or send whatever the phone could send.
+
+* **Whatever is shown on the phone or typed into it is visible to every mod in the game**:
+  what you listen to, the open web page as pictures (a Discord conversation on screen
+  included), clip names, Realms world names and server addresses; a search, text typed into
+  a web page, a Realms code. Type no password into the phone: sign in to sites with
+  `bastion-mc browser login <site>`, outside the game.
+* Whatever an app allows, any code in the game can do, at the rate the launcher allows:
+  control your Spotify playback, open a listed site and act there as you if you are signed
+  in, save, rename or delete clips the launcher saved, type a Realms code, sync settings.
+* What it cannot get through the phone: a token, a cookie, the browser's profile, the TOTP
+  secret, a path, a web address or a program to run. Every command is parsed strictly,
+  routed to an app of this launch by its exact name, refused unless its verb is in that app's
+  fixed vocabulary, and limited per app and verb (and in all, per second); no argument is
+  ever used as a path, an address, a command line or code. What the launcher sends the phone
+  is what the phone shows — state, pictures, short notices — and nothing more.
+
+### Spotify
+
+The phone's Spotify app controls the **Spotify desktop app on this machine** — play, pause,
+next, previous, seek, volume, shuffle, repeat, open a track, album, playlist, artist, episode
+or show — and shows what is playing, with the cover. This is on by default and needs no
+account: the launcher talks to the desktop app over MPRIS (D-Bus), through `xdg-dbus-proxy`
+in a sandbox of its own that passes the Spotify app's player interface and nothing else of
+your session bus. Nothing leaves the machine except the cover: when the phone asks for it,
+the launcher fetches it from Spotify's image server (`i.scdn.co`), decodes it and gives the
+phone a picture it encoded itself (`album_art = false` turns that off).
+
+With the **Spotify Web API** the phone can also search, add to the queue, list your Spotify
+devices and move playback to one of them, and control playback when the desktop app is not
+running (Spotify allows playback control through the Web API only with Premium; the phone
+says so when it is missing). It needs your own Spotify application — the launcher ships no
+client ID and no secret:
+
+1. Create an app at <https://developer.spotify.com/dashboard> and register the redirect URI
+   `http://127.0.0.1/callback` (Spotify then accepts the port the sign-in uses; with
+   `redirect_port` set, register `http://127.0.0.1:<port>/callback`).
+2. Put its client ID under `[spotify]` in `config.toml`: `client_id = "…"` (32 lower-case
+   hexadecimal characters).
+3. `bastion-mc spotify login` (`--open` starts your browser) and sign in. The refresh token
+   goes to the launcher's token store, under a name of its own.
+
+`bastion-mc spotify status` says what is set up and whether it answers (`--offline`: from the
+configuration and the store only); `bastion-mc spotify logout` forgets the stored token (the
+grant itself is revoked under "Manage apps" in your Spotify account); `bastion-mc scram`
+removes it with everything else. The scopes asked for are
+`user-read-playback-state user-modify-playback-state` — nothing about your account, library
+or playlists. During a launch with the Web API, a token keeper process holds the refresh
+token ([The phone's helpers](#the-phones-helpers)).
+
+```toml
+[spotify]
+mpris = true          # the desktop app over MPRIS
+album_art = true      # covers from i.scdn.co when the phone asks
+# client_id = "…"     # your Spotify application: the Web API
+# redirect_port = 43117   # a fixed port for the sign-in (1024 or higher); unset: any free port
+```
+
+What the game can do through it: control your playback (the desktop app, or any of your
+Spotify devices through the Web API), search, queue, move playback to one of your listed
+devices, and read what is playing, your device names and search results — within limits per
+verb and per kind of Web API call, 60 calls a minute in all. It can open only the six kinds
+of `spotify:` address, and name only a device the launcher listed. Whatever program owns the
+desktop app's name on your session bus can show the phone made-up titles.
+
+### Discord and the browser
+
+The phone has a web browser: the installed Firefox (`pacman -S firefox`), headless, in a
+sandbox of its own ([The phone's helpers](#the-phones-helpers)), able to show only the
+sites you list — Discord first:
+
+```toml
+[browser]
+enabled = true
+sites = [
+  { preset = "discord" },
+  { name = "wiki", title = "Minecraft Wiki", start = "https://minecraft.wiki/",
+    hosts = ["minecraft.wiki", "*.minecraft.wiki"] },
+]
+```
+
+* At most 8 sites, each with the host names its pages may load from (`example.com`, or
+  `*.example.com` for every name below it), up to 32. The phone opens a site by its name, at
+  its `start` page; a link to a host the site does not list is refused, and the phone says
+  so. Only `https://` pages.
+* The built-in `discord` preset is `discord.com` and the hosts Discord's web client needs. A
+  site named `discord` gets an app of its own on the phone.
+* Budgets per site and minute (defaults): `requests_per_minute = 6000` (everything its pages
+  load; Discord's client loads about 700 files when it starts), `api_calls_per_minute = 300`
+  (fetch, XMLHttpRequest, WebSocket and beacon calls — sending a message is one),
+  `connections_per_minute = 120`, `megabytes_per_minute = 60`. Requests, calls and
+  connections beyond a budget are refused until it refills (the phone says so); bytes beyond
+  it are slowed down.
+* `frame_rate` (1 to 15, default 10) is how many pictures a second the phone gets — only
+  while it shows the page, and only while the page changes; `quality` (30 to 90, default 60)
+  their JPEG quality; `width` and `height` (160 to 1280; 800 × 600) the page size it starts
+  with; `memory_max_mb` (default 2048) the browser's own memory ceiling where the game's
+  resource limits are in use.
+
+**Sign in outside the game**, never on the phone:
+
+```sh
+bastion-mc browser login discord
+```
+
+opens a Firefox window on your desktop, in the same sandbox and with the same profile. Sign
+in there and close the window: the in-game browser starts with that session. The window,
+too, reaches only the site's hosts. Firefox's password manager is off, so the profile keeps
+the site's session, not your password; Ctrl-C instead of closing the window ends it without
+recording the sign-in. On X11 the window is a client of your X server like any other window.
+
+**What does not work**: voice and video calls, Discord's included (no microphone and no
+camera in the sandbox, WebRTC off, no UDP); sites that are not listed and hosts a listed site
+does not name — including what a site embeds from elsewhere (on Discord: video players, GIFs
+from Tenor, payments); uploading files; keeping downloads; extensions; developer tools;
+passkeys and security keys in the sign-in window; more than one browser at a time (one
+profile: while one runs, another launch's browser and `browser login` are refused with a
+message). Sites can tell that the in-game browser is remote-controlled (`navigator.webdriver`
+is true there) and may ask for more captchas; the sign-in window is not remote-controlled.
+Typing more than a few words in a row into a page loses text: the phone sends what you type
+in up to ten batches a second, and the launcher takes ten batches at once and then one a
+second (found by reading the code, not seen in the game; an open item in
+[`TODO.md`](TODO.md)).
+
+What the game can do with it: open the listed sites, see what they show, click, scroll and
+type in them — in a site where you are signed in, that is acting as you there, within the
+site's budgets. It cannot open anything else, cannot read the profile, its cookies or the
+site's token (the phone gets pictures, the host name, the page title and short notices), and
+cannot reach your files or your desktop through it. A site that can be made to show its own
+secrets on screen is beyond what the launcher can prevent. The profile lives in
+`~/.local/share/bastion-mc/browser/`; `bastion-mc scram` deletes it, but sessions a site
+keeps on its own side end only when you sign out there (Discord: Settings, Devices).
+
+### Clips
+
+With `[clips] enabled = true` (off by default: recording costs a CPU core) the launcher
+records the game while it runs and keeps the last `buffer_seconds` in memory. The phone's
+Clips app saves them as a clip — an MPEG-TS video (H.264; no sound) with a thumbnail next to
+it — into `~/.local/share/bastion-mc/clips` (or `folder`), lists the clips with their
+thumbnails, renames and deletes them. When a save goes over `max_clips` or `max_total_mb`,
+the oldest clips this feature saved are removed; nothing else in the folder is ever touched.
+
+It needs ffmpeg (`pacman -S ffmpeg`) and the game on an X11 display: the nested compositor
+(the default on X11 when gamescope is installed) or your X display itself. It does not work
+with a Wayland display: nothing outside the compositor can read the game's window there.
+
+```toml
+[clips]
+enabled = false
+buffer_seconds = 30   # 5 to 120
+fps = 30              # 5 to 30
+max_width = 1280      # 320 to 1280; narrower windows keep their size
+saves_per_minute = 4  # 1 to 6
+max_clips = 50        # 1 to 500
+max_total_mb = 2048   # 16 to 65536
+# folder = "/home/you/Videos/minecraft"   # an absolute path; default ~/.local/share/bastion-mc/clips
+```
+
+What the game can do with it: save clips (within those limits), see their names and
+thumbnails, rename and delete the clips this feature saved, and fill the folder up to
+`max_total_mb`. It never names a path: a clip is a number the launcher made up. The recorder
+processes what the game draws; one taken over through ffmpeg could write a clip meant to
+attack the video player you open it with — the launcher checks the file's structure, not
+the video.
+
+### Realms and Settings on the phone
+
+The Realms app is where you type the code that approves a Realms join (the launcher's code,
+or your authenticator's). It shows the Realm, the server address, how long the prompt is
+still valid and how many tries are left, and a waiting join peeks in at the edge of the
+screen while the phone is away ([Realms](#realms)). The Settings app shows whether your
+settings are kept in step across instances and when that last happened, and syncs on request
+([Settings sync](#settings-sync)).
+
+## The home screen and dark menus
+
+The title screen is replaced by a dark one of the launcher's own design: the game's name and
+version on the left with what the title screen offers — Singleplayer, Multiplayer,
+Minecraft Realms, Options, Mods (when a mod list such as Mod Menu is installed) and Quit; in
+demo mode Play Demo World instead of the first three — and below them Language,
+Accessibility and Classic title screen (the game's own, once). On the right, a sketch of the
+phone with the key that pulls it out. The captions are the game's own, in your language, and
+every button does exactly what the title screen's button does.
+
+The phone and the home screen share one dark theme — near-black, one cyan accent, amber for
+caution, red for danger: the same family of colours as the launcher's window. The game's
+own menus (options, world list, pause menu …) get a darker background: flat outside a
+world, a dark veil over the world inside one. Only the background changes; the menus are
+the game's.
+
+```toml
+[companion]
+home = true          # the redone title screen
+dark_menus = true    # darker backgrounds behind the game's own menus
+```
+
+Seen in the real game in demo mode on all ten families; the title screen with an account
+(Singleplayer, Multiplayer, Realms) and the Mods button only against the stand-in game of the
+tests (no account, no Mod Menu here).
+
+## Realms
+
+Realms works in the filtered network once you decide how a join is approved:
+
+```toml
+[realms]
+approve = "code"   # or "totp"; "off" (the default) refuses Realms joins, as before
+```
+
+* **What the game may do with your account.** The credential broker also answers for the
+  Realms hosts. The game sees your Realms list, its notifications, news and invitations, can
+  accept or decline an invitation (or redeem an invite code, 26.3), agree to the Realms terms
+  and report region pings — with your credential, which it still never holds. Everything an
+  owner does to a Realm (configure it, reset it, upload, download or restore a world, invite,
+  op or remove players, open, close, delete it) is refused before it leaves your computer:
+  manage your Realm from the official client.
+* **Every join needs your approval, outside the game.** When the game asks to join a Realm,
+  the launcher asks Realms where the server is, but does not hand that over. It shows a prompt
+  in its own output — and in bastion-mc-gui, on the Launch page — with the Realm, the server
+  address and, with `approve = "code"`, a six-digit code. Type the code into the phone's
+  Realms app (with `"totp"`: the code your authenticator app shows). You have 120 seconds and
+  3 attempts; one prompt at a time, at most 20 in a session. If you did not ask to join that
+  Realm, do nothing: the join is refused.
+* **One connection.** An approved join gives the game an address of the launcher's own, good
+  for one connection within two minutes, which the launcher connects to exactly the server
+  Realms named — public addresses only — through the dialer
+  ([The phone's helpers](#the-phones-helpers)).
+* **TOTP.** `bastion-mc realms totp-setup` makes a secret, keeps it in your token store and
+  shows it once, on the terminal, as an `otpauth` URI and as base32 for your authenticator
+  app (SHA-1, 6 digits, 30 seconds); `--replace` makes a new one. A code that was used once
+  is not accepted again, in a later launch either; after 10 wrong codes in a session, Realms
+  joins are refused until the next launch.
+* **What it needs.** A signed-in account (not demo mode), the filtered network with the
+  credential broker, and, to approve a join, the phone: a Fabric instance with the companion
+  mod. In an instance without the phone Realms is still brokered when `approve` is set — the
+  game sees your Realms list —, but nothing can approve a join: its prompt runs out and the
+  join is refused. If the launch cannot prepare the approvals (no TOTP secret stored, the
+  dialer does not start), it says so and Realms joins are refused for that session.
+* **What stays possible for code in the game.** It can accept an invitation someone sent you,
+  redeem an invite code it knows and agree to the Realms terms in your name, and it sees your
+  Realms list. In `totp` mode a code is not bound to the prompt it is typed for: code that
+  reads what you type into the phone can cancel your prompt, start a join to another of your
+  Realms and spend your code on that (`code` mode binds the code to the prompt it was shown
+  with). The Realms app is shown the Realm's name and the server address. An approval is only
+  as good as your reading of the prompt, and whoever can read your terminal or the front end
+  can read the code.
+* **Known gaps.** A Realm with a resource pack probably fails to join: the pack's address is
+  not reachable from the sandbox. None of this has run against the real Realms service (it
+  needs a signed-in account and a Realm).
+
+## Settings sync
+
+On by default (`[sync] options = true`). The settings that mean the same in every Minecraft
+version from 1.20.1 to 26.3 follow you from instance to instance: video, sound volumes, mouse
+and controls, key bindings, language, chat and accessibility. Change your field of view or a
+key binding in one instance, and the next instance you start has it — also when it runs
+another Minecraft version: where a setting changed its form between versions (the graphics
+mode, the menu blur, the "now playing" toast), it is translated exactly as Minecraft itself
+translates it, or left alone.
+
+Never synced: anything about one world or one server (last server, tutorial and first-run
+flags), the resource-pack list (packs are checked per instance), privacy choices
+(telemetry, server listing, presence) and this machine's devices (sound device, graphics
+backend). A burner session takes no part. The synced copy is
+`~/.local/share/bastion-mc/sync/options.json`: before the game starts the launcher merges it
+into the instance's `options.txt`, and at exit it writes back each listed setting the game
+changed — per setting, the last writer wins. The phone's Settings app can do the same during a
+session. The companion mod's own settings (zoom key, phone key …) come from `config.toml`
+anyway. `[sync] options = false` turns it off.
+
+What the game can do with it: code in the game of one instance can change, through what it
+leaves in its `options.txt`, the listed settings of your other instances — bind a key
+elsewhere, change a volume, the field of view, the language. Nothing else crosses: a setting
+must be on the list, and its value must have the shape the game writes for that setting (a
+boolean, a number, a short identifier, a language code, a key name) — never free text, a
+resource pack or a server.
 
 ## Accounts
 
@@ -752,12 +1217,24 @@ bastion-mc export-proofs proofs.txt     # what the launcher recorded that shows 
 ```
 
 `scram` first stops whatever could still store a sign-in (running launches, a sign-in
-that is waiting for you), then removes the credentials, and only then deletes what the
-games left behind. It reports nothing as done that was not confirmed: what it could not do
-is a line starting `COULD NOT`, and its exit status is then 1. It needs no network and
-revokes nothing at Microsoft — it says so — which is why the runbook is the second step.
-The front end has both on its **Security** page, which shows the launcher's verdict and
-never a better one.
+that is waiting for you, a Spotify token keeper), then removes the credentials, and only
+then deletes what the games left behind. It reports nothing as done that was not confirmed:
+what it could not do is a line starting `COULD NOT`, and its exit status is then 1. It needs
+no network and revokes nothing at Microsoft — it says so — which is why the runbook is the
+second step. The front end has both on its **Security** page, which shows the launcher's
+verdict and never a better one.
+
+The credentials of the phone's services go too: the Spotify refresh token and the secret of
+the Realms TOTP approval are removed from the kernel keyring (in the age vault they are
+files of the vault, which is emptied), and the phone browser's profile — its site sessions,
+such as a signed-in Discord — is deleted with the record of sign-ins. While a
+`bastion-mc browser login` window still uses that profile, scram leaves it and says
+`COULD NOT`: close the window and run scram again. Nothing is revoked at those services
+either: sessions a site keeps on its own side end only when you sign out there (Discord:
+Settings, Devices), and the Spotify grant ends when you remove the app under "Manage apps"
+in your Spotify account. To use them again afterwards: `bastion-mc spotify login`,
+`bastion-mc realms totp-setup` (a new secret for your authenticator app) and
+`bastion-mc browser login <site>`.
 
 The runbook is [`docs/SCRAM_RUNBOOK.md`](docs/SCRAM_RUNBOOK.md), compiled into the launcher
 (`bastion-mc wiki scram --links` lists its addresses). If this computer itself may be
@@ -772,18 +1249,29 @@ where yours goes (`~/.config/bastion-mc/config.toml`; it must be your own file, 
 link, and not writable by group or others, e.g. mode 0600). Unknown keys are errors, also
 in a server's table. An instance's `instance.toml` can set its own Minecraft version
 (vanilla), `memory_mb`, `width`, `height`, `[network]` `mode` and additional `servers`, and
-any key of `[companion]`.
+any key of `[companion]` (the phone, its key, the home screen and the dark menus included).
+
+The sections of the phone's services are in `config.toml` only, the same for every instance:
+`[spotify]` ([Spotify](#spotify)), `[clips]` ([Clips](#clips)), `[browser]`
+([Discord and the browser](#discord-and-the-browser)), `[realms]` ([Realms](#realms)) and
+`[sync]` ([Settings sync](#settings-sync)). Their defaults: Spotify over MPRIS, album art
+and settings sync on; the browser, the Spotify Web API (no client ID), clips and Realms
+approval off.
 
 ### Layout (XDG)
 
 ```
 ~/.config/bastion-mc/        config.toml, trusted-keys.d/
-~/.local/share/bastion-mc/   instances/<id>/, libraries/, versions/, assets/, vault/
-~/.cache/bastion-mc/         scratch/ (the per-launch game root, deleted on exit), running/
+~/.local/share/bastion-mc/   instances/<id>/, libraries/, versions/, assets/, vault/,
+                             browser/ (the phone browser's profile and record of sign-ins),
+                             clips/ (the default clips folder), sync/ (the synced settings)
+~/.cache/bastion-mc/         scratch/ (the per-launch game root, deleted on exit), running/,
+                             realms-totp-last-step (no secret: the last TOTP step used)
 ~/.local/state/bastion-mc/   logs/<instance>/launch-*.log (the newest 20), profile-serials/,
                              accounts/, canary/, activity/, default-account
-$XDG_RUNTIME_DIR/bastion-mc/ short-lived sockets: the game's Wayland socket (wl-*) and the
-                             companion mod's channel (companion-*)
+$XDG_RUNTIME_DIR/bastion-mc/ short-lived: the game's Wayland socket (wl-*), the companion
+                             mod's channel (companion-*), the D-Bus proxy's socket
+                             directory (mpris-*), the clip buffer in memory (clips-*)
 ```
 
 `options.txt` and `servers.dat` are carried into each session and back by the launcher,
@@ -802,6 +1290,13 @@ BASTION_X11_TESTS=1 cargo test     # also X11 clients in the sandbox (needs an X
 BASTION_FUZZ_ITERATIONS=300000 cargo test --release --test robustness   # a longer generated-input run
 ```
 
+The phone's suites in the default run use more tools where they are installed, and say
+`skipped` and pass where they are not: `tests/spotify.rs` needs `dbus-daemon`,
+`xdg-dbus-proxy` and python3 with PyGObject (its stand-in player is written with GDBus),
+`tests/clips.rs` ffmpeg and ffprobe. `tests/phone_ui.rs` drives the phone, the home screen
+and the dark menus in a stand-in game with the JDK, and `tests/realms.rs` runs a stand-in
+Realms service, the real dialer and the real relay.
+
 The counts of the last full run are in [Status](#status). The opt-in suites return at once
 — and count as passed — unless their variables are set:
 
@@ -811,7 +1306,11 @@ The counts of the last full run are in [Status](#status). The opt-in suites retu
 | `BASTION_X11_TESTS=1` | X11 clients in the sandbox, in each network mode |
 | `BASTION_WAYLAND_TESTS=1` with `WAYLAND_DISPLAY` and `BASTION_WAYLAND_COMPOSITOR` | the security context against a real compositor (`tests/wayland.rs`) |
 | `BASTION_NESTED_TESTS=1` (`BASTION_NESTED_CLIPBOARD_TEST=1` for the clipboard test) | the game's display inside gamescope (`tests/nested.rs`) |
-| `BASTION_E2E_ROOT` and `BASTION_E2E_INSTANCE` | the real Minecraft client through the whole launch path (`tests/nested_game.rs`), the companion mod in the real game (`tests/companion_game.rs`), and (`BASTION_E2E_ROOT` alone) the companion's compile-only stand-ins against the real Fabric Loader and Mixin jars |
+| `BASTION_E2E_ROOT` and `BASTION_E2E_INSTANCE` | the real Minecraft client through the whole launch path (`tests/nested_game.rs`), the companion mod in the real game with the demo service behind its phone (`tests/companion_game.rs`, a signed Fabric profile of one of the ten versions), and (`BASTION_E2E_ROOT` alone) the companion's compile-only stand-ins against the real Fabric Loader and Mixin jars |
+| `BASTION_BROWSER_TESTS=1` (with `BASTION_NET_TESTS=1` also example.com and Discord's sign-in page; with `BASTION_BROWSER_LOGIN_DISPLAY=:N`, a private display, the sign-in window) | the phone's browser — the installed Firefox in its sandbox, the relay, the remote control — against stand-in HTTPS sites (`tests/browser.rs`) |
+| `BASTION_E2E_ROOT`, `BASTION_BROWSER_TESTS=1` and a private `DISPLAY` | the browser in a real demo launch, and a search of the game's sandbox for its profile (`tests/browser_game.rs`) |
+| `BASTION_CLIPS_DISPLAY=:N` (a private display) | the clip recorder in its sandbox, recording a window there (`tests/clips.rs`) |
+| `BASTION_E2E_ROOT`, `BASTION_E2E_INSTANCE` and a private `DISPLAY` (`BASTION_E2E_CONFIG` for another configuration root) | clips and Spotify in a real demo launch, the phone's apps driven by a script of commands, a private D-Bus daemon with the stand-in player (`tests/clips_game.rs`) |
 | `BASTION_PULSE_SOCKET` and `BASTION_PULSE_EXPECT` | the module-loading probe against your running sound server |
 | `BASTION_GUI_LIVE_LAUNCHER` and `BASTION_GUI_LIVE_INSTANCE` | the front end against the real launcher and a real demo game (`gui/tests/live.rs`) |
 
@@ -844,8 +1343,21 @@ DISPLAY=:77 XAUTHORITY=/dev/null BASTION_E2E_ROOT=$PWD/target/e2e BASTION_E2E_IN
 ```
 
 `BASTION_COMPANION_WORLD=1` lets the companion's self-test enter the demo world and measure
-there; `BASTION_COMPANION_KEYPRESS=1` also presses the zoom key through XTEST — only on a
-private display that nothing else uses, because the key goes to whatever has the focus.
+there; `BASTION_COMPANION_KEYPRESS=1` also presses the phone key (and on 26.3 the zoom key)
+through XTEST — only on a private display that nothing else uses, because the key goes to
+whatever has the focus. The phone in that test is served by the demo service: fake Spotify,
+browser, clips, Realms and settings that write every command they receive into the launch
+log. `BASTION_PHONE_DEMO=1` in the launcher's environment switches it on for any launch; it
+is a test switch, not a configuration key, and the launch log says `DEMO` for every app it
+serves.
+
+`tests/support/phone-shots.sh <data-root> <instance> <display> <out-dir> <width> <height>
+[world]` is how the phone, the home screen and the dark menus were looked at in the real
+game: it launches the instance in demo mode on a private display with the demo service,
+presses keys and clicks there through XTEST, and saves a screenshot of the game's window for
+each step. It changes the instance: the window size, `memory_mb = 2048` and, where there
+is no `[companion]` table, `force = true` go into its `instance.toml`, and quiet settings
+(no sound, no onboarding screen) into its `persist/options.txt`.
 
 The front end's widget tests render in software (`.cargo/config.toml` selects the
 renderer) and leave screenshots of every state in `target/gui-snapshots/`
@@ -870,6 +1382,8 @@ Coverage-guided fuzzing of the same parsers: [`fuzz/README.md`](fuzz/README.md).
 - [`docs/MODS.md`](docs/MODS.md) — mods in detail: signed profiles, `profile add` and
   `profile check`, the aliases, ViaFabric, Simple Voice Chat and voice chat on a server.
 - [`docs/COMPANION.md`](docs/COMPANION.md) — the companion mod.
+- [`docs/PHONE.md`](docs/PHONE.md) — the in-game phone and its services: what each app does,
+  its settings and limits, and what the game can see.
 - [`docs/README.md`](docs/README.md) — an index of everything under `docs/`, including the
   engineering notes in `docs/notes/` (how each part was built and verified) and the
   screenshots.
@@ -889,19 +1403,25 @@ Coverage-guided fuzzing of the same parsers: [`fuzz/README.md`](fuzz/README.md).
 | `src/scram.rs`, `src/running.rs`, `src/proofs.rs` | emergency removal of credentials, markers of running commands and locks on their directories, the ownership export |
 | `src/tree.rs` | deleting and copying directory trees that the game has written (bounded, link-safe) |
 | `src/fuzzing.rs` | one harness per parser of untrusted bytes (used by `tests/robustness.rs` and `fuzz/`) |
-| `src/companion/` | the companion mod's launcher side: configuration, the injection decision, `jar.rs` (the build recipe, also used by `build.rs`), `channel.rs` (the socket the mod reports on) |
+| `src/companion/` | the companion mod's launcher side: configuration, the injection decision, `jar.rs` (the build recipe in passes, one per family of versions, also used by `build.rs`), `channel.rs` (the socket: the mod's reports, and protocol 2 for the phone) |
+| `src/phone/` | the phone's contract (`mod.rs`: commands, services, apps), `dispatch.rs` (routing, vocabularies, limits), `demo.rs` (the demo service, a test switch) |
+| `src/browser/` | the phone's browser: configuration and the `discord` preset, Firefox's sandbox and the stage inside it, the relay and its budgets, WebSocket and WebDriver BiDi, the phone app, `login.rs` (`browser login`) |
+| `src/spotify/` | Spotify: the D-Bus client and MPRIS through `xdg-dbus-proxy`, the Web API, the sign-in, the token keeper, album art, `spotify:` addresses |
+| `src/clips/` | clips: the recorder's sandbox and its X11 helper, the buffer, the library of saved clips |
+| `src/realms/`, `src/sync/` | Realms: the endpoint table, approvals, TOTP, the dialer; settings sync: the list of synced settings, translations between versions, the synced copy |
 | `native/noclip.c` | the library preloaded into gamescope that cuts its clipboard bridge |
-| `docs/` | threat model, token path, the scram runbook, the dedicated-account guide, mods, the companion mod; `notes/` (engineering notes), `images/` (screenshots) |
-| `tests/support/` | scripts that fetch, verify and run the compositors the display tests need |
-| `tests/java/` | Java programs the tests start: the broker and voice probes, and a stand-in "game" for the companion mod (`fakegame*`) |
+| `docs/` | threat model, token path, the scram runbook, the dedicated-account guide, mods, the companion mod, the phone; `notes/` (engineering notes), `images/` (screenshots) |
+| `tests/support/` | scripts that fetch, verify and run the compositors the display tests need; the stand-in Spotify player, stand-in HTTPS sites, XTEST keys, clicks and screenshots on a private display, `phone-shots.sh` |
+| `tests/java/` | Java programs the tests start: the broker and voice probes, a stand-in "game" for the companion mod (`fakegame*`), a stand-in platform and the phone's check (`FakePlatform.java`, `PhoneUiCheck.java`) |
 | `src/mojang/` | version metadata, argument rendering, launch frame, verified download store |
 | `src/profile/` | signed manifest, Ed25519 trust store, strict `mods/` verification, authoring, `capabilities.rs` (the scan of what jars refer to), `modrinth.rs` (registry client), `catalog.rs` (`profile add`, `profile check`), `packs.rs` (resource and shader packs), `zipdir.rs` (the strict zip directory reader they are checked with) |
 | `src/secret.rs`, `src/hardening.rs` | locked self-wiping memory, zero-on-free allocator, process hardening |
 | `src/events.rs` | how the launcher reports progress: text for a terminal, JSON events for a front end |
 | `crates/proto/` | the event protocol shared by launcher and front ends (types only), and the runbook's text with the only links a front end may open |
-| `gui/` | `bastion-mc-gui`: `backend.rs` (worker), `app.rs` (state and logic), `view/` (the pages and the parts they are built from), `hud.rs` (drawn elements), `theme.rs`, `runbook.rs`, `console.rs` |
-| `java/BastionBootstrap.java` | the 118-line class that receives the launch frame |
-| `java/companion/`, `java/stubs/` | the companion mod's sources; compile-only stand-ins for the seven Fabric Loader and Mixin types it is compiled against (never shipped) |
+| `gui/` | `bastion-mc-gui`: `backend.rs` (worker), `app.rs` (state and logic), `view/` (the pages and the parts they are built from, the Realms prompt among them), `hud.rs` (drawn elements), `theme.rs`, `runbook.rs`, `console.rs` |
+| `java/BastionBootstrap.java` | the 122-line class (package `bastion.boot`) that receives the launch frame |
+| `java/companion/` | the companion mod: `src/` (version-independent: the platform API, the phone, the home screen, the theme, zoom and the other features), `platform/` (the adapters of each family and group of families) |
+| `java/stubs/` | compile-only stand-ins, never shipped: `common/` (Fabric Loader, Mixin, ASM), `minecraft/<family>/` (Minecraft's classes per family: names and signatures only), `tools/` (how they are made again from the published files, and the table of families) |
 | `packaging/arch/PKGBUILD` | hardened Arch packages (`bastion-mc`, `bastion-mc-gui`) |
 
 ## Trademarks and licence
