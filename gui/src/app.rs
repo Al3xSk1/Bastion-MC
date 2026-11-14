@@ -458,6 +458,9 @@ pub struct App {
     /// Text of the "new account" field.
     pub new_account: String,
     pub login: Option<LoginPrompt>,
+    /// A Realms join waiting for approval in the launch under way, or how the last prompt
+    /// ended (see `view::realms`).
+    pub realms: Option<crate::view::realms::RealmsPrompt>,
     pub instances: Vec<InstanceChoice>,
     /// Instances the launcher listed beyond [`MAX_INSTANCES`].
     pub instances_hidden: usize,
@@ -581,6 +584,7 @@ impl App {
             default_account: None,
             new_account: String::new(),
             login: None,
+            realms: None,
             instances: Vec::new(),
             instances_hidden: 0,
             selected: None,
@@ -1237,6 +1241,17 @@ impl App {
                     expires_at: self.now + Duration::from_secs(timeout_secs.min(MAX_PROMPT_SECS)),
                 });
             }
+            Event::RealmsApproval(mut prompt) => {
+                // What the launcher sends is shown as text: made printable and bounded.
+                prompt.world = clean_to(&prompt.world, 64);
+                prompt.address = clean_to(&prompt.address, 64);
+                prompt.code = prompt.code.map(|code| clean_to(&code, 12));
+                self.now = Instant::now();
+                self.console
+                    .push(Source::Launcher, format!("realms: a join to {} — see the Launch page", prompt.world));
+                let expires_at = self.now + Duration::from_secs(prompt.expires_in.min(MAX_PROMPT_SECS));
+                self.realms = Some(crate::view::realms::RealmsPrompt { event: prompt, expires_at });
+            }
             Event::Account(account) => {
                 if !is_valid_id(&account.account) {
                     return;
@@ -1322,6 +1337,7 @@ impl App {
         let Some(job) = self.job.take() else { return Task::none() };
         self.progress = None;
         self.login = None;
+        self.realms = None;
         let ok = outcome == Outcome::Exited(0);
         match &outcome {
             Outcome::FailedToStart(why) => {
@@ -1402,7 +1418,8 @@ impl App {
             _ => Some(SWEEP_INTERVAL),
         });
         // A countdown, or the time a scram has been running: once a second.
-        let clock = (self.login.is_some() || self.emergency.active()).then_some(CLOCK_INTERVAL);
+        let realms = self.realms.as_ref().is_some_and(|p| p.event.state == bastion_mc_proto::ApprovalState::Waiting);
+        let clock = (self.login.is_some() || realms || self.emergency.active()).then_some(CLOCK_INTERVAL);
         gauge.or(clock)
     }
 

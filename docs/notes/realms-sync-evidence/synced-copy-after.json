@@ -1,0 +1,11 @@
+{
+  "format": "bastion-mc/sync/v1",
+  "settings": {
+    "fov": {
+      "value": "0.075",
+      "data_version": 4189,
+      "changed": 1794636028167,
+      "instance": "f1214"
+    }
+  }
+}

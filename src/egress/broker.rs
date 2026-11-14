@@ -142,6 +142,8 @@ pub struct Authority {
     params: CertificateParams,
     key: KeyPair,
     certificate: CertificateDer<'static>,
+    /// Its name constraints include the Realms domains (`realms::table::DOMAINS`).
+    realms: bool,
 }
 
 fn pki(e: impl std::fmt::Display) -> Error {
@@ -150,6 +152,13 @@ fn pki(e: impl std::fmt::Display) -> Error {
 
 impl Authority {
     pub fn generate() -> Result<Self> {
+        Self::generate_for(false)
+    }
+
+    /// With `realms`, the authority may also issue certificates for the Realms hosts
+    /// (`[realms] approve` is on): its name constraints then also permit
+    /// `realms.minecraft.net` and `realms.minecraft-services.net`, and nothing else is added.
+    pub fn generate_for(realms: bool) -> Result<Self> {
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(pki)?;
         let mut params = CertificateParams::new(Vec::<String>::new()).map_err(pki)?;
         let now = time::OffsetDateTime::now_utc();
@@ -165,12 +174,17 @@ impl Authority {
             format!("bastion-mc credential broker {}", util::hex_encode(&util::random_bytes::<4>()?)),
         );
         params.distinguished_name = name;
+        let realms_domains: &[&str] = if realms { &crate::realms::table::DOMAINS } else { &[] };
         params.name_constraints = Some(NameConstraints {
-            permitted_subtrees: DOMAINS.iter().map(|d| GeneralSubtree::DnsName((*d).to_string())).collect(),
+            permitted_subtrees: DOMAINS
+                .iter()
+                .chain(realms_domains)
+                .map(|d| GeneralSubtree::DnsName((*d).to_string()))
+                .collect(),
             excluded_subtrees: Vec::new(),
         });
         let certificate = params.self_signed(&key).map_err(pki)?.der().clone();
-        Ok(Authority { params, key, certificate })
+        Ok(Authority { params, key, certificate, realms })
     }
 
     /// The certificate to put into the sandbox's trust store.
@@ -422,6 +436,26 @@ pub struct Broker {
     endpoints: Vec<Endpoint>,
     http: HttpClient,
     buffers: Budget,
+    /// Realms, when `[realms] approve` is on: the approvals and the dialer.
+    realms: Option<RealmsBroker>,
+}
+
+/// What the broker needs for Realms (see `realms`).
+pub struct RealmsBroker {
+    pub approvals: Arc<crate::realms::approval::Approvals>,
+    /// Connects the one approved connection; `None` only in tests that stop before that.
+    pub dialer: Option<Arc<crate::realms::dial::Dialer>>,
+    /// Test support, never set by a launch: accept a Realm server on the loopback address
+    /// (the tests' stand-in) where a real one must be public.
+    #[doc(hidden)]
+    pub loopback_for_tests: bool,
+}
+
+impl RealmsBroker {
+    /// May the approved connection go to `ip`? Public addresses only (see `egress::is_public`).
+    pub fn permits(&self, ip: std::net::IpAddr) -> bool {
+        super::is_public(ip) || (self.loopback_for_tests && ip.is_loopback())
+    }
 }
 
 /// The one budget all buffered bodies come out of (see the module documentation).
@@ -553,7 +587,31 @@ impl Broker {
             endpoints,
             http: http.clone().with_domains(&DOMAINS),
             buffers: Budget::new(BUFFER_BUDGET, BUDGET_WAIT),
+            realms: None,
         })
+    }
+
+    /// Broker Realms as well (`[realms] approve` is on). The authority must have been made
+    /// for it ([`Authority::generate_for`]).
+    pub fn with_realms(mut self, realms: RealmsBroker) -> Result<Self> {
+        if !self.authority.realms {
+            return Err(Error::Tls("the credential broker's authority was not made for the Realms hosts".into()));
+        }
+        let domains: Vec<&str> = DOMAINS.iter().chain(&crate::realms::table::DOMAINS).copied().collect();
+        self.http = self.http.clone().with_domains(&domains);
+        self.realms = Some(realms);
+        Ok(self)
+    }
+
+    /// The Realms part, when Realms is brokered.
+    pub fn realms(&self) -> Option<&RealmsBroker> {
+        self.realms.as_ref()
+    }
+
+    /// Is HTTPS to this name terminated by this broker? Mojang's API domains always; the
+    /// Realms hosts when Realms is brokered.
+    pub fn terminates(&self, name: &str) -> bool {
+        Self::intercepts(name) || (self.realms.is_some() && crate::realms::table::is_realms_host(name))
     }
 
     /// Another budget for buffered bodies, and another wait for room in it. For the tests,
@@ -586,7 +644,13 @@ impl Broker {
             "credential broker: the game holds a placeholder; the launcher authenticates [{}] on its behalf{}",
             on.join(", "),
             if self.credential.is_none() { " (no account in this session: nothing is authenticated)" } else { "" }
-        )
+        ) + match &self.realms {
+            Some(r) => match r.approvals.mode() {
+                crate::realms::Approve::Totp => "; Realms: brokered, joins need your approval (TOTP code in the phone)",
+                _ => "; Realms: brokered, joins need your approval (the launcher's code, typed into the phone)",
+            },
+            None => "",
+        }
     }
 
     /// The decision table. Pure: it looks at nothing but its arguments and the configuration.
@@ -859,6 +923,9 @@ impl Broker {
         if query.is_some_and(|q| !query_is_plain(q)) {
             return deny(400, "the query string contains characters that are not relayed", false);
         }
+        if self.realms.is_some() && crate::realms::table::is_realms_host(host) {
+            return self.handle_realms(ctx, upstream, host, &parts, body).await;
+        }
         let presents_placeholder = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -1011,6 +1078,236 @@ impl Broker {
                 Err(e)
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- Realms
+
+/// Realms requests carry these besides the usual ones (26.x: which client is asking).
+const REALMS_HEADERS: [&str; 3] = ["client-ref", "x-networkprotocolversion", "is-prerelease"];
+/// The largest body of a Realms request the broker takes (marking notifications, region pings).
+const REALMS_MAX_BODY: usize = 64 * 1024;
+
+/// A reply in the form the Realms client shows (`errorMsg`).
+fn realms_reply(status: u16, message: &str, retry_after: Option<u64>) -> Response<ReplyBody> {
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(seconds) = retry_after {
+        builder = builder.header(header::RETRY_AFTER, seconds.to_string());
+    }
+    builder
+        .body(ReplyBody::local(Bytes::from(crate::realms::table::error_body(status, message))))
+        .expect("static response")
+}
+
+impl Broker {
+    /// One request to a Realms host (see `realms::table` for what is on the table, and
+    /// `realms::approval` for the join).
+    async fn handle_realms(
+        &self,
+        ctx: &Context<'_>,
+        upstream: &tokio::sync::Mutex<Option<Connection>>,
+        host: &str,
+        parts: &hyper::http::request::Parts,
+        body: Incoming,
+    ) -> Response<ReplyBody> {
+        use crate::realms::{approval::JoinStep, table};
+        let realms = self.realms.as_ref().expect("checked by the caller");
+        let method = parts.method.clone();
+        let path = parts.uri.path().to_string();
+        let shown = util::sanitize_line(path.as_bytes(), 160);
+        let say = |outcome: &str| (ctx.log)(format!("broker: {host} {method} {shown} → {outcome}"));
+        let deny = |status: u16, reason: &str, security: bool| {
+            ctx.stats.broker_refused.fetch_add(1, Ordering::Relaxed);
+            say(&format!("{status} here{}: {reason}", if security { " [SECURITY]" } else { "" }));
+            realms_reply(status, reason, None)
+        };
+        let query = parts.uri.query();
+        let verdict = table::classify(host, &method, &path, query.is_some());
+        if let table::Verdict::Refuse { status, reason, security } = &verdict {
+            return deny(*status, reason, *security);
+        }
+        // A join may be answered here, without asking Realms again.
+        let join = match verdict {
+            table::Verdict::Join(world) => match realms.approvals.join_requested(world) {
+                JoinStep::Forward => Some(world),
+                JoinStep::Wait(seconds) => {
+                    say("503 here: waiting for your approval outside the game");
+                    return realms_reply(
+                        503,
+                        "this Realms join waits for your approval: type the code into the phone's Realms app",
+                        Some(seconds),
+                    );
+                }
+                JoinStep::Deliver(answer) => {
+                    say("200 here: approved — the game is given the one-time pass");
+                    return Response::builder()
+                        .status(200)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::CACHE_CONTROL, "no-store")
+                        .body(ReplyBody::local(Bytes::from(answer)))
+                        .unwrap_or_else(|_| local_reply(500, "internal error"));
+                }
+                JoinStep::Refuse(reason) => return deny(403, &reason, false),
+            },
+            _ => None,
+        };
+
+        // The credential: the session cookie (and, for the frontend, x-mojangauth) rebuilt
+        // around the real token, or nothing at all.
+        let mut headers = forwardable(&parts.headers);
+        for name in REALMS_HEADERS {
+            if let Some(value) = parts.headers.get(name) {
+                headers.push((HeaderName::from_static(name), value.clone()));
+            }
+        }
+        let credentialed = !matches!(verdict, table::Verdict::Anonymous);
+        let what = match &verdict {
+            table::Verdict::Cookie(what) | table::Verdict::MojangAuth(what) => *what,
+            table::Verdict::Join(_) => "join a Realm",
+            _ => "",
+        };
+        if credentialed {
+            let Some(credential) = &self.credential else {
+                return deny(401, "there is no account in this session (demo mode)", false);
+            };
+            let token = credential.token.expose();
+            if let table::Verdict::MojangAuth(_) = verdict {
+                let presented = parts.headers.get("x-mojangauth").map(|v| v.as_bytes());
+                if presented != Some(self.placeholder.as_bytes()) {
+                    return deny(401, "no credential the launcher recognises was presented", false);
+                }
+                match sensitive_header("x-mojangauth", token) {
+                    Ok(header) => headers.push(header),
+                    Err(_) => return deny(500, "the credential could not be attached", false),
+                }
+            }
+            match parts.headers.get(header::COOKIE) {
+                Some(cookie) => {
+                    match table::rebuild_cookie(cookie.as_bytes(), &self.placeholder, token, &credential.profile_id) {
+                        Ok(rebuilt) => match sensitive_header("cookie", &rebuilt) {
+                            Ok(header) => headers.push(header),
+                            Err(_) => return deny(500, "the credential could not be attached", false),
+                        },
+                        Err(why) => {
+                            let security = why.contains("different profile");
+                            return deny(if security { 403 } else { 401 }, why, security);
+                        }
+                    }
+                }
+                None if matches!(verdict, table::Verdict::MojangAuth(_)) => {}
+                None => return deny(401, "no Realms session cookie was presented", false),
+            }
+        }
+
+        // The body, out of the budget like everything the broker holds.
+        let no_room = "the launcher is already holding as much of this game's traffic as it will";
+        let declared = body.size_hint().upper().unwrap_or(REALMS_MAX_BODY as u64);
+        if declared > REALMS_MAX_BODY as u64 {
+            return deny(413, "the request body is too large", false);
+        }
+        let request_room = match declared {
+            0 => None,
+            bytes => match self.buffers.reserve(bytes as usize).await {
+                Some(room) => Some(room),
+                None => return deny(503, no_room, false),
+            },
+        };
+        let body = match Limited::new(body, REALMS_MAX_BODY).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return deny(413, "the request body is too large or was cut short", false),
+        };
+        let target = match query {
+            Some(q) => format!("{path}?{q}"),
+            None => path.clone(),
+        };
+        let body = (!body.is_empty() || method != Method::GET).then_some(body);
+        let Some(mut reply_room) = self.buffers.reserve(MAX_RESPONSE_BODY as usize).await else {
+            return deny(503, no_room, false);
+        };
+        let (head, mut payload) = match self.forward(upstream, host, method.clone(), &target, &headers, body).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                ctx.stats.broker_refused.fetch_add(1, Ordering::Relaxed);
+                say(&format!("502 (upstream: {})", util::sanitize_line(e.to_string().as_bytes(), 200)));
+                return realms_reply(502, "the request could not be relayed to Realms", None);
+            }
+        };
+        drop(request_room);
+        payload.shrink_to_fit();
+        reply_room.shrink_to(payload.len());
+        if credentialed {
+            let encoding = head.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes().trim_ascii());
+            if encoding.is_some_and(|e| !e.is_empty() && !e.eq_ignore_ascii_case(b"identity")) {
+                return deny(
+                    502,
+                    "the reply to a request that carried your credential came back encoded and was withheld",
+                    true,
+                );
+            }
+        }
+        if let Some(credential) = &self.credential {
+            let token = credential.token.expose();
+            let leaked = contains(&payload, token)
+                || RESPONSE_HEADERS
+                    .iter()
+                    .any(|name| head.headers.get(name).is_some_and(|v| contains(v.as_bytes(), token)));
+            if leaked {
+                return deny(502, "the reply contained the access token and was withheld", true);
+            }
+        }
+        ctx.stats.brokered.fetch_add(1, Ordering::Relaxed);
+        if credentialed {
+            ctx.stats.credentialed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // The join: the address stays here; the game waits for the approval.
+        if let (Some(world), 200) = (join, head.status) {
+            let (address, object) = match table::parse_join_reply(&payload) {
+                Ok(read) => read,
+                Err(why) => return deny(502, why, false),
+            };
+            if let Ok(ip) = address.host.parse::<std::net::IpAddr>()
+                && !realms.permits(ip)
+            {
+                return deny(502, &format!("Realms named a server at a non-public address ({address})"), true);
+            }
+            say(&format!(
+                "200 from Realms [credential attached: {what}]; server {address} held back until you approve"
+            ));
+            let answer = table::rewrite_join_reply(object, realms.approvals.pass_address());
+            return match realms.approvals.prompt(world, address, answer) {
+                JoinStep::Wait(seconds) => realms_reply(
+                    503,
+                    "this Realms join waits for your approval: type the code into the phone's Realms app",
+                    Some(seconds),
+                ),
+                JoinStep::Refuse(reason) => deny(403, &reason, false),
+                _ => deny(500, "internal error", false),
+            };
+        }
+        if head.status == 200
+            && method == Method::GET
+            && matches!(path.as_str(), "/worlds" | "/worlds/listUserWorldsOfType/any")
+        {
+            realms.approvals.note_names(&payload);
+        }
+        say(&format!(
+            "{}{}",
+            head.status,
+            if credentialed { format!(" [credential attached: {what}]") } else { String::new() }
+        ));
+        let mut response = Response::builder().status(head.status);
+        for name in &RESPONSE_HEADERS {
+            if let Some(value) = head.headers.get(name) {
+                response = response.header(name, value);
+            }
+        }
+        response
+            .body(ReplyBody { bytes: Bytes::from(payload), _room: Some(reply_room) })
+            .unwrap_or_else(|_| realms_reply(502, "malformed upstream reply", None))
     }
 }
 

@@ -52,6 +52,8 @@ USAGE: bastion-mc [--events] <command> [options]
   account default [NAME]              show or set the account used when --account is not given
 
   vault reseal [--account NAME]       re-encrypt the age vault to the recipients configured now
+  realms totp-setup [--replace]       make the TOTP secret for approving Realms joins ([realms] approve =
+                                      \"totp\"); shown once, on this terminal, and kept in the token store
 
   skin show   [--account NAME]        the account's skins and capes, as Mojang reports them
   skin set <file.png> [--slim] [--account NAME]   upload a skin (metadata is stripped first)
@@ -581,6 +583,24 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
         "skin" | "cape" | "canary" => {
             let sub = args.positional(&format!("{command} subcommand"))?;
             profile_admin(args, &paths, command, &sub, reporter, &stop)?;
+        }
+        "realms" => {
+            match args.positional("realms subcommand (`totp-setup`)")?.as_str() {
+                "totp-setup" => {}
+                other => return Err(usage(format!("unknown realms subcommand {other:?}"))),
+            }
+            let mut replace = false;
+            args.flags(|name, _| {
+                if name == "replace" {
+                    replace = true;
+                    return Ok(true);
+                }
+                Ok(false)
+            })?;
+            let cfg = Config::load(&paths)?;
+            let store = TokenStore::open(&cfg.auth, &paths)?;
+            // Only ever on the terminal: the command is not offered with --events.
+            print!("{}", crate::realms::totp_setup(&store, replace)?);
         }
         "vault" => {
             match args.positional("vault subcommand (`reseal`)")?.as_str() {

@@ -1,0 +1,6 @@
+settings sync: on — nothing synced yet; what you change in this session will apply to your other instances
+[launcher] phone: settings app — sync on, synced copy in /home/ski/RustroverProjects/bastion-mc/target/agents/r4-realms/target/e2e/data/bastion-mc/sync
+[launcher] phone: realms app — Realms joins are refused: [realms] approve = "off"
+[launcher] launcher: confined itself, on all threads — Landlock: no program execution, files only under the instance's persist/ and the cache, TCP only to port(s) 53, 443; system-call filter: no kernel keyring, no new namespaces
+[launcher] settings sync: 1 setting(s) you changed now apply to your other instances: fov
+[launcher] game stopped on request

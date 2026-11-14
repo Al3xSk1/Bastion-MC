@@ -88,6 +88,15 @@ fn usual_protection(app: &App) -> bool {
 }
 
 pub fn page(app: &App, layout: Layout) -> Element<'_, Message> {
+    let page = launch_page(app, layout);
+    // A Realms join waiting for approval comes first: its code is meant to be read now.
+    match super::realms::prompt(app) {
+        Some(prompt) => column![prompt, page].spacing(theme::S4).into(),
+        None => page,
+    }
+}
+
+fn launch_page(app: &App, layout: Layout) -> Element<'_, Message> {
     let stretch = usual_instance(app);
     let readouts = |width: Length| {
         column![instance(app), sequence(app, stretch)].spacing(theme::S4).width(width).height(if stretch {

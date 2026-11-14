@@ -108,3 +108,17 @@ path = "fuzz_targets/jar.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "realms"
+path = "fuzz_targets/realms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync"
+path = "fuzz_targets/sync.rs"
+test = false
+doc = false
+bench = false

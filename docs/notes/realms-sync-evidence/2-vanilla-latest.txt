@@ -1,0 +1,5 @@
+settings sync: 1 setting(s) taken from the synced copy (last set in instance "f1214"): fov
+[launcher] phone: settings app — sync on, synced copy in /home/ski/RustroverProjects/bastion-mc/target/agents/r4-realms/target/e2e/data/bastion-mc/sync
+[launcher] phone: realms app — Realms joins are refused: [realms] approve = "off"
+[launcher] launcher: confined itself, on all threads — Landlock: no program execution, files only under the instance's persist/ and the cache (and /home/ski/RustroverProjects/bastion-mc/target/agents/r4-realms/target/e2e/data/bastion-mc/sync), TCP only to port(s) 53, 443; system-call filter: no kernel keyring, no new namespaces
+[launcher] game stopped on request

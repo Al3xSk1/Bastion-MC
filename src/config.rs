@@ -38,6 +38,10 @@ pub struct Config {
     pub launcher: LauncherConfig,
     /// The companion mod for Fabric instances (see `companion`).
     pub companion: crate::companion::CompanionConfig,
+    /// Settings sync across instances (see `sync`).
+    pub sync: crate::sync::SyncConfig,
+    /// Realms joins and how they are approved (see `realms`).
+    pub realms: crate::realms::RealmsConfig,
 }
 
 impl Config {
@@ -953,6 +957,10 @@ mod tests {
             "zoom_wheel",
             "hud",
             "fullbright_gamma",
+            "[realms]",
+            "approve",
+            "[sync]",
+            "options",
         ] {
             assert!(text.contains(key), "examples/config.toml does not mention {key}");
         }

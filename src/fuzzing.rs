@@ -159,6 +159,19 @@ pub fn phone(data: &[u8]) {
     crate::companion::channel::fuzz_phone(data);
 }
 
+/// Realms through the broker (`realms`): the endpoint table, the session cookie it rebuilds
+/// around the real token, the join answer, the dialer's requests and the Realm names of a
+/// Realms list — all of it written by the game or by the Realms service.
+pub fn realms(data: &[u8]) {
+    crate::realms::fuzz(data);
+}
+
+/// Settings sync (`sync`): an instance's `options.txt` (written by a game) and the synced
+/// copy (holding what games wrote) as the merge and the sync back read them.
+pub fn sync(data: &[u8]) {
+    crate::sync::fuzz(data);
+}
+
 /// A harness: arbitrary bytes in, a panic if a property does not hold.
 pub type Harness = fn(&[u8]);
 
@@ -180,4 +193,6 @@ pub const ALL: &[(&str, Harness)] = &[
     // Mod jars, class files and mod metadata as the capability scan reads them (`profile add`
     // runs it on what it has just downloaded).
     ("jar", crate::profile::capabilities::fuzz),
+    ("realms", realms),
+    ("sync", sync),
 ];

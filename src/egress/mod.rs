@@ -129,6 +129,9 @@ pub struct Policy {
     /// `network.launcher_proxy` is set: Mojang's services are reached through it.
     proxied: bool,
     udp_limits: udp::Limits,
+    /// Realms is brokered (`[realms] approve`): its hosts are resolvable, and the one-time pass
+    /// has a listener (see `realms`).
+    realms: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +169,7 @@ impl Policy {
             texture_gateway: global.texture_gateway,
             proxied: global.launcher_proxy.is_some(),
             udp_limits: udp::Limits::default(),
+            realms: false,
         };
         // Each port is a socket in the sandbox's namespace and a task here.
         if policy.udp_ports().len() > udp::MAX_PORTS {
@@ -186,10 +190,23 @@ impl Policy {
         self
     }
 
+    /// Broker Realms in this session: the Realms hosts become resolvable (the 1.21.8+ ones are
+    /// not under a default service domain) and a listener is added for the one-time pass
+    /// (`realms::PASS_ADDRESS`). Only with Mojang's service domains, which Realms needs anyway.
+    pub fn with_realms(mut self) -> Self {
+        self.realms = !self.service_domains.is_empty();
+        self
+    }
+
+    pub fn realms(&self) -> bool {
+        self.realms
+    }
+
     fn is_service(&self, name: &str) -> bool {
         self.service_domains
             .iter()
             .any(|d| name == d || name.strip_suffix(d.as_str()).is_some_and(|p| p.ends_with('.')))
+            || (self.realms && crate::realms::table::is_realms_host(name))
     }
 
     /// May the sandbox learn an address for this name at all?
@@ -230,6 +247,9 @@ impl Policy {
             if self.texture_gateway && self.is_service(TEXTURE_HOST) {
                 ports.push(80);
             }
+        }
+        if self.realms {
+            ports.push(crate::realms::PASS_ADDRESS.port());
         }
         ports.sort_unstable();
         ports.dedup();
@@ -351,6 +371,12 @@ impl Policy {
         )];
         if self.servers.is_empty() {
             lines.push("network: no game servers allowlisted (multiplayer will not connect)".into());
+        }
+        if self.realms {
+            lines.push(format!(
+                "network: Realms — brokered; a join you approve may connect once, through {}, to the address Realms names",
+                crate::realms::PASS_ADDRESS
+            ));
         }
         for r in &self.servers {
             lines.push(format!(
@@ -626,6 +652,21 @@ async fn serve_tcp(shared: Arc<Shared>, listener: TcpListener) {
 async fn handle(shared: &Shared, mut inbound: TcpStream) {
     let Ok(SocketAddr::V4(local)) = inbound.local_addr() else { return };
     let (ip, port) = (*local.ip(), local.port());
+    // The one-time pass of an approved Realms join (see `realms`): this address is never handed
+    // out by the resolver, and a connection to it goes where the approval says, or nowhere.
+    if ip == *crate::realms::PASS_ADDRESS.ip() {
+        let label = format!("{ip}:{port} (Realms pass)");
+        let realms =
+            shared.broker.as_ref().and_then(|b| b.realms()).filter(|_| port == crate::realms::PASS_ADDRESS.port());
+        let Some(realms) = realms else {
+            return deny(shared, label, "Realms joins are not brokered in this session");
+        };
+        match relay_realms_pass(shared, &mut inbound, realms, &label).await {
+            Ok(detail) => (shared.log)(format!("egress: done  {label} {detail}")),
+            Err(why) => deny(shared, label, &why),
+        }
+        return;
+    }
     let Some(dest) = shared.dest_of(ip) else {
         return deny(shared, format!("{ip}:{port}"), "address was never handed out by the resolver");
     };
@@ -635,7 +676,7 @@ async fn handle(shared: &Shared, mut inbound: TcpStream) {
     };
     let result = match shared.policy.route(&dest, port) {
         Route::Deny(why) => return deny(shared, label, why),
-        Route::Service(name) => match shared.broker.as_ref().filter(|_| broker::Broker::intercepts(&name)) {
+        Route::Service(name) => match shared.broker.as_ref().filter(|b| b.terminates(&name)) {
             // Mojang's API domains: terminated here, request by request (see `broker`).
             Some(broker) => {
                 allow(shared, &label, "tls terminated by the credential broker");
@@ -815,6 +856,38 @@ async fn relay_service(
     outbound.write_all(&buf).await.map_err(|e| format!("upstream write: {e}"))?;
     let (up, down) = splice(inbound, &mut outbound).await;
     Ok(format!("↑{} ↓{} bytes", up + buf.len() as u64, down))
+}
+
+/// The one connection an approved Realms join may make: to exactly the address Realms named,
+/// connected by the dialer (the confined launcher cannot connect to a port it did not know
+/// before), then relayed like any game connection — and, like one, good for one server join.
+async fn relay_realms_pass(
+    shared: &Shared,
+    inbound: &mut TcpStream,
+    realms: &broker::RealmsBroker,
+    label: &str,
+) -> std::result::Result<String, String> {
+    let (target, world) = realms.approvals.take_pass().map_err(str::to_string)?;
+    let dialer = realms.dialer.as_ref().ok_or("no dialer was started for this session")?;
+    let candidates: Vec<SocketAddr> = match target.host.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, target.port)],
+        Err(_) => timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((target.host.as_str(), target.port)))
+            .await
+            .map_err(|_| "DNS timeout".to_string())?
+            .map_err(|e| format!("DNS failure for {target}: {e}"))?
+            .collect(),
+    };
+    let addr = candidates
+        .into_iter()
+        .find(|a| realms.permits(a.ip()))
+        .ok_or_else(|| format!("Realm {world}: {target} has no public address"))?;
+    let mut outbound = dialer.dial(addr).await?;
+    allow(shared, label, &format!("approved Realms join (Realm {world}) → {addr}"));
+    // Like any game connection: while it is open (and young) the game may ask for one join
+    // of its session (the Realm's server checks it, as online-mode servers do).
+    let _joinable = shared.gate.opened(label);
+    let (up, down) = splice(inbound, &mut outbound).await;
+    Ok(format!("↑{up} ↓{down} bytes"))
 }
 
 async fn srv_target(shared: &Shared, name: &str) -> Option<(String, u16)> {

@@ -3,11 +3,12 @@
 //! The internal re-exec modes are dispatched before anything else: two must run
 //! single-threaded and exist only to `execve` onward (the network-namespace helper into
 //! bubblewrap, the init stage into the JVM), the third is the nested compositor's
-//! placeholder child. Everything else gets the launcher-side process hardening first.
+//! placeholder child, the fourth the Realms dialer (inside a sandbox of its own, see
+//! `realms::dial`). Everything else gets the launcher-side process hardening first.
 
 use std::ffi::OsString;
 
-use bastion_mc::{cli, hardening, sandbox};
+use bastion_mc::{cli, hardening, realms, sandbox};
 
 /// Every heap block in this process is wiped before it is returned to the allocator.
 #[global_allocator]
@@ -19,6 +20,7 @@ fn main() {
         Some(sandbox::init::INIT_ARG) => sandbox::init::main(&args[2..]),
         Some(sandbox::netns::NETNS_ARG) => sandbox::netns::main(&args[2..]),
         Some(sandbox::nested::READY_ARG) => sandbox::nested::ready_main(),
+        Some(realms::dial::DIAL_ARG) => realms::dial::main(&args[2..]),
         _ => {}
     }
 

@@ -38,6 +38,7 @@ mod console;
 mod instances;
 pub mod kit;
 mod launch;
+pub mod realms;
 mod security;
 #[cfg(test)]
 mod tests;

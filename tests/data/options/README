@@ -1,0 +1,9 @@
+Real options.txt files written by the game itself, used by the settings-sync tests.
+
+1.20.1.txt  Fabric 0.20.1 on Minecraft 1.20.1 (DataVersion 3465), demo mode, written when the
+            accessibility onboarding screen was left (Escape) on the private test display.
+1.21.4.txt  the same for Minecraft 1.21.4 (DataVersion 4189).
+26.3.txt    vanilla Minecraft 26.3 (DataVersion 5023), from the e2e instance vanilla-latest.
+
+Each passed through the launcher's options sanitiser (src/persist.rs) unchanged: the copy the
+launcher carried back into the instance's persist/ was byte-identical.

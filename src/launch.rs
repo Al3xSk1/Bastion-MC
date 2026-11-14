@@ -572,9 +572,19 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // 6. Network, display, audio, GPU.
     let join: Option<ServerRule> = opts.join.as_deref().map(|j| parse_server(j, false)).transpose()?;
     let mode = if opts.burner { NetworkMode::None } else { inst.config.network.mode.unwrap_or(cfg.network.mode) };
+    // Realms (realms-sync): brokered only where the broker is, for an account, and only when
+    // the user chose how joins are approved. Otherwise it stays as it was (refused).
+    let realms_on = cfg.realms.approve != crate::realms::Approve::Off
+        && matches!(mode, NetworkMode::Filtered)
+        && cfg.network.broker.enabled
+        && !demo
+        && !opts.burner;
     let (network, tcp, resolv, policy) = match mode {
         NetworkMode::Filtered => {
-            let policy = egress::Policy::new(&cfg.network, &inst.config.network, join.clone())?;
+            let mut policy = egress::Policy::new(&cfg.network, &inst.config.network, join.clone())?;
+            if realms_on {
+                policy = policy.with_realms();
+            }
             for line in policy.describe() {
                 say(&line);
             }
@@ -611,6 +621,20 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         for note in instance::adopt_persisted(&inst.dir, &cfg.sandbox.persist_files)? {
             say(&format!("settings: {note}"));
         }
+    }
+    // Settings sync (realms-sync): the synced settings go into persist/options.txt before it
+    // is carried into the session; what the user changes comes back at exit (step 11).
+    let (sync_session, sync_notes) = crate::sync::Session::prepare(
+        &cfg.sync,
+        crate::sync::dir(paths),
+        &inst.id,
+        &persist_dir,
+        crate::sync::data_version_of_jar(&files.client),
+        opts.burner,
+        cfg.sandbox.persist_files.iter().any(|name| name == crate::sync::OPTIONS),
+    );
+    for note in &sync_notes {
+        say(note);
     }
     for name in &cfg.sandbox.persist_files {
         // Into the session: re-encoded, so a file damaged on the host does not reach the
@@ -667,7 +691,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // authority exists from here on, in this process's memory and nowhere else; the one
     // place its certificate goes is the trust store generated for this sandbox.
     let broker_on = matches!(mode, NetworkMode::Filtered) && cfg.network.broker.enabled;
-    let authority = if broker_on { Some(egress::broker::Authority::generate()?) } else { None };
+    let authority = if broker_on { Some(egress::broker::Authority::generate_for(realms_on)?) } else { None };
 
     // Mounts.
     let trust = TrustStore::build(authority.as_ref().map(|a| ("bastion-mc-credential-broker", a.certificate_der())))?;
@@ -1126,6 +1150,37 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         (Shield::On, "offline: the token is not given to the game")
     };
 
+    // Settings sync and Realms approval: services of the phone too, prepared now and used
+    // after step 9. They join the list even without a phone: settings sync's write access to
+    // its directory (its confinement need) is what lets the sync at exit work at all.
+    let mut phone_services: Vec<Box<dyn crate::phone::Service>> = Vec::new();
+    let mut realms_broker: Option<egress::broker::RealmsBroker> = None;
+    if !opts.burner {
+        phone_services.push(Box::new(crate::sync::SettingsService::new(
+            sync_session.clone(),
+            scratch.root.join(crate::sync::OPTIONS),
+        )));
+        let realms_service = match prepare_realms(paths, cfg, opts, realms_on, reporter, &log) {
+            Ok(Some(prepared)) => {
+                let service = crate::realms::RealmsService::new(prepared.approvals.clone());
+                realms_broker = Some(prepared);
+                service
+            }
+            Ok(None) => crate::realms::RealmsService::off(cfg.realms.approve, realms_off_reason(cfg, mode, demo)),
+            Err(why) => {
+                let warning = format!("realms: Realms joins are refused in this session — {why}");
+                log.record(Source::Launcher, &warning);
+                reporter.warn(&warning);
+                crate::realms::RealmsService::off(cfg.realms.approve, why)
+            }
+        };
+        phone_services.push(Box::new(realms_service));
+    }
+    for service in &phone_services {
+        log.line(Source::Launcher, &service.describe());
+    }
+    services.append(&mut phone_services);
+
     // 8. Start; deliver the frame; forget every secret.
     // From here a stop request means "shut the game down cleanly", not "abandon the launch".
     opts.stop.supervise();
@@ -1271,10 +1326,21 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                         "launcher: confined itself, on all threads — Landlock: no program execution, files read-only \
                          under /etc, /usr and /proc and writable only under {}, TCP only to port(s) {}; system-call \
                          filter: no kernel keyring, no new namespaces",
-                        if opts.burner {
-                            "the cache (nothing of the instance)"
-                        } else {
-                            "the instance's persist/ and the cache"
+                        {
+                            // What the phone's services added (settings sync: the synced copy;
+                            // clips: their folder).
+                            let extra: Vec<String> = keep
+                                .write
+                                .iter()
+                                .filter(|dir| **dir != persist_dir && **dir != paths.cache)
+                                .map(|dir| dir.display().to_string())
+                                .collect();
+                            let base = if opts.burner {
+                                "the cache (nothing of the instance)".to_string()
+                            } else {
+                                "the instance's persist/ and the cache".to_string()
+                            };
+                            if extra.is_empty() { base } else { format!("{base} (and {})", extra.join(", ")) }
                         },
                         keep.tcp_connect.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
                     ),
@@ -1332,8 +1398,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             let logger: egress::Logger = Arc::new(move |line: String| sink.line(Source::Egress, &line));
             let broker = match authority {
                 Some(authority) => {
-                    let broker =
+                    let mut broker =
                         egress::broker::Broker::new(authority, &cfg.network.broker, &http, placeholder, credential)?;
+                    if let Some(realms) = realms_broker.take() {
+                        broker = broker.with_realms(realms)?;
+                    }
                     log.line(Source::Launcher, &broker.describe());
                     Some(broker)
                 }
@@ -1470,6 +1539,22 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             Err(e) => log.line(Source::Launcher, &format!("not persisting {name}: {e}")),
         }
     }
+    // Settings sync (realms-sync): what the user changed in this session now applies to the
+    // other instances. Not from a burner session (the session is off there).
+    if !opts.burner {
+        match sync_session.sync_back(&persist_dir.join(crate::sync::OPTIONS)) {
+            Ok(names) if names.is_empty() => {}
+            Ok(names) => log.line(
+                Source::Launcher,
+                &format!(
+                    "settings sync: {} setting(s) you changed now apply to your other instances: {}",
+                    names.len(),
+                    crate::sync::summarize(&names)
+                ),
+            ),
+            Err(e) => log.line(Source::Launcher, &format!("settings sync: the synced copy was not updated: {e}")),
+        }
+    }
     // What the game wrote into its root is deleted — and that is only said if it is true. The
     // game shapes that tree (it may leave directories without permission bits, or more files
     // than can be deleted in the time allowed); what could not be removed is named.
@@ -1526,6 +1611,85 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
     reporter.emit(Event::Exited { code });
     Ok(code)
+}
+
+/// Why Realms joins are refused in this launch, when the configuration or the launch rules it out.
+fn realms_off_reason(cfg: &Config, mode: NetworkMode, demo: bool) -> String {
+    if cfg.realms.approve == crate::realms::Approve::Off {
+        "[realms] approve = \"off\"".into()
+    } else if demo {
+        "demo mode: there is no account to join with".into()
+    } else if !matches!(mode, NetworkMode::Filtered) || !cfg.network.broker.enabled {
+        "Realms approval needs the filtered network and the credential broker".into()
+    } else {
+        "not available in this session".into()
+    }
+}
+
+/// Realms approvals for this launch (realms-sync): the TOTP secret (read now, while the token
+/// store can still be reached), the approvals, and the dialer — started now, before the
+/// launcher confines itself. `Ok(None)`: Realms is not brokered in this launch.
+fn prepare_realms(
+    paths: &Paths,
+    cfg: &Config,
+    opts: &LaunchOptions,
+    realms_on: bool,
+    reporter: &Reporter,
+    log: &Arc<Log>,
+) -> std::result::Result<Option<egress::broker::RealmsBroker>, String> {
+    use crate::realms::{Approve, approval, dial, totp};
+    if !realms_on {
+        return Ok(None);
+    }
+    let totp_state = match cfg.realms.approve {
+        Approve::Totp => {
+            let store = TokenStore::open(&cfg.auth, paths).map_err(|e| e.to_string())?;
+            let secret = store
+                .load_slot(crate::realms::TOTP_SLOT)
+                .map_err(|e| e.to_string())?
+                .ok_or("no TOTP secret is stored; run `bastion-mc realms totp-setup`")?;
+            totp::check_secret(&secret).map_err(|e| e.to_string())?;
+            let record = crate::realms::totp_record(paths);
+            Some(approval::TotpState { secret, last_used: totp::load_last_used(&record), record: Some(record) })
+        }
+        _ => None,
+    };
+    let announce: approval::Announcer = {
+        let (reporter, log) = (reporter.clone(), log.clone());
+        Arc::new(move |a: &approval::Announcement| {
+            use crate::events::{ApprovalState, RealmsApproval, RealmsMode};
+            let state = match a.outcome {
+                None => ApprovalState::Waiting,
+                Some(approval::Outcome::Approved) => ApprovalState::Approved,
+                Some(approval::Outcome::Refused) => ApprovalState::Refused,
+                Some(approval::Outcome::Expired) => ApprovalState::Expired,
+            };
+            // The log file names the prompt, never the code.
+            let word = match state {
+                ApprovalState::Waiting => {
+                    "waits for your approval (the code is shown on the terminal or in the front end)"
+                }
+                ApprovalState::Approved => "was approved",
+                ApprovalState::Refused => "was refused",
+                ApprovalState::Expired => "was not approved in time",
+            };
+            log.record(Source::Launcher, &format!("realms: the join to {} ({}) {word}", a.world, a.address));
+            reporter.emit(Event::RealmsApproval(RealmsApproval {
+                world: a.world.clone(),
+                address: a.address.clone(),
+                mode: if a.mode == Approve::Totp { RealmsMode::Totp } else { RealmsMode::Code },
+                code: a.code.clone(),
+                expires_in: a.expires_in,
+                attempts_left: u32::from(a.attempts_left),
+                state,
+            }));
+        })
+    };
+    let approvals = approval::Approvals::new(cfg.realms.approve, totp_state, crate::realms::PASS_ADDRESS, announce);
+    let sink = log.clone();
+    let dialer = dial::Dialer::start(&opts.program, Arc::new(move |line: String| sink.line(Source::Launcher, &line)))
+        .map_err(|e| format!("the Realms dialer could not be started ({e})"))?;
+    Ok(Some(egress::broker::RealmsBroker { approvals, dialer: Some(Arc::new(dialer)), loopback_for_tests: false }))
 }
 
 /// What the `Protection` event says about each thing this launch looked at.

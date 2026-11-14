@@ -51,8 +51,16 @@ pub const MICROSOFT_PINS: &[(&str, &str)] = &[
 
 /// Host patterns the built-in pins apply to: everything the launcher (and the credential
 /// broker on the game's behalf) talks to that is operated by Microsoft/Mojang.
-pub const MICROSOFT_HOSTS: &[&str] =
-    &[".mojang.com", ".minecraft.net", ".minecraftservices.com", ".xboxlive.com", "login.microsoftonline.com"];
+pub const MICROSOFT_HOSTS: &[&str] = &[
+    ".mojang.com",
+    ".minecraft.net",
+    ".minecraftservices.com",
+    ".xboxlive.com",
+    "login.microsoftonline.com",
+    // Realms from 1.21.8 on (the broker reaches it on the game's behalf, `realms`). Its chain
+    // ends in Microsoft TLS RSA Root G2 / DigiCert Global Root G2 (seen 2026-11-14).
+    ".realms.minecraft-services.net",
+];
 
 /// Parse `sha256/<base64>` (the HPKP notation: SHA-256 over the DER SubjectPublicKeyInfo).
 pub fn parse_pin(s: &str) -> Result<Pin> {

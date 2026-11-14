@@ -217,6 +217,80 @@ impl TokenStore {
     }
 }
 
+/// A secret that is not an account's refresh token, kept in the same store — kernel keyring,
+/// age vault or nowhere, as `auth.token_store` says — under a name of its own. No account
+/// label can take that name: labels start with a letter or a digit, slot names with `_`, and
+/// the keyring description has a prefix of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// The secret of the TOTP approval of Realms joins (`realms::totp`).
+    RealmsTotp,
+}
+
+impl Slot {
+    fn name(self) -> &'static str {
+        match self {
+            Slot::RealmsTotp => "_realms-totp",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Slot::RealmsTotp => "bastion-mc:realms-totp",
+        }
+    }
+
+    fn keyutils_entry(self) -> Result<keyring_core::Entry> {
+        let store = linux_keyutils_keyring_store::Store::new().map_err(keyring_err)?;
+        let modifiers = HashMap::from([("description", self.description())]);
+        store.build("bastion-mc", self.name(), Some(&modifiers)).map_err(keyring_err)
+    }
+}
+
+impl TokenStore {
+    pub fn load_slot(&self, slot: Slot) -> Result<Option<Secret>> {
+        match self {
+            TokenStore::None => Ok(None),
+            TokenStore::Keyutils => match slot.keyutils_entry()?.get_secret() {
+                Ok(mut bytes) => {
+                    let secret = Secret::from_slice(&bytes);
+                    bytes.zeroize();
+                    Ok(Some(secret?))
+                }
+                Err(keyring_core::Error::NoEntry) => Ok(None),
+                Err(e) => Err(keyring_err(e)),
+            },
+            TokenStore::Age(v) => v.load(slot.name()),
+        }
+    }
+
+    /// Store `secret` in `slot`. With `token_store = "none"` nothing can be kept: an error, so
+    /// that a setup command does not report success for a secret that is gone.
+    pub fn save_slot(&self, slot: Slot, secret: &Secret) -> Result<()> {
+        if secret.is_empty() || secret.len() > MAX_TOKEN_BYTES {
+            return Err(Error::Auth("refusing to store an empty or oversized secret".into()));
+        }
+        match self {
+            TokenStore::None => Err(Error::Config(
+                "auth.token_store = \"none\" keeps no secrets; this needs the kernel keyring or the age vault".into(),
+            )),
+            TokenStore::Keyutils => slot.keyutils_entry()?.set_secret(secret.expose()).map_err(keyring_err),
+            TokenStore::Age(v) => v.save(slot.name(), secret),
+        }
+    }
+
+    pub fn delete_slot(&self, slot: Slot) -> Result<()> {
+        match self {
+            TokenStore::None => Ok(()),
+            TokenStore::Keyutils => match slot.keyutils_entry()?.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+                Err(e) => Err(keyring_err(e)),
+            },
+            TokenStore::Age(v) => v.delete(slot.name()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- kernel keyring
 
 fn keyring_err(e: keyring_core::Error) -> Error {
@@ -865,5 +939,47 @@ mod tests {
         // The real constructor insists on a root-owned binary.
         assert!(AgeVault::new(&cfg, dir.join("vault"), true).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A secret slot lives next to the accounts' refresh tokens but never collides with one:
+    /// against the same stand-in for `age` as above.
+    #[test]
+    fn a_slot_is_kept_apart_from_every_account() {
+        let dir = std::env::temp_dir()
+            .join(format!("bastion-slot-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let stub = dir.join("fake-age");
+        std::fs::write(
+            &stub,
+            "#!/usr/bin/python3 -I\nimport sys\nargs = sys.argv[1:]\nkey = open(args[2], 'rb').read(1)[0]\n\
+             data = sys.stdin.buffer.read()\nsys.stdout.buffer.write(bytes(b ^ key for b in data))\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let keyfile = dir.join("key");
+        std::fs::write(&keyfile, "k").unwrap();
+        let cfg = AgeConfig {
+            program: stub,
+            recipients_file: Some(keyfile.clone()),
+            identity_file: Some(keyfile),
+            accounts: Default::default(),
+        };
+        let vault = TokenStore::Age(AgeVault::new(&cfg, dir.join("vault"), false).unwrap());
+        assert!(vault.load_slot(Slot::RealmsTotp).unwrap().is_none());
+        vault.save("realms-totp", &Secret::from_slice(b"an account's token").unwrap()).unwrap();
+        vault.save_slot(Slot::RealmsTotp, &Secret::from_slice(b"totp secret").unwrap()).unwrap();
+        assert!(dir.join("vault/_realms-totp.age").is_file(), "a name no account label can have");
+        assert_eq!(vault.load_slot(Slot::RealmsTotp).unwrap().unwrap().expose(), b"totp secret");
+        assert_eq!(vault.load("realms-totp").unwrap().unwrap().expose(), b"an account's token", "untouched");
+        assert!(validate_id(Slot::RealmsTotp.name()).is_err(), "not a valid account label");
+        vault.delete_slot(Slot::RealmsTotp).unwrap();
+        assert!(vault.load_slot(Slot::RealmsTotp).unwrap().is_none());
+        assert!(vault.load("realms-totp").unwrap().is_some());
+        // Nowhere to keep it: an error, not a silent success.
+        assert!(TokenStore::None.save_slot(Slot::RealmsTotp, &Secret::from_slice(b"x").unwrap()).is_err());
+        assert!(TokenStore::None.load_slot(Slot::RealmsTotp).unwrap().is_none());
+        assert_ne!(Slot::RealmsTotp.description(), "bastion-mc:msa-refresh:_realms-totp");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -107,6 +107,18 @@ fn with_device_code(app: &mut App) {
     );
 }
 
+fn realms_prompt(state: bastion_mc_proto::ApprovalState, code: Option<&str>) -> Event {
+    Event::RealmsApproval(bastion_mc_proto::RealmsApproval {
+        world: "Our Realm".into(),
+        address: "203.0.113.9:31234".into(),
+        mode: bastion_mc_proto::RealmsMode::Code,
+        code: code.map(str::to_string),
+        expires_in: 120,
+        attempts_left: 3,
+        state,
+    })
+}
+
 fn protections(levels: [Shield; 5]) -> Event {
     let said = |aspect: &str, level: Shield| -> &'static str {
         match (aspect, level) {
@@ -662,6 +674,27 @@ fn device_code_is_displayed_with_its_actions() {
     assert!(
         matches!(clicked(&app, &caps("Sign out")).as_slice(), [Message::SignOut { account }] if account == "default")
     );
+}
+
+#[test]
+fn a_realms_join_waiting_for_approval_shows_its_code_until_it_ends() {
+    use bastion_mc_proto::ApprovalState;
+    let mut app = ready(true);
+    launching(&mut app);
+    feed(
+        &mut app,
+        events([Event::Phase { phase: Phase::Running }, realms_prompt(ApprovalState::Waiting, Some("123456"))]),
+    );
+    assert!(shows(&app, "123 456"), "the code, in two groups, as its own piece of text");
+    assert!(shows(&app, "Our Realm") && shows(&app, "203.0.113.9:31234"));
+    assert!(shows(&app, "To join, type this code into the phone's Realms app in the game:"));
+    assert!(texts(&app, SMALL).iter().any(|t| t.starts_with("2:00 left, 3 attempt(s).")), "{:?}", texts(&app, SMALL));
+    assert!(app.tick_interval().is_some(), "the countdown runs");
+    feed(&mut app, events([realms_prompt(ApprovalState::Approved, None)]));
+    assert!(!shows(&app, "123 456"), "an ended prompt shows no code");
+    assert!(shows(&app, &caps("Approved")));
+    finish(&mut app, 0);
+    assert!(!shows(&app, "Our Realm"), "gone with the launch");
 }
 
 #[test]
@@ -1289,6 +1322,16 @@ fn states() -> Vec<(&'static str, App)> {
         "security-scram-not-run",
         scrammed(&[], Some(ScramEnd::FailedToStart("No such file or directory (os error 2)".into()))),
     );
+    let mut realms = ready(true);
+    launching(&mut realms);
+    feed(
+        &mut realms,
+        events([
+            Event::Phase { phase: Phase::Running },
+            realms_prompt(bastion_mc_proto::ApprovalState::Waiting, Some("123456")),
+        ]),
+    );
+    add("launch-realms-approval", realms);
     all.extend(unbroken_states());
     all
 }

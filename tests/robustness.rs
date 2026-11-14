@@ -490,6 +490,36 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             MOD_JSON.to_vec(),
             text(r#"{"schema_version":1,"quilt_loader":{"id":"example_mod","version":"1.0"}}"#),
         ],
+        "realms" => vec![
+            text("sid=token:bastion-placeholder-fuzz:069a79f444e94726a5befca90e38aaf5;user=Steve;version=26.3"),
+            text("sid=token:bastion-placeholder-fuzz:069a79f4-44e9-4726-a5be-fca90e38aaf5; user=Alex; version=1.20.1"),
+            text(
+                r#"{"address":"203.0.113.9:31234","resourcePackUrl":null,"resourcePackHash":null,"sessionRegionData":{"regionName":"EU"}}"#,
+            ),
+            text(r#"{"servers":[{"id":1,"name":"Our \u001b[31mRealm","state":"OPEN"},{"id":2,"name":"Other"}]}"#),
+            text("/worlds/v1/123456/join/pc"),
+            text("/invites/accept/a1b2-c3"),
+            text("/api/v1.0/invite/codes/use/AbC-123"),
+            text("[2001:db8::1]:25566"),
+            {
+                let mut request = vec![1u8, 4, 203, 0, 113, 9];
+                request.extend_from_slice(&[0; 12]);
+                request.extend_from_slice(&31234u16.to_be_bytes());
+                request
+            },
+        ],
+        "sync" => {
+            let options = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/options/1.20.1.txt")).unwrap();
+            let copy = r#"{"format":"bastion-mc/sync/v1","settings":{"fov":{"value":"0.25","data_version":5023,"changed":1,"instance":"fab"},"cutoutLeaves":{"value":"false","data_version":5023,"changed":2,"instance":"fab"},"weatherRadius":{"value":"5","data_version":5023,"changed":2,"instance":"fab"},"vignette":{"value":"false","data_version":5023,"changed":2,"instance":"fab"},"improvedTransparency":{"value":"false","data_version":5023,"changed":2,"instance":"fab"},"key_key.jump":{"value":"key.keyboard.j","data_version":4189,"changed":3,"instance":"v"},"menuBackgroundBlurriness":{"value":"3","data_version":5023,"changed":4,"instance":"fab"}}}"#;
+            let mut both = options.clone();
+            both.push(0);
+            both.extend_from_slice(copy.as_bytes());
+            let modern = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/options/26.3.txt")).unwrap();
+            let mut modern_both = modern.clone();
+            modern_both.push(0);
+            modern_both.extend_from_slice(copy.as_bytes());
+            vec![both, modern_both, options, text(copy)]
+        }
         other => panic!("no seeds for {other}"),
     }
 }
@@ -548,12 +578,42 @@ fn every_harness_has_a_test_here() {
         "phone",
         "registry",
         "jar",
+        "realms",
+        "sync",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
     expected.sort_unstable();
     assert_eq!(names, expected, "a harness was added without a robustness test (or the other way round)");
+}
+
+#[test]
+fn realms_table_cookie_and_join_answer() {
+    run("realms");
+}
+
+#[test]
+fn settings_sync_merge() {
+    run("sync");
+}
+
+/// The Realms and sync starting points are what their parsers accept.
+#[test]
+fn the_realms_and_sync_starting_points_are_accepted() {
+    use bastion_mc::realms::table;
+    let realms = seeds("realms");
+    let profile = "069a79f444e94726a5befca90e38aaf5";
+    for cookie in &realms[..2] {
+        assert!(table::rebuild_cookie(cookie, "bastion-placeholder-fuzz", b"T.O.K", profile).is_ok());
+    }
+    assert!(table::parse_join_reply(&realms[2]).is_ok());
+    let sync = seeds("sync");
+    let at = sync[0].iter().position(|b| *b == 0).unwrap();
+    let copy = bastion_mc::sync::store::Store::parse(&sync[0][at + 1..]);
+    assert_eq!((copy.len(), copy.dropped), (7, 0));
+    let merged = bastion_mc::sync::merge(&copy, Some(bastion_mc::sync::parse_options(&sync[0][..at])), None).unwrap();
+    assert!(merged.taken.len() >= 3, "{:?}", merged.taken);
 }
 
 #[test]

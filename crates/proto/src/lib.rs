@@ -86,6 +86,13 @@ pub enum Event {
         source: Source,
         line: String,
     },
+    /// A Realms join waits for the user's approval (`[realms] approve`), or such a prompt
+    /// ended. Meant to be shown outside the game: the user types `code` (`mode: code`, the
+    /// launcher's one-time code) or the code of their authenticator app (`mode: totp`, no
+    /// `code` here) into the phone's Realms app in the game. Sent when the prompt appears
+    /// (`state: waiting`) and once more when it ends. Carries no credential: the code is good
+    /// for this one prompt only, and only typed into the game.
+    RealmsApproval(RealmsApproval),
     /// The game process ended. `code` follows shell conventions (130 = stopped on request).
     Exited {
         code: i32,
@@ -178,6 +185,42 @@ pub struct Protection {
     pub detail: String,
 }
 
+/// How a Realms join is approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealmsMode {
+    /// The launcher's six-digit code, shown in [`RealmsApproval::code`].
+    Code,
+    /// The code of the user's authenticator app (RFC 6238).
+    Totp,
+}
+
+/// Where a Realms approval prompt stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Waiting,
+    Approved,
+    Refused,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmsApproval {
+    /// The Realm's name, as Realms lists it (made printable), or `Realm <id>`.
+    pub world: String,
+    /// Where the game would connect once approved (`host:port`).
+    pub address: String,
+    pub mode: RealmsMode,
+    /// The code to type, while waiting in `code` mode; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Seconds until the prompt runs out.
+    pub expires_in: u64,
+    pub attempts_left: u32,
+    pub state: ApprovalState,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     pub id: String,
@@ -256,6 +299,24 @@ mod tests {
                 }],
             },
             Event::Log { source: Source::Game, line: "[12:00:00] [Render thread/INFO]: hi \u{1F600}".into() },
+            Event::RealmsApproval(RealmsApproval {
+                world: "Our Realm".into(),
+                address: "203.0.113.9:31234".into(),
+                mode: RealmsMode::Code,
+                code: Some("123456".into()),
+                expires_in: 120,
+                attempts_left: 3,
+                state: ApprovalState::Waiting,
+            }),
+            Event::RealmsApproval(RealmsApproval {
+                world: "Realm 7".into(),
+                address: "play.example.org:25565".into(),
+                mode: RealmsMode::Totp,
+                code: None,
+                expires_in: 0,
+                attempts_left: 1,
+                state: ApprovalState::Refused,
+            }),
             Event::Exited { code: 130 },
             Event::Error { message: "nope".into(), code: 4 },
         ];
@@ -285,6 +346,24 @@ mod tests {
             account.to_line(),
             "{\"event\":\"account\",\"account\":\"default\",\"signed_in\":false,\"store\":\"kernel keyring\",\
              \"client_id_configured\":false,\"device_flow\":false}\n"
+        );
+    }
+
+    #[test]
+    fn the_realms_approval_has_a_stable_form() {
+        let event = Event::RealmsApproval(RealmsApproval {
+            world: "R".into(),
+            address: "203.0.113.9:1".into(),
+            mode: RealmsMode::Totp,
+            code: None,
+            expires_in: 99,
+            attempts_left: 2,
+            state: ApprovalState::Waiting,
+        });
+        assert_eq!(
+            event.to_line(),
+            "{\"event\":\"realms_approval\",\"world\":\"R\",\"address\":\"203.0.113.9:1\",\"mode\":\"totp\",\
+             \"expires_in\":99,\"attempts_left\":2,\"state\":\"waiting\"}\n"
         );
     }
 

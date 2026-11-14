@@ -27,7 +27,8 @@ use std::{
 };
 
 pub use bastion_mc_proto::{
-    Account, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, Protection, STOP_COMMAND, Shield, Source, Unit, Version,
+    Account, ApprovalState, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, Protection, RealmsApproval, RealmsMode,
+    STOP_COMMAND, Shield, Source, Unit, Version,
 };
 
 /// Game output beyond this many queued lines is dropped until the reader catches up.
@@ -201,6 +202,9 @@ impl Reporter {
                         timeout_secs / 60
                     );
                 }
+                // A Realms join waiting for approval is shown whatever else is silenced: it is
+                // the one place the code appears.
+                Event::RealmsApproval(prompt) => eprintln!("{}", realms_text(prompt)),
                 Event::Status { text } if !quiet => eprintln!("{text}"),
                 Event::Log { source, line } if !quiet => println!("[{}] {line}", source.tag()),
                 _ => {}
@@ -299,6 +303,28 @@ impl Reporter {
                 }
             }
         }
+    }
+}
+
+/// How a Realms approval prompt reads on a terminal.
+fn realms_text(prompt: &RealmsApproval) -> String {
+    match prompt.state {
+        ApprovalState::Waiting => {
+            let what = match (&prompt.code, prompt.mode) {
+                (Some(code), _) if code.len() == 6 => {
+                    format!("type this code into the phone's Realms app:   {} {}", &code[..3], &code[3..])
+                }
+                (Some(code), _) => format!("type this code into the phone's Realms app:   {code}"),
+                (None, _) => "type the code your authenticator app shows into the phone's Realms app".to_string(),
+            };
+            format!(
+                "\n== Realms: a join waits for your approval ==\n   Realm:   {}\n   Server:  {}\n   To join, {what}\n                    ({} s, {} attempt(s); if you did not ask to join this Realm, do nothing and it is refused)\n",
+                prompt.world, prompt.address, prompt.expires_in, prompt.attempts_left
+            )
+        }
+        ApprovalState::Approved => format!("Realms: the join to {} ({}) was approved", prompt.world, prompt.address),
+        ApprovalState::Refused => format!("Realms: the join to {} was refused", prompt.world),
+        ApprovalState::Expired => format!("Realms: the join to {} was not approved in time", prompt.world),
     }
 }
 

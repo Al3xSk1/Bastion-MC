@@ -149,3 +149,22 @@ phone = true               # the in-game phone (Spotify, the browser, clips, Rea
 phone_key = "key.keyboard.r"   # pulls the phone out and puts it away
 home = true                # the redone home (title) screen
 dark_menus = true          # darker backgrounds behind the game's own menus
+
+# Realms in the filtered network. Off by default: Realms joins are refused, as they always
+# were. With "code" or "totp" the credential broker also answers for the Realms hosts (your
+# Realms list, invitations, notifications — nothing an owner does to a Realm), and a join
+# waits for your approval outside the game:
+#   "code"  the launcher shows a six-digit code (in its own output and in the front end, never
+#           in the game); type it into the phone's Realms app. 120 s, 3 attempts.
+#   "totp"  type the code of your authenticator app instead (`bastion-mc realms totp-setup`).
+# Only then does the game get to connect, once, to the server Realms named. Needs an account,
+# the filtered network with the broker, and the phone (a Fabric instance with the companion).
+[realms]
+approve = "off"            # "off", "code" or "totp"
+
+# Settings sync: video, sound volumes, mouse, key bindings, language, chat and accessibility
+# settings follow you from instance to instance (translated between Minecraft versions where
+# the format changed). Never per-world or per-server settings, never the resource packs. The
+# companion's own settings come from this file anyway ([companion] above).
+[sync]
+options = true
