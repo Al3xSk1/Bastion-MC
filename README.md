@@ -251,6 +251,13 @@ service domains (the relay reads the server name the TLS handshake asks for), sk
 textures come through a gateway, game servers are reachable only when you allowlist them,
 and nothing else leaves.
 
+The other two modes (`mode` under `[network]`, or per instance): `none` gives the game a
+network namespace with nothing in it, no network at all (a `--burner` session always runs
+so); `open` gives it the host's network: no relay, no allowlist, no credential broker (the
+session token goes into the game), and services listening on the host's loopback are
+reachable. `open` exists for what the filtered mode cannot carry, and gives up most of what
+this section describes.
+
 Multiplayer servers must be allowlisted (`servers = [...]` under `[network]` in
 `config.toml` or in the instance's `instance.toml`); everything else is unreachable.
 `bastion-mc launch main --join play.example.org` allowlists one server for one session.
@@ -331,7 +338,9 @@ systemctl --user restart pipewire-pulse
 
 (`pactl load-module …` stops working for everything, which is the point.) Otherwise set
 `audio = "none"`, or `allow_pulse_module_loading = true` to accept the risk. With audio on,
-the game can record your microphone (THREAT_MODEL D3).
+the game can record your microphone (THREAT_MODEL D3). `audio = "alsa"` hands the game the
+raw sound devices (`/dev/snd`) instead of a server's socket: playback and capture of every
+sound card, with no server to ask and no module-loading check, the most access of the three.
 
 ### The launcher's own confinement
 

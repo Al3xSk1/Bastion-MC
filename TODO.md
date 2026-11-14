@@ -22,20 +22,25 @@ something only you have; **Done in the fourth round**, **Done in the third round
 checked; **Independent review** is the record of the review round; **Decided against /
 deferred** keeps the reasoning for the big ideas so they are not re-argued from scratch.
 
-Verification state of the merged tree of the fourth round: what each package ran on its own
-branch is under "Done in the fourth round". On the merged tree the integrator moved the
-launch bootstrap into its package and then started a vanilla 1.21.4 instance (it reached
-its texture atlases and was stopped, exit status 130) and ran `tests/jvm.rs`, `broker.rs`,
-`companion.rs` and `voice.rs`, which start the bootstrap in a real JVM, and the new scram
-test — all passed. The workspace run on the merged tree: <!-- COUNTS --> (the integrator's
-final run). While the documents were written, on the documents' branch (the merged tree and
-these documents): the proto crate's runbook tests and the front end's 120 unit tests (the
-runbook text changed) passed, and the fuzz crate's 24 targets compile (`cargo check
---offline --bins` in `fuzz/` — after cargo had added the round's new `zune-jpeg` to
-`fuzz/Cargo.lock`, which lacks it; see Open). **Not recorded as run on the merged tree:**
-the round's real-game suites (`companion_game`, `browser_game`, `clips_game`) and its
-opt-in browser suite, the display suites, `makepkg`, `cargo deny check`, the libFuzzer
-targets, and anything that needs an account, `age`, root or another kernel.
+Verification state of the merged tree of the fourth round (the integrator's runs,
+2026-11-14, with separate XDG directories, only private displays, and never your session
+bus): what each package ran on its own branch is under "Done in the fourth round". On the
+merged tree: `cargo fmt --check` clean, `cargo clippy --workspace --all-targets` without
+warnings, `cargo test --workspace` <!-- COUNTS --> passed, 0 failed; with
+`BASTION_NET_TESTS=1 BASTION_X11_TESTS=1 BASTION_BROWSER_TESTS=1` 763 passed; the
+nested-compositor suite 4/4 with the clipboard test; the Wayland suite 2/2;
+`tests/nested_game.rs` (vanilla 26.3); `tests/companion_game.rs` on 26.3 (in the demo world),
+1.21.4 and 1.20.1; `tests/clips_game.rs` 2/2; `tests/browser_game.rs` (after `2660a67`);
+demo launches of the voice-chat and catalog instances and of a vanilla 1.21.4 instance (the
+bootstrap fix: the same instance did not start with the third round's binary);
+`cargo deny check` ok. The phone end to end with the real services (not the demo), in the
+real game (26.3, demo mode): the phone listed Spotify, Discord, Browser, Clips, Realms and
+Settings; 27 commands from it reached the services and were accepted; the Spotify app showed
+the track of a stand-in player on a private D-Bus (never the session bus or the Spotify
+app), with its cover; the Discord app showed Discord's public sign-in page, loaded by the
+sandboxed browser through its relay (nobody signed in); a clip was saved (30 s, 900 frames,
+1280x720). <!-- MAKEPKG --> **Not run:** the libFuzzer targets, and anything that needs an
+account (a Spotify client ID, a Discord sign-in, a Realm), `age`, root or another kernel.
 
 Verification state of the merged tree of the third round (the integrator's runs,
 2026-11-13, with separate XDG directories and only private displays): `cargo fmt --check`
@@ -159,50 +164,16 @@ libFuzzer targets themselves.
       Firefox is installed and its sandbox starts, nor `xdg-dbus-proxy` (Spotify over MPRIS),
       nor ffmpeg (clips). A launch says it in its log when one is missing (read in
       `src/browser/sandbox.rs`, `src/spotify/mpris.rs`, `src/clips/recorder.rs`).
-- [ ] **PKGBUILD and the fourth round**: the package does not install `docs/PHONE.md` (the
-      README links to it), and its `optdepends` name neither `firefox`, `xdg-dbus-proxy` nor
-      `ffmpeg` (read in `packaging/arch/PKGBUILD`).
 - [ ] **Zoom, HUD read-out and fullbright on the other nine families** (mod-platform.md
       part 5): not ported; they reach the game by 26.3's names and switch themselves off
       elsewhere, saying so once. Porting means a family mixin for each hook and the lookups
       in that family's names; the stand-ins and the mixin plugin are in place for it.
-- [ ] **The phone's services when the phone is off**: `src/launch.rs` decides whether to
-      prepare Spotify, clips and the browser by whether the companion has its channel
-      (`companion.has_channel()`), not by the merged `[companion] phone` switch. With
-      `phone = false` and another companion feature on, Firefox, the D-Bus proxy and the
-      recorder are still started, with no phone to serve. (Found by reading the code while
-      the documents were written; not run.)
-- [ ] **Typing into a web page outruns the browser's `text` limit**: the phone sends what
-      is typed into a page in batches, one every 0.1 s while typing
-      (`TEXT_EVERY_NANOS` in `java/companion/src/bastion/companion/phone/BrowserApp.java`),
-      and the launcher's browser app takes `text` 10 at once and then 60 a minute
-      (`LIMITS` in `src/browser/app.rs`): after the first ten batches of steady typing, most
-      are refused (the launch log says so once). Found while `docs/PHONE.md` was written, by
-      reading the code; the real-game runs typed short words only. Either batch less often
-      or raise that limit.
-- [ ] **A Realms join in an instance without the phone**: with `[realms] approve` set,
-      `realms_on` in `src/launch.rs` does not ask whether there is a phone, so a vanilla
-      instance gets Realms brokered and a join gets a prompt — its code shown on the
-      terminal — that nothing in the game can answer; it runs out after 120 s and the join is
-      refused. The header of `src/realms/mod.rs` says such joins "are then refused, as
-      before"; refusing them at once, with the reason, would match it. (Read in the code;
-      not run: it needs an account.)
-- [ ] **The scram confirmation** (`src/cli.rs`) still lists refresh tokens, age vault files
-      and remembered players only; scram now also removes the Spotify token, the Realms TOTP
-      secret and the phone browser's profile, which its report says.
 - [ ] **Realms resource packs** (realms-sync.md §7): a Realm with a resource pack probably
       fails to join — the pack's download address is not reachable from the sandbox.
 - [ ] **The browser's sign-in window on X11** (browser.md §7) is a client of your X server
       like any other window; running it in the nested compositor, as the game, would
       isolate it, at the cost of a second compositor for a short task.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
-- [ ] **`fuzz/Cargo.lock` lacks the fourth round's `zune-jpeg` and `zune-core`**: `cargo
-      check` in `fuzz/` had to add them (and, offline, it also took `bumpalo` 3.20.3 from the
-      cache instead of the locked 3.20.4). The lock file was left as committed: run `cargo
-      check` in `fuzz/` with the network and commit the lock file it writes.
-- [ ] **Stale comment after the bootstrap move**: the header of `tests/jvm.rs` still shows
-      the JVM started as `-cp … BastionBootstrap`; the class is `bastion.boot.BastionBootstrap`
-      now.
 - [ ] **Voice chat, small** (voice-chat.md §3): the front end says nothing about voice — a
       line such as "voice: relayed to play.example.org:24454 while connected" in its
       protection read-out would be honest, and was not built; `doctor` reports the Landlock
@@ -543,9 +514,10 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
 
 ### Integration (`479196c`, `51a54db`, `09a62c1`, and the documents)
 - One list of phone services in `src/launch.rs`: Spotify, clips and the browser are started
-  only when the launch adds the companion mod (a phone to serve); settings sync and Realms
-  are prepared for every launch but a burner session, and approving a Realms join needs the
-  phone. The dispatcher serves the app of every prepared service on the companion channel.
+  only when the launch's companion has the phone on (a phone to serve); settings sync is
+  prepared for every launch but a burner session, and Realms only where the launch has the
+  phone (its approval is answered there). The dispatcher serves the app of every prepared
+  service on the companion channel.
 - The launch bootstrap moved into a package of its own (`bastion.boot`): vanilla instances
   of 1.20.1 to 1.21.11 did not start before ("signer information does not match": the
   signed client jars of those versions keep their classes in the default package, where the
@@ -556,6 +528,21 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
   TOTP secret from the keyring, confirmed against the kernel's key list as for the Spotify
   token, which it already removed. Test: `tests/scram.rs`,
   `scram_deletes_the_browsers_profile_unless_a_browser_holds_it`.
+- Fixes found while the documents were written and reviewed (`2660a67`, `7dec17f`,
+  `cc65c6a`, `bc3bded`): the phone's services start only when the companion's phone is on,
+  not whenever it has its channel; a Realms join in a launch without the phone is refused at
+  once, with the reason, instead of waiting 120 s for an approval nothing could give; in
+  network mode `none` no service goes online (no browser, no Spotify Web API or covers);
+  burner sessions record no clips; the browser takes `text` at the phone's typing rate
+  (600 a minute, 60 at once) and scrolls of up to 10000 pixels, Spotify `seek` and `volume`
+  at a dragged slider's rate (240 a minute); scram's confirmation names everything it
+  removes; the front end's runbook panel no longer says the window opens no other pages;
+  `fuzz/Cargo.lock` holds the new decoder; the companion's log line says that phone
+  commands go to the dispatcher; the browser's self-test (a test hook) runs without a
+  phone again (`tests/browser_game.rs`); the PKGBUILD installs `docs/PHONE.md`,
+  `COMPANION.md`, `MODS.md` and the README's images, and names firefox, xdg-dbus-proxy and
+  ffmpeg as optional dependencies; the header of `tests/jvm.rs` names the bootstrap's new
+  class.
 - Documents (this pass): the README (the phone and each app, the home screen and dark menus,
   Realms, settings sync, the versions, the new commands, configuration sections and tests,
   one Status row per part), `docs/README.md`, `docs/SCRAM_RUNBOOK.md` (what scram now

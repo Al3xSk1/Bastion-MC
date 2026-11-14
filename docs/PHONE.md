@@ -64,7 +64,7 @@ launch without one refuses them up front (below).
 
 In a `--burner` session: no browser (a signed-in browser is not put within reach of content
 you do not trust), no settings sync and no Realms; Spotify over the desktop app only (no Web
-API, no covers); clips as configured.
+API, no covers); no clips (a burner session keeps nothing).
 
 ## The phone's own settings
 
@@ -132,7 +132,7 @@ the refresh token while the game runs, and the game holds neither.
 | Key under `[spotify]` | Default | Values | What it decides |
 |---|---|---|---|
 | `mpris` | `true` | `true`, `false` | The desktop app over MPRIS. With it on, every launch that serves the phone starts `xdg-dbus-proxy`, whether or not Spotify is running. |
-| `album_art` | `true` | `true`, `false` | Covers from `i.scdn.co` when the phone asks for them (never in a burner session). |
+| `album_art` | `true` | `true`, `false` | Covers from `i.scdn.co` when the phone asks for them (never in a burner session or with `network.mode = "none"`). |
 | `client_id` | not set | your Spotify application's client ID: 32 lower-case hexadecimal characters | Turns the Web API on, once `bastion-mc spotify login` has stored a token. |
 | `redirect_port` | not set (any free port) | 1024 to 65535 | A fixed port for the sign-in's redirect; then register `http://127.0.0.1:<port>/callback` instead. |
 
@@ -329,8 +329,8 @@ log says so once:
 
 | App | Command | Per minute | At once |
 |---|---|---|---|
-| `spotify` | `play`, `pause`, `toggle`, `next`, `previous`, `seek` | 60 each | 10 |
-| | `volume` | 120 | 20 |
+| `spotify` | `play`, `pause`, `toggle`, `next`, `previous` | 60 each | 10 |
+| | `seek`, `volume` | 240 each | 40 |
 | | `shuffle`, `repeat`, `open`, `queue`, `art` | 20 each | 5 |
 | | `search` | 10 | 3 |
 | | `devices`, `transfer` | 6 each | 2 |
@@ -340,7 +340,7 @@ log says so once:
 | | `mouse` | 1800 | 120 |
 | | `scroll` | 600 | 60 |
 | | `key` | 600 | 40 |
-| | `text` | as fast as the phone sends typing (below) | |
+| | `text` | 600 | 60 |
 | | `frames` | 60 | 10 |
 | `clips` | `status` | 60 | 10 |
 | | `save` (and `saves_per_minute`) | 6 | 2 |
@@ -352,15 +352,17 @@ log says so once:
 | | `sync-now` | 6 | 2 |
 
 **Typing into a page.** The phone sends what you type in batches, one every tenth of a second
-while you type, at most 400 bytes each, and the browser's `text` limit is set to that rate,
-so that ordinary typing is not refused; the numbers are `LIMITS` in `src/browser/app.rs`.
+while you type, at most 400 bytes each, and the browser accepts `text` at that rate (600 a
+minute, 60 at once), so that ordinary typing is not refused; the numbers are `LIMITS` in
+`src/browser/app.rs`. Sliders (seek, volume) send up to four commands a second while they
+are dragged, which is what `seek` and `volume` allow.
 Typing longer texts into a page was not tried in the game (the runs typed short words).
 
 **What each command may name.** Spotify: `open` takes only `spotify:` URIs of six kinds
 (track, album, playlist, artist, episode, show) with a 22-character id, `queue` only tracks
 and episodes, `transfer` only a device id from the last `devices` answer, `search` 1 to 200
 characters. The browser: `open` only a configured site by its name; `size` 160 to 1280
-pixels either way; `mouse` a position inside the page and a button; `scroll` at most 5000
+pixels either way; `mouse` a position inside the page and a button; `scroll` at most 10000
 pixels; `key` one of Enter, Backspace, Tab, Escape, Delete, Home, End, PageUp, PageDown, the
 four arrows and `ctrl-a`, `ctrl-c`, `ctrl-v`, `ctrl-x`, `ctrl-z`. Clips: a clip by the id the
 launcher gave it (12 hexadecimal digits); a new name of letters, digits, `_`, `-` and
@@ -387,9 +389,9 @@ wrong codes a session, and a code that was used is never accepted again.
 
 The launcher's own connections — the browser's relay, the Spotify requests, covers — go
 through `network.launcher_proxy` when one is set (the connection to a Realm's server does
-not, like every game connection). The game's network mode does not apply to them: an
-instance with `network.mode = "none"` and the browser on still reaches the listed sites
-through the browser.
+not, like every game connection). In an instance with `network.mode = "none"` none of them
+goes online: the browser is not started, and the Spotify Web API and covers stay off (the
+desktop app over MPRIS is local and still works).
 
 ## What the game can see and do through the phone
 
