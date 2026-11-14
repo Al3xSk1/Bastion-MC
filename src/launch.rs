@@ -32,7 +32,7 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
 use crate::{
-    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
+    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME, BOOTSTRAP_CLASS_PATH,
     auth::{self, store::TokenStore},
     companion,
     config::{CgroupMode, Config, ConfineMode, NetworkMode, ServerRule, parse_server},
@@ -707,7 +707,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     mounts.extend(desktop.mounts);
     mounts.push(Mount::RoData {
         data: BOOTSTRAP_CLASS.to_vec(),
-        dst: format!("{SUPPORT_DIR}/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+        dst: format!("{SUPPORT_DIR}/boot/{BOOTSTRAP_CLASS_PATH}").into(),
         mode: 0o444,
     });
     for entry in classpath {

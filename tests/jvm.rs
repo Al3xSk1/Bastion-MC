@@ -5,7 +5,7 @@
 use std::{io::Write, net::Shutdown, path::Path, process::Command, time::Duration};
 
 use bastion_mc::{
-    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
+    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME, BOOTSTRAP_CLASS_PATH,
     config::JavaMatch,
     java,
     mojang::args::{Piece, Vars, build_frame},
@@ -46,7 +46,7 @@ async fn jvm_starts_sandboxed_and_receives_the_token_out_of_band() {
     .unwrap();
     base.mounts.push(Mount::RoData {
         data: BOOTSTRAP_CLASS.to_vec(),
-        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_PATH}").into(),
         mode: 0o444,
     });
     base.mounts.push(Mount::RoBind { src: classes.clone(), dst: "/bastion/test".into() });
@@ -118,7 +118,7 @@ async fn jvm_starts_sandboxed_and_receives_the_token_out_of_band() {
     assert_eq!(get("token_in_cmdline"), "false");
     assert_eq!(get("token_in_environ"), "false");
     assert_eq!(get("token_in_sun_java_command"), "false");
-    assert_eq!(get("sun_java_command"), "BastionBootstrap");
+    assert_eq!(get("sun_java_command"), BOOTSTRAP_CLASS_NAME);
     assert_eq!(get("stdin_after"), "-1", "System.in is empty for everything after the bootstrap");
     // Synthetic identity.
     assert_eq!(get("user_name"), "player");
@@ -153,7 +153,7 @@ async fn bootstrap_rejects_malformed_frames() {
         .unwrap();
         base.mounts.push(Mount::RoData {
             data: BOOTSTRAP_CLASS.to_vec(),
-            dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+            dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_PATH}").into(),
             mode: 0o444,
         });
         let mut argv = vec!["java".to_string(), "-Xmx64m".into(), "-cp".into(), "/bastion/boot".into()];

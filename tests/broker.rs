@@ -15,7 +15,7 @@ use std::{
 };
 
 use bastion_mc::{
-    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
+    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME, BOOTSTRAP_CLASS_PATH,
     config::{BrokerConfig, InstanceNetwork, JavaMatch, NetworkConfig, ServerEntry},
     egress::{
         self, Logger, Stats,
@@ -700,7 +700,7 @@ async fn a_sandboxed_jvm_holding_only_the_placeholder() {
     .unwrap();
     base.mounts.push(Mount::RoData {
         data: BOOTSTRAP_CLASS.to_vec(),
-        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_PATH}").into(),
         mode: 0o444,
     });
     base.mounts.push(Mount::RoBind { src: classes.clone(), dst: "/bastion/test".into() });

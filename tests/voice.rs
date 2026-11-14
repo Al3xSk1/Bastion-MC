@@ -18,7 +18,7 @@ use std::{
 };
 
 use bastion_mc::{
-    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
+    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME, BOOTSTRAP_CLASS_PATH,
     config::{InstanceNetwork, JavaMatch, NetworkConfig, ServerEntry},
     confine::{self, Confinement, Demand, Support},
     egress::{
@@ -1148,7 +1148,7 @@ async fn a_jvm_in_the_sandbox_talks_to_the_voice_server_with_plain_java_sockets(
     .unwrap();
     base.mounts.push(Mount::RoData {
         data: BOOTSTRAP_CLASS.to_vec(),
-        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_PATH}").into(),
         mode: 0o444,
     });
     base.mounts.push(Mount::RoBind { src: classes.clone(), dst: "/bastion/test".into() });

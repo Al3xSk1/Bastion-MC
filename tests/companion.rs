@@ -35,7 +35,7 @@ use std::{
 };
 
 use bastion_mc::{
-    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
+    BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME, BOOTSTRAP_CLASS_PATH,
     companion::{
         self, CompanionConfig,
         channel::{self, Message, Voice},
@@ -840,7 +840,7 @@ async fn a_jvm_in_the_sandbox_runs_the_mod_on_the_launchers_settings_not_on_a_fi
     plan.attach(&mut base.mounts, &mut jvm_args, &mut base.landlock.unix_sockets);
     base.mounts.push(Mount::RoData {
         data: BOOTSTRAP_CLASS.to_vec(),
-        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_NAME}.class").into(),
+        dst: format!("/bastion/boot/{BOOTSTRAP_CLASS_PATH}").into(),
         mode: 0o444,
     });
     base.mounts.push(Mount::RoBind { src: classes, dst: "/bastion/test".into() });

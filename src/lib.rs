@@ -42,5 +42,10 @@ pub use error::{Error, Result};
 include!(concat!(env!("OUT_DIR"), "/bootstrap_meta.rs"));
 
 /// The compiled `BastionBootstrap.class`, built from `java/BastionBootstrap.java` by build.rs.
-pub const BOOTSTRAP_CLASS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/BastionBootstrap.class"));
-pub const BOOTSTRAP_CLASS_NAME: &str = "BastionBootstrap";
+pub const BOOTSTRAP_CLASS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bastion/boot/BastionBootstrap.class"));
+/// The class the JVM is started with. In a package of its own: signed client jars (the
+/// obfuscated versions, 1.20.1 to 1.21.11) put their classes in the default package, and the
+/// JVM refuses classes of different signers in one package.
+pub const BOOTSTRAP_CLASS_NAME: &str = "bastion.boot.BastionBootstrap";
+/// Where the class file lies below a class-path root.
+pub const BOOTSTRAP_CLASS_PATH: &str = "bastion/boot/BastionBootstrap.class";

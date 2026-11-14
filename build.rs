@@ -27,7 +27,7 @@ fn main() {
     build_noclip(&out_dir);
     let javac = env::var_os("JAVAC").unwrap_or_else(|| "javac".into());
     build_companion(&out_dir, &javac);
-    let class_file = out_dir.join("BastionBootstrap.class");
+    let class_file = out_dir.join("bastion/boot/BastionBootstrap.class");
 
     let mut last_err = String::new();
     let mut built = None;

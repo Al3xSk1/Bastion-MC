@@ -1,3 +1,5 @@
+package bastion.boot;
+
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.FileDescriptor;
@@ -31,7 +33,9 @@ import java.util.Arrays;
  * { u32 byteLength, UTF-8 bytes }. strings[0] is the main class, the rest are its arguments.
  * The peer must close its end after the frame; trailing bytes are a protocol error.
  *
- * Deliberately a single class in the default package, Java 8 compatible, no dependencies.
+ * Deliberately a single class, Java 8 compatible, no dependencies — in a package of its own:
+ * the obfuscated client jars (1.20.1 to 1.21.11) put their classes in the default package
+ * and are signed, and the JVM refuses classes of different signers in one package.
  */
 public final class BastionBootstrap {
     private static final int MAGIC = 0x4253544E;
