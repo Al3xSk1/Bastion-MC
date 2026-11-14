@@ -223,14 +223,14 @@ this path or any other: what the phone gets is state, pictures and short notices
 
 A Minecraft: Bedrock Edition session ([`BEDROCK.md`](BEDROCK.md)) has no Java token at all,
 on this path or any other: the launch skips the Microsoft → Minecraft sign-in, opens neither
-the token store nor the vault, and writes no launch frame — `mcpelauncher-client` is started
-with directory arguments only, and its standard input carries nothing. The reason is the
-other side of the same coin: the Bedrock game signs in to Xbox itself, with the sign-in
-library inside the game, and holds that sign-in in its own memory for the whole session.
-Nothing can broker it the way the credential broker keeps the Java token out of the JVM;
-what bastion-mc does instead (sign-in pages outside the game, a data directory that ends
-with the session, the filtered network) and what remains is `THREAT_MODEL.md` §4.8, rows
-B15 to B17.
+the token store nor the vault, and writes no launch frame — `mcpelauncher-client` gets its
+directories and its window size as arguments, nothing else, and its standard input carries
+nothing. The reason is the other side of the same coin: the Bedrock game signs in to Xbox
+itself, with the sign-in library inside the game, and holds that sign-in in its own memory
+for the whole session. Nothing can broker it the way the credential broker keeps the Java
+token out of the JVM; what bastion-mc does instead (sign-in pages outside the game, a data
+directory that ends with the session, the filtered network) and what remains is
+`THREAT_MODEL.md` §4.8, rows B15 to B17.
 
 ## Checking it yourself
 
