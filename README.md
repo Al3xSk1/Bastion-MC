@@ -210,8 +210,8 @@ behind each claim, are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 bubblewrap namespaces → Landlock → seccomp allowlist, inside a systemd scope with memory and
 task limits; an empty root filesystem, a synthetic `/etc`, no route out of the network
-namespace except through the launcher's allowlisting relay. The holes are one audio socket,
-the GPU, and a display of the game's own: on Wayland a socket the compositor knows to be
+namespace except through the launcher's allowlisting relay. The holes are one audio socket
+(raw `/dev/snd` instead with `audio = "alsa"`), the GPU, and a display of the game's own: on Wayland a socket the compositor knows to be
 sandboxed, on X11 a nested compositor. When the launcher adds its companion mod to a Fabric
 profile, the sandbox also gets one socket to the launcher. The mod's reports arrive there and
 are only logged; the phone's commands arrive there too, and the launcher does for them only
@@ -563,7 +563,7 @@ except the Realms prompt above. It offers none of the fourth round's commands
 It is a separate program on purpose, not a mode of the launcher:
 
 ```text
- bastion-mc-gui  (no secrets: window, fonts, GPU)        bastion-mc --events <command>
+ bastion-mc-gui  (no tokens: window, fonts, GPU)         bastion-mc --events <command>
  ┌───────────────────────────────────────────┐           (hardened, holds the tokens)
  │ view   state ─▶ widgets, pure             │
  │ app    update(): the only place state     │  spawn    one process per command:
@@ -855,12 +855,12 @@ The phone shows only the apps the launcher set up for this launch:
 | Realms | every launch but a burner session; it can approve a join only with `[realms] approve` set | a signed-in account, the filtered network with the credential broker |
 | Settings | every launch but a burner session | — |
 
-Spotify, clips and the browser are started only for a launch that adds the companion mod:
-without a phone there is nothing to use them with. Settings sync and the brokering of Realms
-work without it — in a vanilla instance too —, but approving a Realms join needs the phone. A
-`--burner` session starts no browser, takes no part in settings sync or Realms, and its
-Spotify has neither the Web API nor album art; clips are recorded as in any other launch,
-and a clip saved there stays (it is the launcher's file, not the game's).
+Spotify, clips and the browser are started only for a launch whose companion has its phone
+on: without a phone there is nothing to use them with. Settings sync works without it — in a
+vanilla instance too. Realms is brokered only in a launch with the phone, because a join is
+approved there; in any other launch Realms joins are refused at once, and the launch log
+says why. A `--burner` session starts no browser, records no clips, takes no part in settings
+sync or Realms, and its Spotify has neither the Web API nor album art.
 
 ```toml
 [companion]
@@ -1112,11 +1112,11 @@ approve = "code"   # or "totp"; "off" (the default) refuses Realms joins, as bef
   is not accepted again, in a later launch either; after 10 wrong codes in a session, Realms
   joins are refused until the next launch.
 * **What it needs.** A signed-in account (not demo mode), the filtered network with the
-  credential broker, and, to approve a join, the phone: a Fabric instance with the companion
-  mod. In an instance without the phone Realms is still brokered when `approve` is set — the
-  game sees your Realms list —, but nothing can approve a join: its prompt runs out and the
-  join is refused. If the launch cannot prepare the approvals (no TOTP secret stored, the
-  dialer does not start), it says so and Realms joins are refused for that session.
+  credential broker, and the phone to type the code into: a Fabric instance with the
+  companion mod and its phone. A launch without one — a vanilla instance, the companion not
+  added, `phone = false` — does not broker Realms: it says why, and its Realms joins are
+  refused at once. So does a launch that cannot prepare the approvals (no TOTP secret stored,
+  the dialer does not start).
 * **What stays possible for code in the game.** It can accept an invitation someone sent you,
   redeem an invite code it knows and agree to the Realms terms in your name, and it sees your
   Realms list. In `totp` mode a code is not bound to the prompt it is typed for: code that

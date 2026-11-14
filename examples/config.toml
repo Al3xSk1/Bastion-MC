@@ -67,7 +67,7 @@ nested_compositor_args = []          # extra gamescope options, e.g. ["-W", "192
 # the launcher lists it, and if screen capture, input injection or a clipboard manager is
 # still on offer, "auto" says so and "require" refuses.
 wayland_security_context = "auto"    # "auto" (when the compositor supports it) | "require" | "off"
-audio = "pulse"            # "pulse" | "alsa" | "none"
+audio = "pulse"            # "pulse" | "alsa" (raw /dev/snd: capture too, and the devices' ioctls; THREAT_MODEL D3) | "none"
 allow_pulse_module_loading = false   # expose the audio socket even if the sound server lets clients load modules into it
 gpu = true
 seccomp = "enforce"        # "enforce" | "log" (diagnostics only: violations are logged, then allowed)

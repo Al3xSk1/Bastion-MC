@@ -153,7 +153,7 @@ fn scram_control(app: &App) -> Element<'_, Message> {
             column![
                 kit::body("Scram: remove everything this launcher stores about your sign-ins"),
                 kit::small(
-                    "Stops running games, deletes refresh tokens and vault files. Revokes nothing at Microsoft."
+                    "Stops running games; deletes refresh tokens, vault files, the Spotify token, the Realms TOTP secret and the phone browser's profile. Revokes nothing at Microsoft."
                 ),
             ]
             .spacing(3)
