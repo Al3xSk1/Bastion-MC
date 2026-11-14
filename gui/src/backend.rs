@@ -12,7 +12,13 @@
 //!   Request ──────── spawn ───────▶ Command::spawn ──────────────────▶ bastion-mc --events …
 //!   Message::Backend ◀── mpsc ───── parse line ◀──────── stdout ────── {"event":"progress",…}
 //!   Handle::stop() ─── mpsc ──────▶ write "stop\n" ───── stdin ──────▶ graceful shutdown
+//!   Handle::answer() ─ mpsc ──────▶ write "answer …\n" ─ stdin ──────▶ the prompt waiting for it
 //! ```
+//!
+//! An answer is what the user typed or chose for a prompt the launcher asked this window to
+//! show (a Bedrock sign-in's final address, a Realms approval without a phone): the launcher
+//! takes it as trusted input, so it is written exactly in the protocol's grammar
+//! ([`bastion_mc_proto::answer_line`]) or not at all.
 //!
 //! If the UI goes away (window closed, crash) the channel closes, the task closes the
 //! child's standard input, and the launcher shuts the game down on its own.
@@ -28,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-use bastion_mc_proto::{EVENTS_FLAG, Event, MAX_LINE_BYTES, STOP_COMMAND};
+use bastion_mc_proto::{Answer, AnswerKind, EVENTS_FLAG, Event, MAX_LINE_BYTES, STOP_COMMAND, answer_line};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -48,6 +54,11 @@ const STOP_GRACE: Duration = Duration::from_secs(90);
 /// with it; this only matters if some stray descendant still holds one open.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const MAX_STRAY_CHARS: usize = 2000;
+/// Answers waiting to be written. One is the usual; a few absorb a double press.
+const ANSWER_QUEUE: usize = 4;
+/// How long writing one answer may take. The launcher reads its input all the time; a pipe
+/// that stays full this long belongs to a launcher that is stuck, and the answer is dropped.
+const ANSWER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the window waits for a scram before it says "still running" and stops waiting.
 /// Reaching it ends nothing: the launcher is left to finish. A scram normally ends within
 /// seconds, and each of its steps is bounded (about 5 seconds to stop running commands per
@@ -149,15 +160,25 @@ pub enum Outcome {
     FailedToStart(String),
 }
 
-/// Asks the launcher to stop what it is doing. Cheap to clone; dropping every clone has the
-/// same effect as calling [`Handle::stop`].
+/// Asks the launcher to stop what it is doing, or answers a prompt it asked for. Cheap to
+/// clone; dropping every clone has the same effect as calling [`Handle::stop`].
 #[derive(Debug, Clone)]
 pub struct Handle {
     /// Each request carries the time the launcher gets before it is killed.
     stop: mpsc::Sender<Duration>,
+    /// Answer lines, ready to be written.
+    answers: mpsc::Sender<String>,
 }
 
 impl Handle {
+    /// Answer the prompt of `kind` that waits (or refuse it, with [`Answer::Cancel`]). Fails
+    /// if the answer does not follow the protocol's grammar, or if the launcher's input is
+    /// closed or full.
+    pub fn answer(&self, kind: AnswerKind, answer: &Answer) -> Result<(), &'static str> {
+        let line = answer_line(kind, answer)?;
+        self.answers.try_send(line).map_err(|_| "the launcher is not taking answers right now")
+    }
+
     pub fn stop(&self) {
         self.stop_within(STOP_GRACE);
     }
@@ -171,10 +192,17 @@ impl Handle {
     }
 }
 
-/// A handle wired to a channel the caller holds, for tests of the UI logic.
+/// A handle wired to a channel the caller holds, for tests of the UI logic. Its answers go
+/// nowhere (see [`test_handle_with_answers`]).
 #[doc(hidden)]
 pub fn test_handle(stop: mpsc::Sender<Duration>) -> Handle {
-    Handle { stop }
+    Handle { stop, answers: mpsc::channel(1).0 }
+}
+
+/// [`test_handle`], with the answer lines going to a channel the caller holds.
+#[doc(hidden)]
+pub fn test_handle_with_answers(stop: mpsc::Sender<Duration>, answers: mpsc::Sender<String>) -> Handle {
+    Handle { stop, answers }
 }
 
 /// What the launcher running a scram says, as it says it.
@@ -324,7 +352,8 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
         }
     };
     let (stop, mut stop_requests) = mpsc::channel(4);
-    let _ = updates.send(Update::Started(Handle { stop })).await;
+    let (answers, mut answer_lines) = mpsc::channel::<String>(ANSWER_QUEUE);
+    let _ = updates.send(Update::Started(Handle { stop, answers })).await;
 
     let mut control = child.stdin.take();
     let stdout = tokio::spawn(forward(child.stdout.take().expect("piped stdout"), updates.clone(), true));
@@ -332,6 +361,7 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
 
     let mut kill_at: Option<Instant> = None;
     let (mut handles_alive, mut listened_to, mut killed) = (true, true, false);
+    let mut answers_alive = true;
     let status = loop {
         // An explicit stop, every handle dropped, or nobody listening any more: all of
         // them end the command the same, orderly way. A further request can only bring
@@ -349,6 +379,20 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
             _ = tokio::time::sleep_until(kill_at.unwrap_or_else(Instant::now)), if kill_at.is_some() && !killed => {
                 let _ = child.start_kill();
                 killed = true;
+                continue;
+            }
+            // An answer goes out as long as the control pipe is open; after a stop it is not.
+            line = answer_lines.recv(), if answers_alive && control.is_some() => {
+                match (line, control.as_mut()) {
+                    (Some(line), Some(pipe)) => {
+                        let written = async {
+                            pipe.write_all(line.as_bytes()).await?;
+                            pipe.flush().await
+                        };
+                        let _ = tokio::time::timeout(ANSWER_WRITE_TIMEOUT, written).await;
+                    }
+                    _ => answers_alive = false,
+                }
                 continue;
             }
         };

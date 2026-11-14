@@ -737,8 +737,48 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
                 r#"{"experienceId":"6b3d2a5e-0c1f-4a7e-9a52-2f3c9d0e1b44","worldId":"00000000-0000-0000-0000-000000000001"}"#,
             ),
         ],
+        "signin_frame" => {
+            let request =
+                |start: &str, end: &str| bastion_mc::bedrock::signin::wire::request_frame(start, end).unwrap();
+            vec![
+                request(&signin_start("Zm9vYmFy-_.~"), "ms-xal-0000000048183522://auth"),
+                request(&signin_start("s").replace("0000000048183522&", "00000000402b5328&"), "ms-xal-x"),
+                bastion_mc::bedrock::signin::wire::reply_frame(&bastion_mc::bedrock::signin::wire::Reply::Url(
+                    "ms-xal-0000000048183522://auth?code=M.C5_BAY.2.U.x&state=s".into(),
+                )),
+                text(
+                    r#"{"start":"https://login.live.com/oauth20_authorize.srf?a=b","end":"ms-xal-0000000048183522://auth"}"#,
+                ),
+            ]
+        }
+        "signin_url" => vec![
+            text(&signin_start("Zm9vYmFy-_.~")),
+            text("ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.0e5b2bbb-1b34&state=Zm9vYmFy-_.~&lc=1033"),
+            text(
+                "ms-xal-0000000048183522://auth?error=access_denied&error_description=The user has denied access&state=Zm9vYmFy-_.~",
+            ),
+            text("code=M.C5&state=Zm9vYmFy%2D_.~#x"),
+        ],
+        "answers" => vec![
+            text(
+                "answer signin ms-xal-0000000048183522://auth?code=M.C5&state=s\nanswer realms 123456\nnot a command\nstop\nanswer realms 1\n",
+            ),
+            text("answer signin cancel\nanswer realms cancel\nanswer phone 1\nanswer signin \n"),
+            text("signin ms-xal-0000000048183522://auth?code=a&state=b\nrealms 654321\ncancel\n   \n"),
+            text("answer realms a b c\r\nanswer signin x\nstop\r\n"),
+        ],
         other => panic!("no seeds for {other}"),
     }
+}
+
+/// A sign-in page's address in the shape Xbox's sign-in service is expected to make.
+fn signin_start(state: &str) -> String {
+    format!(
+        "https://login.live.com/oauth20_authorize.srf?lw=1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256&state={state}&client_id=0000000048183522&response_type=code\
+         &scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL&redirect_uri=ms-xal-0000000048183522%3A%2F%2Fauth\
+         &display=android_phone"
+    )
 }
 
 /// A 24×16 test pattern as ffmpeg's JPEG encoder writes it (the shape album art and the
@@ -814,6 +854,9 @@ fn every_harness_has_a_test_here() {
         "raknet",
         "bedrock_realms",
         "bedrock_gatherings",
+        "signin_frame",
+        "signin_url",
+        "answers",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
@@ -825,6 +868,46 @@ fn every_harness_has_a_test_here() {
 #[test]
 fn bedrock_android_manifests_version_manifests_and_elf_headers() {
     run("bedrock_store");
+}
+
+#[test]
+fn sign_in_bridge_frames_and_requests() {
+    run("signin_frame");
+}
+
+#[test]
+fn sign_in_page_and_final_address_checks() {
+    run("signin_url");
+}
+
+#[test]
+fn answer_lines_on_the_control_pipe_and_the_terminal() {
+    run("answers");
+}
+
+/// The sign-in starting points are what their parsers accept.
+#[test]
+fn the_sign_in_starting_points_are_accepted() {
+    use bastion_mc::bedrock::signin::{check, wire};
+    let frames = seeds("signin_frame");
+    let body = wire::read_frame_blocking(&mut frames[0].as_slice()).unwrap();
+    let request = wire::parse_request(&body).unwrap();
+    let checked = check::check_request(&request.start, &request.end).expect("the page passes");
+    assert!(check::check_request(&wire::parse_request(&frames[1][4..]).unwrap().start, "ms-xal-x").is_err());
+    let reply = wire::read_frame_blocking(&mut frames[2].as_slice()).unwrap();
+    assert!(matches!(wire::parse_reply(&reply), Ok(wire::Reply::Url(_))));
+    assert!(wire::parse_request(&frames[3]).is_ok(), "a body without its header");
+    let urls = seeds("signin_url");
+    assert_eq!(
+        check::check_request(std::str::from_utf8(&urls[0]).unwrap(), "ms-xal-0000000048183522://auth"),
+        Ok(checked.clone())
+    );
+    let back = check::check_final(std::str::from_utf8(&urls[1]).unwrap(), &checked).expect("the address passes");
+    assert!(back.ends_with("&state=Zm9vYmFy-_.~"));
+    assert!(check::check_final(std::str::from_utf8(&urls[2]).unwrap(), &checked).unwrap_err().contains("declined"));
+    for line in seeds("answers")[0].split(|b| *b == b'\n').take(2) {
+        assert!(matches!(bastion_mc_proto::parse_control_line(line), bastion_mc_proto::ControlLine::Answer { .. }));
+    }
 }
 
 #[test]

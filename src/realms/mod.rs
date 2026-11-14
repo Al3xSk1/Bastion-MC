@@ -29,6 +29,7 @@
 //! Without the phone (a vanilla instance, or the companion mod switched off) there is nowhere
 //! to type the code: Realms joins are then refused, as before.
 
+pub mod answers;
 pub mod approval;
 pub mod dial;
 pub mod table;

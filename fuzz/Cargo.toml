@@ -206,3 +206,24 @@ path = "fuzz_targets/bedrock_gatherings.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "signin_frame"
+path = "fuzz_targets/signin_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signin_url"
+path = "fuzz_targets/signin_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "answers"
+path = "fuzz_targets/answers.rs"
+test = false
+doc = false
+bench = false

@@ -98,6 +98,12 @@ impl<P: Program + 'static> Session<P> {
         }
     }
 
+    /// Type `text` into whatever has the keyboard's focus.
+    pub fn type_text(&mut self, text: &str) {
+        assert!(!text.contains('"'), "the emulator's instruction cannot carry a quote");
+        assert!(self.run(&format!("type \"{text}\"")), "could not type {text:?}");
+    }
+
     /// Press the control with this text on it. It has to be there.
     pub fn click(&mut self, text: &str) {
         assert!(self.run(&format!("click \"{text}\"")), "nothing to click that says {text:?}");

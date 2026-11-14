@@ -19,7 +19,8 @@ use crate::{
     app::{
         ScramOutcome, Severity,
         testing::{
-            account, at, confirm_scram, events, feed, finish, instance, named, ready, running_for, scram, scram_lines,
+            account, answering_launch, at, confirm_scram, events, feed, finish, instance, named, ready, running_for,
+            scram, scram_lines, sign_in_page,
         },
     },
     backend::{Outcome, ScramEnd, ScramUpdate, Update},
@@ -711,6 +712,74 @@ fn a_browser_sign_in_offers_its_page_and_a_way_out() {
     assert!(shows(&app, "Waiting for the browser, 5:00 left"));
 }
 
+#[test]
+fn a_bedrock_sign_in_offers_its_page_a_field_for_the_final_address_and_a_way_out() {
+    use bastion_mc_proto::SignInState;
+    let mut app = ready(true);
+    let _lines = answering_launch(&mut app);
+    feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
+    let url = "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s";
+    assert!(shows(&app, &caps("Microsoft sign-in for Bedrock")));
+    assert!(matches!(clicked(&app, &caps("Open sign-in page")).as_slice(), [Message::OpenLink(to)] if to == url));
+    assert!(matches!(clicked(&app, &caps("Copy link")).as_slice(), [Message::Copy(to)] if to == url));
+    assert!(matches!(clicked(&app, &caps("Cancel")).as_slice(), [Message::CancelSignIn]));
+    assert!(clicked(&app, &caps("Send")).is_empty(), "nothing to send yet");
+    assert!(texts(&app, SMALL).iter().any(|t| t.starts_with("15:00 left, 10 attempt(s).")), "{:?}", texts(&app, SMALL));
+    let _ = app.update(Message::SignInAnswerChanged("ms-xal-0000000048183522://auth?code=a&state=s".into()));
+    assert!(matches!(clicked(&app, &caps("Send")).as_slice(), [Message::SendSignInAnswer]));
+    let _ = app.update(Message::SignInAnswerChanged("https://login.live.com/".into()));
+    assert!(texts(&app, SMALL).iter().any(|t| t.starts_with("The address to paste starts with")));
+    // The launcher's verdict on an answer is shown with the field.
+    feed(&mut app, events([sign_in_page(SignInState::Waiting, 9, Some("its state is not this sign-in's"))]));
+    let _ = app.update(Message::SignInAnswerChanged(String::new()));
+    assert!(shows(&app, "Not accepted: its state is not this sign-in's."));
+    // An ended prompt leaves the page; the words under the launch control say how it ended.
+    feed(&mut app, events([sign_in_page(SignInState::Done, 9, None)]));
+    assert!(!shows(&app, &caps("Microsoft sign-in for Bedrock")) && !shows(&app, &caps("Open sign-in page")));
+    assert!(shows(&app, "Sign-in: handed to the game, which finishes it."));
+    feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
+    feed(&mut app, events([sign_in_page(SignInState::Cancelled, 9, Some("the game stopped waiting for the sign-in"))]));
+    assert!(shows(&app, "Sign-in cancelled (the game stopped waiting for the sign-in)."));
+}
+
+#[test]
+fn a_sign_in_page_whose_address_is_not_microsofts_gets_no_open_button() {
+    use bastion_mc_proto::SignInState;
+    for url in [
+        "https://evil.example/oauth20_authorize.srf?client_id=0000000048183522".to_string(),
+        // Cut by the window (the launcher never sends one this long): the mark of the cut
+        // makes it no address at all.
+        format!("https://login.live.com/oauth20_authorize.srf?{}", "a".repeat(5000)),
+    ] {
+        let mut app = ready(true);
+        let _lines = answering_launch(&mut app);
+        feed(
+            &mut app,
+            events([Event::SignInPage(bastion_mc_proto::SignInPage {
+                url,
+                end: "ms-xal-0000000048183522://auth".into(),
+                expires_in: 900,
+                attempts_left: 10,
+                state: SignInState::Waiting,
+                note: None,
+            })]),
+        );
+        assert!(!shows(&app, &caps("Open sign-in page")));
+        assert!(shows(&app, &caps("Copy link")), "it can still be copied and looked at");
+    }
+}
+
+#[test]
+fn a_realms_join_without_the_phone_is_approved_or_refused_here() {
+    use bastion_mc_proto::ApprovalState;
+    let mut app = ready(true);
+    let _lines = answering_launch(&mut app);
+    feed(&mut app, events([realms_prompt(ApprovalState::Waiting, Some("123456"))]));
+    assert!(shows(&app, "123 456") && !shows(&app, "To join, type this code into the phone's Realms app in the game:"));
+    assert!(matches!(clicked(&app, &caps("Approve join")).as_slice(), [Message::ApproveRealms]));
+    assert!(matches!(clicked(&app, &caps("Refuse")).as_slice(), [Message::RefuseRealms]));
+}
+
 // ------------------------------------------------------------------ links
 
 #[test]
@@ -1332,6 +1401,66 @@ fn states() -> Vec<(&'static str, App)> {
         ]),
     );
     add("launch-realms-approval", realms);
+
+    use bastion_mc_proto::SignInState;
+    let mut bedrock = ready(true);
+    let _ = answering_launch(&mut bedrock);
+    feed(&mut bedrock, events([sign_in_page(SignInState::Waiting, 10, None)]));
+    add("launch-bedrock-sign-in", bedrock);
+    let mut retry = ready(true);
+    let _ = answering_launch(&mut retry);
+    feed(
+        &mut retry,
+        events([
+            sign_in_page(SignInState::Waiting, 10, None),
+            sign_in_page(
+                SignInState::Waiting,
+                9,
+                Some("its state is not this sign-in's (is it from an earlier sign-in?)"),
+            ),
+        ]),
+    );
+    let _ = retry.update(Message::SignInAnswerChanged(
+        "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.0e5b2bbb-1b34-4e1b-9d29-2f7c0a4f9d4b&state=s".into(),
+    ));
+    add("launch-bedrock-sign-in-retry", retry);
+    let mut signed = ready(true);
+    let _ = answering_launch(&mut signed);
+    feed(
+        &mut signed,
+        events([sign_in_page(SignInState::Waiting, 10, None), sign_in_page(SignInState::Done, 10, None)]),
+    );
+    add("launch-bedrock-sign-in-done", signed);
+    let mut here = ready(true);
+    let _ = answering_launch(&mut here);
+    feed(&mut here, events([realms_prompt(bastion_mc_proto::ApprovalState::Waiting, Some("123456"))]));
+    add("launch-realms-answer-here", here);
+    let mut totp = ready(true);
+    let _ = answering_launch(&mut totp);
+    feed(
+        &mut totp,
+        events([Event::RealmsApproval(bastion_mc_proto::RealmsApproval {
+            world: "Our Realm".into(),
+            address: "203.0.113.9:19132".into(),
+            mode: bastion_mc_proto::RealmsMode::Totp,
+            code: None,
+            expires_in: 120,
+            attempts_left: 3,
+            state: bastion_mc_proto::ApprovalState::Waiting,
+        })]),
+    );
+    add("launch-realms-answer-here-totp", totp);
+    // Both at once: the sign-in first, then the Realms join.
+    let mut both = ready(true);
+    let _ = answering_launch(&mut both);
+    feed(
+        &mut both,
+        events([
+            sign_in_page(SignInState::Waiting, 10, None),
+            realms_prompt(bastion_mc_proto::ApprovalState::Waiting, Some("123456")),
+        ]),
+    );
+    add("launch-bedrock-two-prompts", both);
     all.extend(unbroken_states());
     all
 }
@@ -1502,6 +1631,35 @@ fn unbroken_states() -> Vec<(&'static str, App)> {
     scram_lines(&mut security, &[&long, &format!("COULD NOT remove {long}")]);
     scram(&mut security, [ScramUpdate::Error(long.clone()), ScramUpdate::Finished(ScramEnd::Exited(1))]);
     all.push(("unbroken-security", security));
+
+    // A Bedrock sign-in with everything the launcher supplies far too long: the page's
+    // address (never shown, only opened or copied), what its end is, the verdict, and a draft
+    // pasted in that has no end.
+    let mut signin = base();
+    let _ = crate::app::testing::answering_launch(&mut signin);
+    feed(
+        &mut signin,
+        events([
+            Event::SignInPage(bastion_mc_proto::SignInPage {
+                url: format!("https://login.live.com/{long}"),
+                end: long.clone(),
+                expires_in: u64::MAX,
+                attempts_left: u32::MAX,
+                state: bastion_mc_proto::SignInState::Waiting,
+                note: None,
+            }),
+            Event::SignInPage(bastion_mc_proto::SignInPage {
+                url: format!("https://login.live.com/{long}"),
+                end: long.clone(),
+                expires_in: u64::MAX,
+                attempts_left: u32::MAX,
+                state: bastion_mc_proto::SignInState::Waiting,
+                note: Some(long.clone()),
+            }),
+        ]),
+    );
+    let _ = signin.update(Message::SignInAnswerChanged(long.clone()));
+    all.push(("unbroken-launch-sign-in", signin));
     all
 }
 

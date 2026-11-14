@@ -17,6 +17,13 @@ the parser, `profile::modrinth::fuzz`; it is registered under the name `registry
 capability scan of mod jars (`profile lock`, `profile audit`, and `profile add` on what it
 has just downloaded) has its own, `profile::capabilities::fuzz`, registered as `jar`.
 
+The Bedrock sign-in bridge has three, next to their parsers: `signin_frame`
+(`bedrock::signin::fuzz_frame`: frames and requests from the sandbox, through every check a
+request passes), `signin_url` (`bedrock::signin::fuzz_url`: the page's address and the
+address pasted back; what passes is bounded, under the right prefix, and a fixed point), and
+`answers` (`events::input::fuzz`: answer lines on the front end's control pipe, the same
+answers however the bytes are cut, and lines typed on a terminal).
+
 Two ways to run them:
 
 **Every test run, stable toolchain** — `tests/robustness.rs` feeds each harness its valid

@@ -7,13 +7,18 @@
 //! * **events** (`bastion-mc --events …`): one JSON [`Event`] per line on standard output,
 //!   for a front end running as a separate process (see the `bastion-mc-proto` crate).
 //!
-//! The event stream is deliberately one-way and credential-free. A front end can only ask
-//! for the current command to stop (see [`Reporter::stop_requested`]).
+//! The event stream is credential-free, and nearly one-way: a front end can ask for the
+//! current command to stop (see [`Reporter::stop_requested`]), and answer the prompts the
+//! launcher asked it to show — a Bedrock sign-in's final address, a Realms approval without a
+//! phone — which is *trusted input*, from the user and never from the game ([`input`]; on a
+//! terminal launch the same answers are typed on the terminal).
 //!
 //! A slow or dead reader must never slow the game down, so in event mode nothing here
 //! blocks: lines go through a bounded queue drained by a writer thread, and when the queue
 //! is full game output is dropped (and counted) rather than waited for. The log file on
 //! disk is unaffected.
+
+pub mod input;
 
 use std::{
     collections::VecDeque,
@@ -27,9 +32,11 @@ use std::{
 };
 
 pub use bastion_mc_proto::{
-    Account, ApprovalState, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, Protection, RealmsApproval, RealmsMode,
-    STOP_COMMAND, Shield, Source, Unit, Version,
+    Account, Answer, AnswerKind, ApprovalState, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, Protection,
+    RealmsApproval, RealmsMode, STOP_COMMAND, Shield, SignInPage, SignInState, Source, Unit, Version,
 };
+
+pub use self::input::{AnswerReceiver, Delivery, PendingHandle};
 
 /// Game output beyond this many queued lines is dropped until the reader catches up.
 const MAX_QUEUED_LINES: usize = 4096;
@@ -45,6 +52,16 @@ pub struct Reporter {
 
 struct Inner {
     mode: Mode,
+    /// Who takes answers to prompts in this command (trusted input, see [`input`]).
+    answers: Arc<input::Registry>,
+    /// The terminal reader of a human-mode command has been started.
+    terminal_reading: AtomicBool,
+}
+
+impl Inner {
+    fn new(mode: Mode) -> Self {
+        Inner { mode, answers: input::Registry::new(), terminal_reading: AtomicBool::new(false) }
+    }
 }
 
 enum Mode {
@@ -91,19 +108,17 @@ fn human_amount(done: u64, total: u64, unit: Unit) -> String {
 impl Reporter {
     /// Plain text for a terminal. `quiet` suppresses everything but errors.
     pub fn human(quiet: bool) -> Self {
-        Reporter { inner: Arc::new(Inner { mode: Mode::Human { quiet } }) }
+        Reporter { inner: Arc::new(Inner::new(Mode::Human { quiet })) }
     }
 
     /// JSON events on standard output. Starts the writer thread and sends [`Event::Hello`].
     pub fn events() -> Self {
         let reporter = Reporter {
-            inner: Arc::new(Inner {
-                mode: Mode::Events(Queue {
-                    state: Mutex::new(QueueState::default()),
-                    wake: Condvar::new(),
-                    idle: Condvar::new(),
-                }),
-            }),
+            inner: Arc::new(Inner::new(Mode::Events(Queue {
+                state: Mutex::new(QueueState::default()),
+                wake: Condvar::new(),
+                idle: Condvar::new(),
+            }))),
         };
         let for_writer = reporter.clone();
         // A thread rather than a task: it must keep draining while the async runtime is
@@ -115,7 +130,7 @@ impl Reporter {
 
     #[doc(hidden)]
     pub fn capture() -> Self {
-        Reporter { inner: Arc::new(Inner { mode: Mode::Capture(Mutex::new(Vec::new())) }) }
+        Reporter { inner: Arc::new(Inner::new(Mode::Capture(Mutex::new(Vec::new())))) }
     }
 
     #[doc(hidden)]
@@ -204,7 +219,11 @@ impl Reporter {
                 }
                 // A Realms join waiting for approval is shown whatever else is silenced: it is
                 // the one place the code appears.
-                Event::RealmsApproval(prompt) => eprintln!("{}", realms_text(prompt)),
+                Event::RealmsApproval(prompt) => {
+                    eprintln!("{}", realms_text(prompt, self.inner.answers.is_open(AnswerKind::Realms)))
+                }
+                // So is a sign-in page the game asked for: nothing else shows it.
+                Event::SignInPage(page) => eprintln!("{}", sign_in_text(page)),
                 Event::Status { text } if !quiet => eprintln!("{text}"),
                 Event::Log { source, line } if !quiet => println!("[{}] {line}", source.tag()),
                 _ => {}
@@ -215,6 +234,7 @@ impl Reporter {
             Event::Status { text } => Event::Status { text: clip(&text) },
             Event::Log { source, line } => Event::Log { source, line: clip(&line) },
             Event::Error { message, code } => Event::Error { message: clip(&message), code },
+            Event::SignInPage(page) => Event::SignInPage(SignInPage { note: page.note.map(|n| clip(&n)), ..page }),
             other => other,
         };
         let droppable = matches!(event, Event::Log { .. } | Event::Progress { .. });
@@ -272,6 +292,8 @@ impl Reporter {
 
     /// Resolves when the front end asks the current command to stop: a [`STOP_COMMAND`] line
     /// on standard input, or standard input reaching end-of-file (the front end is gone).
+    /// Meanwhile `answer <kind> <text>` lines on the same input go to whoever takes answers of
+    /// that kind ([`Reporter::answers`]); every other line is ignored, as it always was.
     ///
     /// Only in event mode and only when standard input is a pipe; otherwise this never
     /// resolves and Ctrl-C / SIGTERM remain the way to stop.
@@ -279,43 +301,70 @@ impl Reporter {
         if !self.is_events() {
             return std::future::pending().await;
         }
-        use tokio::io::AsyncReadExt;
         // A duplicate, so that dropping the receiver does not close descriptor 0.
         let pipe =
             std::io::stdin().as_fd().try_clone_to_owned().and_then(tokio::net::unix::pipe::Receiver::from_owned_fd);
-        let Ok(mut pipe) = pipe else { return std::future::pending().await };
-        let mut line = Vec::new();
-        let mut buf = [0u8; 128];
-        loop {
-            match pipe.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => {
-                    for &byte in &buf[..n] {
-                        if byte == b'\n' {
-                            if line == STOP_COMMAND.as_bytes() {
-                                return;
-                            }
-                            line.clear();
-                        } else if line.len() < 64 {
-                            line.push(byte);
-                        }
+        let Ok(pipe) = pipe else { return std::future::pending().await };
+        let note = |text: String| self.status(text);
+        input::control_loop(&self.inner.answers, pipe, &note).await;
+    }
+
+    /// Take the answers to prompts of `kind` from the trusted input — the front end's control
+    /// pipe, or the terminal of a terminal launch — for as long as the receiver lives. At most
+    /// one taker per kind; a second is refused.
+    ///
+    /// Event mode: the front end is told once ([`Event::Answerable`]). Terminal: a reader of
+    /// the terminal starts (once per command) and routes typed lines to the prompt that waits.
+    pub fn answers(&self, kind: AnswerKind) -> crate::Result<AnswerReceiver> {
+        let receiver = self.inner.answers.subscribe(kind).ok_or_else(|| {
+            crate::Error::Other(format!("answers of the kind `{}` are already taken in this command", kind.as_str()))
+        })?;
+        match &self.inner.mode {
+            Mode::Events(_) | Mode::Capture(_) => self.emit(Event::Answerable { kind }),
+            Mode::Human { .. } => {
+                if !self.inner.terminal_reading.swap(true, Ordering::SeqCst) {
+                    match std::io::stdin().as_fd().try_clone_to_owned() {
+                        Ok(fd) => input::spawn_terminal(
+                            fd,
+                            Arc::downgrade(&self.inner.answers),
+                            Arc::new(|line: &str| eprintln!("{line}")),
+                        ),
+                        Err(e) => eprintln!("bastion-mc: prompts cannot be answered on this terminal: {e}"),
                     }
                 }
             }
         }
+        Ok(receiver)
+    }
+
+    /// Test support: hand an answer over as if the user had given it. Only a capturing
+    /// reporter (tests) takes it — the launcher's own reporters accept answers from the
+    /// control pipe and the terminal alone, so nothing else in the program can answer a
+    /// prompt through this.
+    #[doc(hidden)]
+    pub fn answer_for_test(&self, kind: AnswerKind, answer: Answer) -> Delivery {
+        match &self.inner.mode {
+            Mode::Capture(_) => self.inner.answers.deliver(kind, answer),
+            _ => Delivery::NobodyAsks,
+        }
     }
 }
 
-/// How a Realms approval prompt reads on a terminal.
-fn realms_text(prompt: &RealmsApproval) -> String {
+/// How a Realms approval prompt reads on a terminal. `here`: such prompts are answered on
+/// this terminal (a session without the phone), not in the game.
+fn realms_text(prompt: &RealmsApproval, here: bool) -> String {
     match prompt.state {
         ApprovalState::Waiting => {
-            let what = match (&prompt.code, prompt.mode) {
-                (Some(code), _) if code.len() == 6 => {
+            let what = match (&prompt.code, here) {
+                (Some(code), false) if code.len() == 6 => {
                     format!("type this code into the phone's Realms app:   {} {}", &code[..3], &code[3..])
                 }
-                (Some(code), _) => format!("type this code into the phone's Realms app:   {code}"),
-                (None, _) => "type the code your authenticator app shows into the phone's Realms app".to_string(),
+                (Some(code), false) => format!("type this code into the phone's Realms app:   {code}"),
+                (None, false) => "type the code your authenticator app shows into the phone's Realms app".to_string(),
+                (Some(code), true) => format!(
+                    "type this code here and press Enter (`cancel` refuses):   {code}\n                    (if a sign-in waits too, type `realms {code}`)"
+                ),
+                (None, true) => "type the code your authenticator app shows here and press Enter (`cancel` refuses)\n                    (if a sign-in waits too, start the line with `realms `)".to_string(),
             };
             format!(
                 "\n== Realms: a join waits for your approval ==\n   Realm:   {}\n   Server:  {}\n   To join, {what}\n                    ({} s, {} attempt(s); if you did not ask to join this Realm, do nothing and it is refused)\n",
@@ -325,6 +374,36 @@ fn realms_text(prompt: &RealmsApproval) -> String {
         ApprovalState::Approved => format!("Realms: the join to {} ({}) was approved", prompt.world, prompt.address),
         ApprovalState::Refused => format!("Realms: the join to {} was refused", prompt.world),
         ApprovalState::Expired => format!("Realms: the join to {} was not approved in time", prompt.world),
+    }
+}
+
+/// How a sign-in prompt reads on a terminal. The address is on a line of its own, so that it
+/// can be selected and copied whole.
+fn sign_in_text(page: &SignInPage) -> String {
+    let note = page.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+    match page.state {
+        SignInState::Waiting => format!(
+            "\n== Bedrock: the game asks you to sign in to your Microsoft account ==\n\
+             {retry}   Open this page in your web browser (it is Microsoft's own sign-in page, on login.live.com):\n\n\
+             {url}\n\n   \
+             The sign-in ends on an address your browser cannot open and does not show ({end}?code=…).\n   \
+             Before the last step, open the browser's developer tools (F12) on the Network tab; afterwards select\n   \
+             the last request (it failed, status 302), copy the Location header of its response, paste it here\n   \
+             and press Enter. `cancel` refuses the sign-in. ({mins} min, {left} attempt(s); only that address goes\n   \
+             to the game, never your password; if a Realms join waits too, start the line with `signin `)\n",
+            retry = match &page.note {
+                Some(n) => format!("   That was not accepted: {n}.\n"),
+                None => String::new(),
+            },
+            url = page.url,
+            end = page.end,
+            mins = page.expires_in.div_ceil(60),
+            left = page.attempts_left,
+        ),
+        SignInState::Done => "Bedrock sign-in: the address was handed to the game".to_string(),
+        SignInState::Cancelled => format!("Bedrock sign-in: cancelled{note}"),
+        SignInState::Expired => "Bedrock sign-in: not answered in time; the game was told it failed".to_string(),
+        SignInState::Failed => format!("Bedrock sign-in: refused{note}"),
     }
 }
 
@@ -515,6 +594,46 @@ mod tests {
             assert!(line.len() < bastion_mc_proto::MAX_LINE_BYTES, "{} bytes", line.len());
             assert_eq!(Event::parse_line(&line), Some(event));
         }
+    }
+
+    #[test]
+    fn the_terminal_shows_the_sign_in_page_on_a_line_of_its_own_and_how_to_answer() {
+        let page = SignInPage {
+            url: "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s".into(),
+            end: "ms-xal-0000000048183522://auth".into(),
+            expires_in: 899,
+            attempts_left: 10,
+            state: SignInState::Waiting,
+            note: None,
+        };
+        let text = sign_in_text(&page);
+        assert!(text.lines().any(|l| l == page.url), "the address alone on its line, to be copied whole: {text}");
+        assert!(text.contains("Network tab") && text.contains("Location header") && text.contains("`cancel`"));
+        assert!(text.contains("(15 min, 10 attempt(s);"), "{text}");
+        let retry = sign_in_text(&SignInPage { note: Some("it holds no code".into()), ..page.clone() });
+        assert!(retry.contains("That was not accepted: it holds no code."), "{retry}");
+        let ended =
+            SignInPage { state: SignInState::Cancelled, note: Some("cancelled outside the game".into()), ..page };
+        assert_eq!(sign_in_text(&ended), "Bedrock sign-in: cancelled (cancelled outside the game)");
+    }
+
+    #[test]
+    fn a_realms_prompt_answered_here_says_to_type_here_not_into_the_phone() {
+        let prompt = RealmsApproval {
+            world: "Our Realm".into(),
+            address: "203.0.113.9:19132".into(),
+            mode: RealmsMode::Code,
+            code: Some("123456".into()),
+            expires_in: 120,
+            attempts_left: 3,
+            state: ApprovalState::Waiting,
+        };
+        assert!(realms_text(&prompt, false).contains("into the phone's Realms app:   123 456"));
+        let here = realms_text(&prompt, true);
+        assert!(here.contains("type this code here and press Enter") && here.contains("`realms 123456`"), "{here}");
+        assert!(!here.contains("phone"), "{here}");
+        let totp = realms_text(&RealmsApproval { mode: RealmsMode::Totp, code: None, ..prompt }, true);
+        assert!(totp.contains("authenticator app shows here"), "{totp}");
     }
 
     #[test]

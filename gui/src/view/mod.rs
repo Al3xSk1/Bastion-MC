@@ -40,6 +40,7 @@ pub mod kit;
 mod launch;
 pub mod realms;
 mod security;
+pub mod signin;
 #[cfg(test)]
 mod tests;
 mod tiles;

@@ -89,11 +89,15 @@ fn usual_protection(app: &App) -> bool {
 
 pub fn page(app: &App, layout: Layout) -> Element<'_, Message> {
     let page = launch_page(app, layout);
-    // A Realms join waiting for approval comes first: its code is meant to be read now.
-    match super::realms::prompt(app) {
-        Some(prompt) => column![prompt, page].spacing(theme::S4).into(),
-        None => page,
+    // A Bedrock sign-in or a Realms join waiting for an answer comes first: it is meant to be
+    // acted on now.
+    let mut prompts: Vec<Element<'_, Message>> =
+        [super::signin::prompt(app), super::realms::prompt(app)].into_iter().flatten().collect();
+    if prompts.is_empty() {
+        return page;
     }
+    prompts.push(page);
+    iced::widget::Column::with_children(prompts).spacing(theme::S4).into()
 }
 
 fn launch_page(app: &App, layout: Layout) -> Element<'_, Message> {

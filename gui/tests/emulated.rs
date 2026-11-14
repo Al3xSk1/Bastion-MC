@@ -41,6 +41,27 @@ case "$1" in
     echo '{"event":"instances","instances":[{"id":"vanilla","minecraft":"26.3","kind":"vanilla"},{"id":"modded","minecraft":"26.3","kind":"curated","detail":"serial 2, signed by me"}]}'
     ;;
   launch)
+    if [ -e "$0.bedrock" ]; then
+      # A Bedrock session: the launcher takes answers on its input, asks for a sign-in (the
+      # first answer is not accepted), then for the approval of a Realms join.
+      echo '{"event":"phase","phase":"preparing"}'
+      echo '{"event":"answerable","kind":"signin"}'
+      echo '{"event":"answerable","kind":"realms"}'
+      echo '{"event":"phase","phase":"running"}'
+      page() {
+        echo "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s\",\"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":900,\"attempts_left\":$1,\"state\":\"$2\"$3}"
+      }
+      page 10 waiting ""
+      read -r line; echo "$line" >> "$0.calls"
+      page 9 waiting ',"note":"the state does not match this sign-in"'
+      read -r line; echo "$line" >> "$0.calls"
+      page 9 done ""
+      echo '{"event":"realms_approval","world":"Our Realm","address":"203.0.113.9:19132","mode":"code","code":"123456","expires_in":120,"attempts_left":3,"state":"waiting"}'
+      read -r line; echo "$line" >> "$0.calls"
+      echo '{"event":"realms_approval","world":"Our Realm","address":"203.0.113.9:19132","mode":"code","expires_in":0,"attempts_left":3,"state":"approved"}'
+      echo '{"event":"exited","code":0}'
+      exit 0
+    fi
     echo '{"event":"phase","phase":"preparing"}'
     echo '{"event":"progress","label":"assets","done":50,"total":100,"unit":"bytes"}'
     echo '{"event":"phase","phase":"verifying"}'
@@ -229,5 +250,43 @@ fn a_scram_the_launcher_reports_as_incomplete_is_shown_as_incomplete_end_to_end(
     assert!(ui.shows("scram: INCOMPLETE: the launcher ended with status 1"));
 
     assert_eq!(calls(&launcher), ["status --account default", "scram --yes", "status --account default"]);
+    let _ = std::fs::remove_dir_all(launcher.parent().unwrap());
+}
+
+#[test]
+fn a_bedrock_sign_in_and_a_realms_join_are_answered_on_the_launchers_input_end_to_end() {
+    let (launcher, mut ui) = start("bedrock");
+    std::fs::write(launcher.with_file_name("bastion-mc.bedrock"), "").unwrap();
+    ui.idle();
+    ui.click(&caps("Play"));
+    ui.eventually(&caps("Microsoft sign-in for Bedrock"));
+    // The field for the address has the keyboard as soon as the prompt is up.
+    let address = "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.0e5b2bbb&state=s";
+    ui.type_text(address);
+    ui.click(&caps("Send"));
+    ui.eventually("Not accepted: the state does not match this sign-in.");
+    // The address stays in the field, to be corrected or sent again.
+    ui.click(&caps("Send"));
+    // Accepted: the prompt leaves the page, and the launch's words say so.
+    ui.eventually("Sign-in: handed to the game, which finishes it.");
+    assert!(!ui.shows(&caps("Microsoft sign-in for Bedrock")));
+    // The Realms join of a session without the phone: approved here.
+    ui.eventually("123 456");
+    ui.click(&caps("Approve join"));
+    ui.eventually("The game has exited.");
+    ui.idle();
+
+    assert_eq!(
+        calls(&launcher),
+        [
+            "status --account default".to_string(),
+            "launch vanilla --account default".to_string(),
+            format!("answer signin {address}"),
+            format!("answer signin {address}"),
+            "answer realms 123456".to_string(),
+            "status --account default".to_string(),
+        ],
+        "each answer is one line in the protocol's grammar, written to the launcher that asked"
+    );
     let _ = std::fs::remove_dir_all(launcher.parent().unwrap());
 }

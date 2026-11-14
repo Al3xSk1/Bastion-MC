@@ -1,5 +1,10 @@
 //! Entry point.
 //!
+//! First of all, by the name it was started under: as `mcpelauncher-webview` this program is
+//! the Bedrock sign-in bridge's stub inside the game's sandbox (`bedrock::signin::stub`), and
+//! it does that and nothing else — no configuration, no hardening calls the sandbox's filter
+//! may not allow, no files.
+//!
 //! The internal re-exec modes are dispatched before anything else: two must run
 //! single-threaded and exist only to `execve` onward (the network-namespace helper into
 //! bubblewrap, the init stage into the JVM), the third is the nested compositor's
@@ -11,7 +16,7 @@
 
 use std::ffi::OsString;
 
-use bastion_mc::{browser, cli, clips, hardening, realms, sandbox, spotify};
+use bastion_mc::{bedrock, browser, cli, clips, hardening, realms, sandbox, spotify};
 
 /// Every heap block in this process is wiped before it is returned to the allocator.
 #[global_allocator]
@@ -19,6 +24,10 @@ static ALLOCATOR: hardening::ZeroOnFree = hardening::ZeroOnFree;
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
+    // The sign-in bridge's stub, mounted in the Bedrock sandbox under the webview's name.
+    if bedrock::signin::is_stub(args.first()) {
+        bedrock::signin::stub::main(&args[1..]);
+    }
     match args.get(1).and_then(|a| a.to_str()) {
         Some(sandbox::init::INIT_ARG) => sandbox::init::main(&args[2..]),
         Some(sandbox::netns::NETNS_ARG) => sandbox::netns::main(&args[2..]),

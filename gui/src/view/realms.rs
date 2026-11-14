@@ -5,13 +5,19 @@
 //! app in the game. This is the only place, besides the launcher's own terminal output, where
 //! that code appears; the game never sees it. When the prompt ends the panel says how, until
 //! the launch is over.
+//!
+//! A session without the phone (Bedrock) takes the answer here instead: the launcher says so
+//! (`Event::Answerable` for Realms), and the panel offers to approve or refuse the join — in
+//! `code` mode the shown code is sent with the approval, in `totp` mode the authenticator's
+//! code is typed into a field. The answer goes to the launcher as trusted input, which the
+//! game cannot write to.
 
 use std::time::Instant;
 
-use bastion_mc_proto::{ApprovalState, RealmsApproval, RealmsMode};
+use bastion_mc_proto::{AnswerKind, ApprovalState, RealmsApproval, RealmsMode};
 use iced::{
-    Element,
-    widget::{column, container},
+    Center, Element, Fill,
+    widget::{Id, column, container, row, text_input},
 };
 
 use super::kit;
@@ -20,6 +26,10 @@ use crate::{
     hud,
     theme::{self, Tone},
 };
+
+/// The code field's identity, when an authenticator's code is typed here: focused when the
+/// prompt opens.
+pub const ANSWER_INPUT: &str = "realms-answer";
 
 /// The prompt as the window keeps it: the event, and when it runs out on the window's clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +58,9 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
         ApprovalState::Waiting => {
             let left = kit::clock(prompt.expires_at.saturating_duration_since(app.now).as_secs());
             let mut parts = column![place].spacing(theme::S3);
+            if app.answerable.contains(&AnswerKind::Realms) {
+                return Some(kit::panel("Realms join", answered_here(app, prompt, parts, left)));
+            }
             match (&event.code, event.mode) {
                 (Some(code), _) => {
                     parts = parts.push(kit::body("To join, type this code into the phone's Realms app in the game:"));
@@ -76,6 +89,60 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
         }
     };
     Some(kit::panel("Realms join", body))
+}
+
+/// The waiting prompt of a session without the phone: approved or refused here.
+fn answered_here<'a>(
+    app: &'a App,
+    prompt: &'a RealmsPrompt,
+    mut parts: iced::widget::Column<'a, Message>,
+    left: String,
+) -> Element<'a, Message> {
+    let event = &prompt.event;
+    let approve = app.realms_answer().map(|_| Message::ApproveRealms);
+    let buttons = row![
+        kit::solid("Approve join", Tone::Accent, approve.clone()),
+        kit::action("Refuse", Tone::Neutral, Some(Message::RefuseRealms)),
+    ]
+    .spacing(theme::S2);
+    match &event.code {
+        Some(code) => {
+            parts = parts.push(kit::body(
+                "This session has no phone: approve the join here if you asked for it. The code is sent with your                  approval, so that it approves this join and no other.",
+            ));
+            parts = parts.push(kit::framed(
+                hud::Frame::brackets(theme::ACCENT),
+                container(kit::mono(grouped(code)).size(theme::SIZE_DISPLAY)).padding([10, 22]),
+            ));
+            parts = parts.push(buttons.wrap().vertical_spacing(theme::S2));
+        }
+        None => {
+            parts = parts
+                .push(kit::body("This session has no phone: to join, type the code your authenticator app shows now."));
+            parts = parts.push(
+                row![
+                    text_input("123456", &app.realms_draft)
+                        .on_input(Message::RealmsAnswerChanged)
+                        .on_submit_maybe(approve)
+                        .id(Id::new(ANSWER_INPUT))
+                        .font(theme::MONO)
+                        .size(theme::SIZE_SMALL + 1.0)
+                        .padding([7, 10])
+                        .style(theme::input)
+                        .width(Fill),
+                    buttons,
+                ]
+                .spacing(theme::S2)
+                .align_y(Center),
+            );
+        }
+    }
+    parts
+        .push(kit::small(format!(
+            "{left} left, {} attempt(s). If you did not ask to join this Realm, refuse it.",
+            event.attempts_left
+        )))
+        .into()
 }
 
 #[cfg(test)]

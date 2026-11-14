@@ -34,7 +34,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bastion_mc_proto::{Account, Event, Instance, PROTOCOL, Phase, Protection, Source, Unit, Version, runbook};
+use bastion_mc_proto::{
+    Account, Answer, AnswerKind, Event, Instance, PROTOCOL, Phase, Protection, SignInState, Source, Unit, Version,
+    runbook,
+};
 use iced::{
     Subscription, Task,
     futures::{StreamExt, stream},
@@ -428,6 +431,18 @@ pub enum Message {
     ConfirmScram,
     /// Something from the launcher that is running the scram, tagged with the run.
     Scram(u64, ScramUpdate),
+    /// The address pasted into the Bedrock sign-in prompt changed.
+    SignInAnswerChanged(String),
+    /// Send the pasted address to the launcher (`answer signin …`).
+    SendSignInAnswer,
+    /// Refuse the Bedrock sign-in (`answer signin cancel`).
+    CancelSignIn,
+    /// The code typed into a Realms prompt that is answered here changed.
+    RealmsAnswerChanged(String),
+    /// Approve the waiting Realms join (`answer realms <code>`).
+    ApproveRealms,
+    /// Refuse it (`answer realms cancel`).
+    RefuseRealms,
     /// The sign-in that had to end before the scram has had its time.
     ScramStartDeadline(u64),
     DismissNotice,
@@ -486,6 +501,17 @@ pub struct App {
     pub now: Instant,
     /// The window was asked to close while a game was running: stop it, then exit.
     closing: bool,
+    /// A Bedrock sign-in the game asked for, shown outside the game, or how the last one in
+    /// the launch under way ended (see `view::signin`).
+    pub signin: Option<crate::view::signin::SignInPrompt>,
+    /// The kinds of prompt the launch under way takes answers to here, through this window
+    /// (`Event::Answerable`): a Realms join is then approved here, not in the game's phone.
+    pub answerable: Vec<AnswerKind>,
+    /// What is typed in the Realms prompt's field (an authenticator's code), when the prompt
+    /// is answered here.
+    pub realms_draft: String,
+    /// A field to focus once the view has it (a prompt that wants typing just opened).
+    focus: Option<&'static str>,
     /// Instance to select as soon as it shows up in the list (it was just created).
     select_when_listed: Option<String>,
     /// The account state on screen is known to be out of date: ask the launcher as soon as
@@ -602,6 +628,10 @@ impl App {
             launcher_version: None,
             now: Instant::now(),
             closing: false,
+            signin: None,
+            answerable: Vec::new(),
+            realms_draft: String::new(),
+            focus: None,
             select_when_listed: None,
             refresh_wanted: false,
         };
@@ -794,6 +824,37 @@ impl App {
         self.notice = Some(Notice { severity, text: text.into() });
     }
 
+    /// Write an answer to the launcher of the job under way. `false` (and a notice) if it
+    /// could not be.
+    fn answer(&mut self, kind: AnswerKind, answer: &Answer) -> bool {
+        let sent = match self.job.as_ref().and_then(|job| job.handle.as_ref()) {
+            Some(handle) => handle.answer(kind, answer),
+            None => Err("the launcher is not running"),
+        };
+        if let Err(why) = sent {
+            self.notify(Severity::Warning, format!("The answer was not sent: {why}."));
+        }
+        sent.is_ok()
+    }
+
+    /// A Realms join waits, and the launch under way takes its answer here.
+    pub fn realms_answerable(&self) -> bool {
+        self.answerable.contains(&AnswerKind::Realms)
+            && self.realms.as_ref().is_some_and(|p| p.event.state == bastion_mc_proto::ApprovalState::Waiting)
+    }
+
+    /// What approving the waiting Realms join sends: the code the launcher showed (`code`
+    /// mode), or the authenticator's code typed in (`totp` mode, six digits or more).
+    pub fn realms_answer(&self) -> Option<String> {
+        if !self.realms_answerable() {
+            return None;
+        }
+        match self.realms.as_ref().and_then(|p| p.event.code.clone()) {
+            Some(code) => Some(code),
+            None => (self.realms_draft.len() >= 6).then(|| self.realms_draft.clone()),
+        }
+    }
+
     /// Run a launcher command in the background. The stream is lazy: the process is spawned
     /// by the executor, not here, so this function never blocks (and needs no runtime).
     fn start(&mut self, kind: JobKind, subject: String, request: Request) -> Task<Message> {
@@ -946,6 +1007,40 @@ impl App {
                     return Task::perform(open_link(url), Message::LinkOpened);
                 }
                 self.notify(Severity::Warning, "That address is not one of the runbook's links; it was not opened.");
+            }
+            Message::SignInAnswerChanged(text) => {
+                if let Some(prompt) = self.signin.as_mut().filter(|p| p.waiting() && !p.sent) {
+                    prompt.draft = text.chars().take(bastion_mc_proto::MAX_ANSWER_TEXT).collect();
+                }
+            }
+            Message::SendSignInAnswer => {
+                let Some(prompt) = self.signin.as_ref().filter(|p| p.can_send()) else { return Task::none() };
+                let answer = Answer::Text(prompt.draft.trim().to_string());
+                if self.answer(AnswerKind::SignIn, &answer)
+                    && let Some(prompt) = self.signin.as_mut()
+                {
+                    prompt.sent = true;
+                }
+            }
+            Message::CancelSignIn => {
+                if self.signin.as_ref().is_some_and(|p| p.waiting() && !p.sent) {
+                    self.answer(AnswerKind::SignIn, &Answer::Cancel);
+                }
+            }
+            Message::RealmsAnswerChanged(text) => {
+                // An authenticator's code: digits, and a space someone may type between groups.
+                self.realms_draft = text.chars().filter(|c| c.is_ascii_digit()).take(12).collect();
+            }
+            Message::ApproveRealms => {
+                if let Some(code) = self.realms_answer() {
+                    self.answer(AnswerKind::Realms, &Answer::Text(code));
+                    self.realms_draft.clear();
+                }
+            }
+            Message::RefuseRealms => {
+                if self.realms_answerable() {
+                    self.answer(AnswerKind::Realms, &Answer::Cancel);
+                }
             }
             Message::AskScram => self.emergency.confirming = !self.emergency.active(),
             Message::CancelScram => self.emergency.confirming = false,
@@ -1172,7 +1267,12 @@ impl App {
                     job.handle = Some(handle);
                 }
             }
-            Update::Event(event) => self.on_event(event),
+            Update::Event(event) => {
+                self.on_event(event);
+                if let Some(id) = self.focus.take() {
+                    return iced::widget::operation::focus(iced::widget::Id::new(id));
+                }
+            }
             Update::Stray(text) => self.console.push(Source::Launcher, text),
             Update::Finished(outcome) => return self.on_finished(outcome),
         }
@@ -1250,7 +1350,72 @@ impl App {
                 self.console
                     .push(Source::Launcher, format!("realms: a join to {} — see the Launch page", prompt.world));
                 let expires_at = self.now + Duration::from_secs(prompt.expires_in.min(MAX_PROMPT_SECS));
+                let waiting = prompt.state == bastion_mc_proto::ApprovalState::Waiting;
+                if waiting && self.answerable.contains(&AnswerKind::Realms) {
+                    self.realms_draft.clear();
+                    if prompt.mode == bastion_mc_proto::RealmsMode::Totp {
+                        self.focus = Some(crate::view::realms::ANSWER_INPUT);
+                    }
+                }
                 self.realms = Some(crate::view::realms::RealmsPrompt { event: prompt, expires_at });
+            }
+            Event::SignInPage(mut page) => {
+                // An address that was cut is no longer one of the sign-in addresses (the mark
+                // of the cut is not ASCII), so it gets no control that opens it.
+                page.url = clean_to(&page.url, SIGN_IN_ADDRESS_CHARS);
+                page.end = clean_to(&page.end, 64);
+                page.note = page.note.map(|note| clean_to(&note, 300)).filter(|note| !note.is_empty());
+                self.now = Instant::now();
+                let expires_at = self.now + Duration::from_secs(page.expires_in.min(MAX_PROMPT_SECS));
+                let same = self.signin.as_ref().is_some_and(|p| p.waiting() && p.event.url == page.url);
+                match page.state {
+                    SignInState::Waiting if same => {
+                        // The launcher's verdict on the answer just sent: try again.
+                        let prompt = self.signin.as_mut().expect("checked");
+                        prompt.event = page;
+                        prompt.expires_at = expires_at;
+                        prompt.sent = false;
+                        self.focus = Some(crate::view::signin::ANSWER_INPUT);
+                    }
+                    SignInState::Waiting => {
+                        self.say("The game asks you to sign in: see the sign-in panel.");
+                        self.console.push(
+                            Source::Launcher,
+                            "sign-in: the game asks for a Microsoft sign-in, shown outside the game — see the Launch page"
+                                .to_string(),
+                        );
+                        self.signin = Some(crate::view::signin::SignInPrompt {
+                            event: page,
+                            expires_at,
+                            draft: String::new(),
+                            sent: false,
+                        });
+                        self.focus = Some(crate::view::signin::ANSWER_INPUT);
+                    }
+                    // An ended prompt leaves the page (it would push the launch control down for
+                    // the rest of the session); how it ended is said where the launch's words
+                    // are, and kept in the console.
+                    ended => {
+                        let words = match ended {
+                            SignInState::Done => "the address was handed to the game",
+                            SignInState::Expired => "not answered in time",
+                            SignInState::Failed => "refused",
+                            _ => "cancelled",
+                        };
+                        let note = page.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+                        self.console.push(Source::Launcher, format!("sign-in: {words}{note}"));
+                        self.say(match ended {
+                            SignInState::Done => "Sign-in: handed to the game, which finishes it.".to_string(),
+                            _ => format!("Sign-in {words}{note}."),
+                        });
+                        self.signin = None;
+                    }
+                }
+            }
+            Event::Answerable { kind } => {
+                if !self.answerable.contains(&kind) {
+                    self.answerable.push(kind);
+                }
             }
             Event::Account(account) => {
                 if !is_valid_id(&account.account) {
@@ -1338,6 +1503,9 @@ impl App {
         self.progress = None;
         self.login = None;
         self.realms = None;
+        self.signin = None;
+        self.answerable.clear();
+        self.realms_draft.clear();
         let ok = outcome == Outcome::Exited(0);
         match &outcome {
             Outcome::FailedToStart(why) => {
@@ -1419,7 +1587,8 @@ impl App {
         });
         // A countdown, or the time a scram has been running: once a second.
         let realms = self.realms.as_ref().is_some_and(|p| p.event.state == bastion_mc_proto::ApprovalState::Waiting);
-        let clock = (self.login.is_some() || realms || self.emergency.active()).then_some(CLOCK_INTERVAL);
+        let signin = self.signin.as_ref().is_some_and(|p| p.waiting());
+        let clock = (self.login.is_some() || realms || signin || self.emergency.active()).then_some(CLOCK_INTERVAL);
         gauge.or(clock)
     }
 
@@ -1501,6 +1670,35 @@ pub(crate) mod testing {
         backend::test_handle(sender)
     }
 
+    /// A launch whose launcher takes answers (a Bedrock session: sign-in and Realms), with
+    /// the lines it is sent going to the receiver returned.
+    pub fn answering_launch(app: &mut App) -> tokio::sync::mpsc::Receiver<String> {
+        let _ = app.update(Message::Play);
+        let (stop, _) = tokio::sync::mpsc::channel(4);
+        let (answers, lines) = tokio::sync::mpsc::channel(8);
+        feed(app, [Update::Started(backend::test_handle_with_answers(stop, answers))]);
+        feed(
+            app,
+            events([
+                Event::Answerable { kind: AnswerKind::SignIn },
+                Event::Answerable { kind: AnswerKind::Realms },
+                Event::Phase { phase: Phase::Running },
+            ]),
+        );
+        lines
+    }
+
+    pub fn sign_in_page(state: SignInState, attempts_left: u32, note: Option<&str>) -> Event {
+        Event::SignInPage(bastion_mc_proto::SignInPage {
+            url: "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s".into(),
+            end: "ms-xal-0000000048183522://auth".into(),
+            expires_in: 900,
+            attempts_left,
+            state,
+            note: note.map(str::to_string),
+        })
+    }
+
     /// Feed what the launcher running the current scram says.
     pub fn scram(app: &mut App, updates: impl IntoIterator<Item = ScramUpdate>) {
         let run = app.emergency.run;
@@ -1554,6 +1752,143 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::{testing::*, *};
+
+    // -------------------------------------------------------------- Bedrock prompts
+
+    fn written(lines: &mut tokio::sync::mpsc::Receiver<String>) -> Vec<String> {
+        std::iter::from_fn(|| lines.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_bedrock_sign_in_is_answered_with_the_pasted_address_and_retried_after_a_verdict() {
+        let mut app = ready(true);
+        let mut lines = answering_launch(&mut app);
+        feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
+        let prompt = app.signin.as_ref().expect("the prompt is up");
+        assert!(prompt.waiting() && !prompt.can_send());
+        assert_eq!(app.tick_interval(), Some(PULSE_INTERVAL), "the gauge pulses; the countdown is in the panel");
+        assert!(app.console.to_text().contains("the game asks for a Microsoft sign-in"));
+        // A paste with the spaces a terminal or a browser may add, sent trimmed.
+        let _ = app.update(Message::SignInAnswerChanged(" ms-xal-0000000048183522://auth?code=a&state=x ".into()));
+        let _ = app.update(Message::SendSignInAnswer);
+        assert_eq!(written(&mut lines), ["answer signin ms-xal-0000000048183522://auth?code=a&state=x\n"]);
+        // Once sent, nothing more until the launcher has spoken.
+        assert!(app.signin.as_ref().unwrap().sent);
+        let _ = app.update(Message::SendSignInAnswer);
+        let _ = app.update(Message::CancelSignIn);
+        let _ = app.update(Message::SignInAnswerChanged("changed".into()));
+        assert!(written(&mut lines).is_empty());
+        // The verdict: not this sign-in's state. The field is open again, with the reason.
+        feed(&mut app, events([sign_in_page(SignInState::Waiting, 9, Some("its state is not this sign-in's"))]));
+        let prompt = app.signin.as_ref().unwrap();
+        assert!(!prompt.sent && prompt.can_send(), "the draft is kept, to be corrected");
+        assert_eq!(prompt.event.note.as_deref(), Some("its state is not this sign-in's"));
+        let _ = app.update(Message::SignInAnswerChanged("ms-xal-0000000048183522://auth?code=a&state=s".into()));
+        let _ = app.update(Message::SendSignInAnswer);
+        assert_eq!(written(&mut lines), ["answer signin ms-xal-0000000048183522://auth?code=a&state=s\n"]);
+        feed(&mut app, events([sign_in_page(SignInState::Done, 9, None)]));
+        assert!(app.signin.is_none(), "an ended prompt leaves the page");
+        assert_eq!(app.launch_status, "Sign-in: handed to the game, which finishes it.");
+        assert!(app.console.to_text().contains("sign-in: the address was handed to the game"));
+        finish(&mut app, 0);
+        assert!(app.answerable.is_empty(), "gone with the launch");
+    }
+
+    #[test]
+    fn a_paste_that_is_plainly_not_the_address_is_not_sent() {
+        let mut app = ready(true);
+        let mut lines = answering_launch(&mut app);
+        feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
+        for wrong in ["https://login.live.com/oauth20_authorize.srf?x", "ms-xal-0000000048183522://auth", "caf\u{e9}"] {
+            let _ = app.update(Message::SignInAnswerChanged(wrong.into()));
+            let _ = app.update(Message::SendSignInAnswer);
+            assert!(app.signin.as_ref().unwrap().draft_problem().is_some(), "{wrong}");
+        }
+        assert!(written(&mut lines).is_empty(), "no attempt was spent on it");
+        // Cancelling refuses the sign-in.
+        let _ = app.update(Message::CancelSignIn);
+        assert_eq!(written(&mut lines), ["answer signin cancel\n"]);
+        feed(&mut app, events([sign_in_page(SignInState::Cancelled, 10, Some("cancelled outside the game"))]));
+        assert!(app.console.to_text().contains("sign-in: cancelled (cancelled outside the game)"));
+        assert_eq!(app.launch_status, "Sign-in cancelled (cancelled outside the game).");
+        let _ = app.update(Message::CancelSignIn);
+        assert!(written(&mut lines).is_empty(), "an ended prompt takes no answer");
+    }
+
+    #[test]
+    fn a_realms_join_without_the_phone_is_approved_here_with_its_code_or_the_authenticators() {
+        use bastion_mc_proto::{ApprovalState, RealmsApproval, RealmsMode};
+        let prompt = |mode: RealmsMode, code: Option<&str>| {
+            Event::RealmsApproval(RealmsApproval {
+                world: "Our Realm".into(),
+                address: "203.0.113.9:19132".into(),
+                mode,
+                code: code.map(str::to_string),
+                expires_in: 120,
+                attempts_left: 3,
+                state: ApprovalState::Waiting,
+            })
+        };
+        let mut app = ready(true);
+        let mut lines = answering_launch(&mut app);
+        feed(&mut app, events([prompt(RealmsMode::Code, Some("123456"))]));
+        assert!(app.realms_answerable());
+        assert_eq!(app.realms_answer().as_deref(), Some("123456"), "the shown code goes with the approval");
+        let _ = app.update(Message::ApproveRealms);
+        assert_eq!(written(&mut lines), ["answer realms 123456\n"]);
+        // An authenticator's code is typed; only digits are kept, and six are needed.
+        feed(&mut app, events([prompt(RealmsMode::Totp, None)]));
+        let _ = app.update(Message::RealmsAnswerChanged("65 43".into()));
+        assert_eq!((app.realms_draft.as_str(), app.realms_answer()), ("6543", None));
+        let _ = app.update(Message::ApproveRealms);
+        assert!(written(&mut lines).is_empty());
+        let _ = app.update(Message::RealmsAnswerChanged("654 321x".into()));
+        let _ = app.update(Message::ApproveRealms);
+        assert_eq!(written(&mut lines), ["answer realms 654321\n"]);
+        assert!(app.realms_draft.is_empty());
+        let _ = app.update(Message::RefuseRealms);
+        assert_eq!(written(&mut lines), ["answer realms cancel\n"]);
+    }
+
+    #[test]
+    fn a_realms_join_of_a_java_session_is_still_approved_in_the_game() {
+        let mut app = ready(true);
+        let _ = app.update(Message::Play);
+        let (stop, _) = tokio::sync::mpsc::channel(4);
+        let (answers, mut lines) = tokio::sync::mpsc::channel(8);
+        feed(&mut app, [Update::Started(backend::test_handle_with_answers(stop, answers))]);
+        feed(
+            &mut app,
+            events([Event::RealmsApproval(bastion_mc_proto::RealmsApproval {
+                world: "Our Realm".into(),
+                address: "203.0.113.9:31234".into(),
+                mode: bastion_mc_proto::RealmsMode::Code,
+                code: Some("123456".into()),
+                expires_in: 120,
+                attempts_left: 3,
+                state: bastion_mc_proto::ApprovalState::Waiting,
+            })]),
+        );
+        assert!(!app.realms_answerable(), "the launcher never said it takes the answer here");
+        let _ = app.update(Message::ApproveRealms);
+        let _ = app.update(Message::RefuseRealms);
+        assert!(written(&mut lines).is_empty(), "nothing is written: the code is typed into the phone");
+    }
+
+    #[test]
+    fn an_answer_that_cannot_be_written_says_so() {
+        let mut app = ready(true);
+        let _ = app.update(Message::Play);
+        // A launcher that has not started yet has no input to write to.
+        feed(
+            &mut app,
+            events([Event::Answerable { kind: AnswerKind::SignIn }, sign_in_page(SignInState::Waiting, 10, None)]),
+        );
+        let _ = app.update(Message::SignInAnswerChanged("ms-xal-0000000048183522://auth?code=a&state=s".into()));
+        let _ = app.update(Message::SendSignInAnswer);
+        assert!(!app.signin.as_ref().unwrap().sent);
+        assert!(app.notice.as_ref().unwrap().text.contains("The answer was not sent"), "{:?}", app.notice);
+    }
 
     #[test]
     fn first_refresh_fills_in_account_and_instances() {

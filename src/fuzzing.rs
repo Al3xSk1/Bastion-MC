@@ -220,6 +220,12 @@ pub const ALL: &[(&str, Harness)] = &[
     ("raknet", raknet),
     ("bedrock_realms", bedrock_realms),
     ("bedrock_gatherings", bedrock_gatherings),
+    // The Bedrock sign-in bridge: frames and requests from the sandbox with the checks they
+    // pass, the URL checks alone (the page asked for, the address pasted back), and the
+    // trusted answer lines (the front end's control pipe, the terminal).
+    ("signin_frame", crate::bedrock::signin::fuzz_frame),
+    ("signin_url", crate::bedrock::signin::fuzz_url),
+    ("answers", crate::events::input::fuzz),
 ];
 
 /// RakNet's offline messages as the relay reads a flow's first datagram (`egress::raknet`), and

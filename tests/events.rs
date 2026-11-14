@@ -246,8 +246,19 @@ fn a_pending_sign_in_is_abandoned_on_stop_and_when_the_front_end_disappears() {
 
         let mut control = child.stdin.take().unwrap();
         if explicit {
-            control.write_all(b"not a command\nstop\n").unwrap();
+            // Answer lines nothing asked for, broken ones and an over-long one are noted and
+            // change nothing: the stop line after them still ends the command.
+            let long = format!("answer signin {}\n", "x".repeat(bastion_mc::events::input::MAX_CONTROL_LINE));
+            control.write_all(b"not a command\nanswer realms 123456\nanswer phone 1\n").unwrap();
+            control.write_all(long.as_bytes()).unwrap();
+            control.write_all(b"stop\n").unwrap();
             control.flush().unwrap();
+            for expected in ["`realms` arrived, but nothing asks", "`signin` or `realms`", "longer than"] {
+                match next_event(&mut lines) {
+                    Event::Status { text } => assert!(text.contains(expected), "{text:?} lacks {expected:?}"),
+                    other => panic!("expected a note about the answer line, got {other:?}"),
+                }
+            }
         } else {
             drop(control); // the front end crashed or was closed
         }

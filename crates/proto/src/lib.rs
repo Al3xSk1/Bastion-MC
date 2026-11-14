@@ -2,14 +2,21 @@
 //!
 //! A front end never links the launcher. It starts `bastion-mc --events <command …>` and
 //! reads one JSON object per line from the child's standard output; each line is an
-//! [`Event`]. The only thing it can say back is [`STOP_COMMAND`] on the child's standard
-//! input (closing that pipe means the same). That is the whole interface: no token, key or
+//! [`Event`]. It can say two things back on the child's standard input: [`STOP_COMMAND`]
+//! (closing that pipe means the same), and the answer to a prompt the launcher asked it to
+//! show ([`answer`]: `answer <kind> <text>`). That is the whole interface: no token, key or
 //! credential ever crosses it, in either direction.
 //!
 //! Compatibility: events carry a `"event"` tag. A front end must ignore tags it does not
 //! know ([`Event::Unknown`]) and should check [`Event::Hello`] before trusting the rest.
 
+pub mod answer;
 pub mod runbook;
+
+pub use answer::{
+    ANSWER_COMMAND, Answer, AnswerKind, CANCEL, ControlLine, MAX_ANSWER_TEXT, MAX_CONTROL_LINE, SignInPage,
+    SignInState, answer_line, parse_control_line,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +100,16 @@ pub enum Event {
     /// (`state: waiting`) and once more when it ends. Carries no credential: the code is good
     /// for this one prompt only, and only typed into the game.
     RealmsApproval(RealmsApproval),
+    /// Bedrock: the game asks for a Microsoft sign-in, and the page is to be shown outside the
+    /// game ([`SignInPage`]); answered with `answer signin …` ([`answer`]).
+    SignInPage(SignInPage),
+    /// From now on, until the command ends, prompts of `kind` are answered here — with
+    /// `answer <kind> …` on the launcher's standard input — and not in the game. Sent once
+    /// per kind. A front end that knows the kind shows an input with such prompts (a Realms
+    /// approval in a Bedrock session, which has no phone to type the code into).
+    Answerable {
+        kind: AnswerKind,
+    },
     /// The game process ended. `code` follows shell conventions (130 = stopped on request).
     Exited {
         code: i32,
@@ -317,6 +334,15 @@ mod tests {
                 attempts_left: 1,
                 state: ApprovalState::Refused,
             }),
+            Event::SignInPage(SignInPage {
+                url: "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s".into(),
+                end: "ms-xal-0000000048183522://auth".into(),
+                expires_in: 900,
+                attempts_left: 10,
+                state: SignInState::Waiting,
+                note: Some("that address does not carry this sign-in's state".into()),
+            }),
+            Event::Answerable { kind: AnswerKind::Realms },
             Event::Exited { code: 130 },
             Event::Error { message: "nope".into(), code: 4 },
         ];
@@ -365,6 +391,30 @@ mod tests {
             "{\"event\":\"realms_approval\",\"world\":\"R\",\"address\":\"203.0.113.9:1\",\"mode\":\"totp\",\
              \"expires_in\":99,\"attempts_left\":2,\"state\":\"waiting\"}\n"
         );
+    }
+
+    #[test]
+    fn the_sign_in_prompt_and_the_answerable_notice_have_a_stable_form() {
+        let event = Event::SignInPage(SignInPage {
+            url: "https://login.live.com/oauth20_authorize.srf?a=b".into(),
+            end: "ms-xal-0000000048183522://auth".into(),
+            expires_in: 60,
+            attempts_left: 3,
+            state: SignInState::Done,
+            note: None,
+        });
+        assert_eq!(
+            event.to_line(),
+            "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?a=b\",\
+             \"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":60,\"attempts_left\":3,\"state\":\"done\"}\n"
+        );
+        assert_eq!(
+            Event::Answerable { kind: AnswerKind::SignIn }.to_line(),
+            "{\"event\":\"answerable\",\"kind\":\"signin\"}\n"
+        );
+        // A kind this build does not know makes the line unreadable, like any other value out
+        // of range: never acted on. (An older front end skips both events as `Unknown`.)
+        assert_eq!(Event::parse_line(r#"{"event":"answerable","kind":"phone"}"#), None, "unknown kind");
     }
 
     #[test]
