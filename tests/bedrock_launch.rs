@@ -31,6 +31,7 @@ use std::{
 use bastion_mc::{
     bedrock::{
         launch::{Setup, launch_with, profile},
+        policy,
         runtime::Client,
         store::{self, OpenedVersion, open_dir_unverified},
     },
@@ -439,7 +440,8 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert_eq!(std::fs::read_to_string(kept.join(profile::CLIENT_SETTINGS)).unwrap(), "fullscreen=false");
     assert!(files_named(&kept, "xal").is_empty() && files_named(&kept, "token.json").is_empty());
     assert!(files_named(&kept, "libjnivmsupport.so").is_empty());
-    assert!(profile::session_dirs(&paths).is_empty(), "{:?}", profile::session_dirs(&paths));
+    let sessions = || std::fs::read_dir(policy::sessions_dir(&paths)).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(sessions(), 0, "no session directory is left");
     assert!(files_named(&runtime, "signin.sock").is_empty(), "the bridge socket's name is gone");
     // The session held the version until it ended; now it can be removed (and the instance
     // that names it is named).
@@ -447,8 +449,9 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert!(notes.iter().any(|n| n.contains(INSTANCE)), "{notes:?}");
 
     // ---------------------------------------------------------------- session 2
-    // A session that crashed a moment ago left its data root (and its sign-in) behind.
-    let leftover = paths.scratch().join(format!("{INSTANCE}+bedrock-0123456789abcdef"));
+    // A session that crashed a moment ago left its data root (and its sign-in) behind, where
+    // sessions keep it (`policy::sessions_dir`).
+    let leftover = policy::sessions_dir(&paths).join(format!("{INSTANCE}-0123456789abcdef"));
     std::fs::create_dir_all(leftover.join("xal")).unwrap();
     std::fs::write(leftover.join("xal/token.json"), b"{}").unwrap();
     let toml = inst_dir.join("instance.toml");
@@ -459,7 +462,7 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
         println!("{}", two.dump());
     }
     assert_eq!(two.outcome, Ok(0), "{}", two.dump());
-    assert!(two.said("deleted the data of 1 earlier session(s) of this instance"), "{}", two.dump());
+    assert!(two.said("deleted the data of 1 earlier Bedrock session(s)"), "{}", two.dump());
     assert!(!leftover.exists());
     two.expect("world.present", "true");
     two.expect("options.present", "true");

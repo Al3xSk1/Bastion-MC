@@ -69,9 +69,6 @@ use crate::{
 };
 
 const SIGSYS_EXIT: i32 = 128 + libc::SIGSYS;
-/// How long deleting the session's data root may take at the end (the game shapes that tree;
-/// what is left is deleted by the next start of the instance, and that is said).
-const SESSION_REMOVAL_TIME: Duration = Duration::from_secs(30);
 /// The memory ceiling of a Bedrock session when `[sandbox] memory_max_mb` is not set, before
 /// the tmpfs sizes are added: a bound on runaway use, not a tuning knob. (The Android build
 /// typically stays well below it; it has never been measured on this machine.)
@@ -111,11 +108,12 @@ pub async fn launch(
     inst: Instance,
     reporter: &Reporter,
 ) -> Result<i32> {
+    // The gate first: without the licence substitution accepted, nothing of Bedrock is looked at.
+    policy::gate(&cfg.bedrock)?;
     let Kind::Bedrock(settings) = &inst.kind else {
         return Err(Error::Usage(format!("{} is not a Bedrock instance", inst.id)));
     };
     refuse_java_options(opts, &inst.id)?;
-    policy::gate(&cfg.bedrock)?;
     let client = runtime::discover(&cfg.bedrock)?;
     let version = store::open(paths, &settings.version)?;
     launch_with(paths, cfg, opts, inst, Setup { client, version, desktop: None, extra_trust_pem: Vec::new() }, reporter)
@@ -166,11 +164,11 @@ pub async fn launch_with(
 ) -> Result<i32> {
     let say = |m: &str| reporter.status(m);
     reporter.phase(Phase::Preparing);
+    policy::gate(&cfg.bedrock)?;
     let Kind::Bedrock(settings) = &inst.kind else {
         return Err(Error::Usage(format!("{} is not a Bedrock instance", inst.id)));
     };
     refuse_java_options(opts, &inst.id)?;
-    policy::gate(&cfg.bedrock)?;
     if opts.demo {
         say(DEMO_NOTE);
     }
@@ -182,8 +180,10 @@ pub async fn launch_with(
         client.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default(),
         client.program.display()
     ));
-    // So that `bastion-mc scram` can find and stop this launch.
-    let _running = crate::running::Marker::create(paths, &inst.id)?;
+    // So that `bastion-mc scram` can find and stop this launch — as a Bedrock session, whose
+    // game holds the account's Xbox sign-in (scram says so when it cannot stop one). Made before
+    // anything of the session exists, dropped after its data directory is gone.
+    let _running = crate::running::Marker::bedrock(paths, &inst.id)?;
     let swept =
         crate::running::sweep_leftovers(paths, Duration::from_secs(60), Some(Instant::now() + Duration::from_secs(20)));
     if swept.removed > 0 {
@@ -224,25 +224,34 @@ pub async fn launch_with(
         shields::planned_display(seen, desktop.uses_x11)
     };
 
-    // 2. The instance's data. The lock first: with it held, every session directory of this
-    // instance that exists belongs to a session that is over, and holds that session's sign-in.
-    // Held to the very end: released only after this session's data root is gone.
+    // 2. The instance's data. Its lock first (one session per instance: the worlds are one
+    // database), held to the very end: released only after this session's data root is gone.
     let mut kept = profile::Kept::open(&inst.dir, &inst.id, cfg.bedrock.persist_worlds)?;
-    let earlier = profile::sweep_instance(paths, &inst.id, Instant::now() + Duration::from_secs(20));
-    if earlier.removed > 0 {
+    // What sessions that were killed or crashed left in the directory of Bedrock sessions —
+    // their data roots, each holding that session's sign-in — is deleted first (the risk
+    // package's `policy::remove_leftovers`: the one function scram and doctor look through too;
+    // directories a running session holds locked are left alone). A directory of sessions that
+    // is a link or open to others stops the launch: no sign-in goes into it.
+    let leftovers = policy::remove_leftovers(paths, Some(Instant::now() + Duration::from_secs(20))).map_err(|why| {
+        Error::Policy(format!(
+            "the directory of Bedrock sessions cannot be used ({why}); nothing was deleted and nothing was started"
+        ))
+    })?;
+    if !leftovers.removed.is_empty() {
         say(&format!(
-            "deleted the data of {} earlier session(s) of this instance that did not end properly — the game's \
-             sign-in with it",
-            earlier.removed
+            "deleted the data of {} earlier Bedrock session(s) that did not end properly — the game's sign-in with it",
+            leftovers.removed.len()
         ));
     }
-    for failure in &earlier.failed {
+    for failure in &leftovers.failed {
         reporter.warn(format!(
-            "WARNING: the data of an earlier session of this instance could not be deleted ({failure}); it may hold \
-             that session's Xbox sign-in. `bastion-mc scram` deletes it."
+            "WARNING: the data of an earlier Bedrock session could not be deleted ({failure}); it may hold that \
+             session's Xbox sign-in. The next Bedrock start tries again, and `bastion-mc scram` deletes it."
         ));
     }
-    let mut session = profile::Session::create(paths, &inst.id)?;
+    // This session's data root: the client's -dd, and with it the token store of the game's
+    // sign-in library (`policy::SessionDir`, under `policy::sessions_dir`, 0700, locked).
+    let mut session = policy::SessionDir::create(paths, &inst.id)?;
     say(&if kept.is_empty() {
         "data: nothing is kept ([bedrock] persist_worlds = false): this session starts without worlds, and everything \
          it writes is deleted at its end"
@@ -548,14 +557,7 @@ pub async fn launch_with(
             shields::launcher_off()
         }
         confine_mode => {
-            let mut keep = Confinement::supervisor();
-            keep.write.push(paths.cache.clone());
-            if let Some(prepared) = &prepared {
-                prepared.confinement_needs(&mut keep);
-            }
-            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
-            keep.tcp_connect.sort_unstable();
-            keep.tcp_connect.dedup();
+            let keep = confinement(paths, prepared.as_ref(), http.socks5());
             let demand =
                 if confine_mode == ConfineMode::Require { confine::Demand::Whole } else { confine::Demand::Possible };
             let outcome = match confine::apply(&keep, demand) {
@@ -670,9 +672,9 @@ pub async fn launch_with(
         started.shutdown();
     }
 
-    // 11. The session's data root — the game's sign-in in it — is deleted, and that is said
-    // only if it is true.
-    match session.remove(Instant::now() + SESSION_REMOVAL_TIME) {
+    // 11. The session's data root — the game's sign-in in it — is deleted (bounded in time by
+    // `SessionDir::remove`), and that is said only if it is true.
+    match session.remove() {
         Ok(()) => log.line(
             Source::Launcher,
             "data: this session's data root has been deleted — the game's Xbox sign-in with it (the kept worlds and \
@@ -681,7 +683,7 @@ pub async fn launch_with(
         Err(why) => {
             let warning = format!(
                 "data: WARNING: this session's data root could NOT be deleted completely ({why}). It may hold the \
-                 game's Xbox sign-in. The next start of this instance deletes it, and so does `bastion-mc scram`."
+                 game's Xbox sign-in. The next Bedrock start deletes it, and so does `bastion-mc scram`."
             );
             log.record(Source::Launcher, &warning);
             reporter.warn(&warning);
@@ -718,6 +720,22 @@ pub async fn launch_with(
     }
     reporter.emit(Event::Exited { code });
     Ok(code)
+}
+
+/// What the launcher keeps after it confines itself in step 9: the supervisor's baseline, write
+/// access to the cache — this session's data root lies there (`policy::sessions_dir`), and
+/// removing it at the end is the point of the session's data split; the nested compositor's
+/// directories too — and the network package's outbound ports, plus the proxy's.
+fn confinement(paths: &Paths, prepared: Option<&net::Prepared>, proxy: Option<std::net::SocketAddr>) -> Confinement {
+    let mut keep = Confinement::supervisor();
+    keep.write.push(paths.cache.clone());
+    if let Some(prepared) = prepared {
+        prepared.confinement_needs(&mut keep);
+    }
+    keep.tcp_connect.extend(proxy.map(|proxy| proxy.port()));
+    keep.tcp_connect.sort_unstable();
+    keep.tcp_connect.dedup();
+    keep
 }
 
 /// A Bedrock session's network mode: the instance's, else the global one — and never the
@@ -989,6 +1007,29 @@ mod tests {
         let mut keep = Confinement::supervisor();
         proxied.confinement_needs(&mut keep);
         assert_eq!(keep.tcp_connect, [53], "behind a proxy the launcher never dials 443 itself");
+    }
+
+    /// The confined launcher must still be able to delete the session's data root at the end:
+    /// its confinement lets it write where the risk package puts the directories of sessions.
+    #[test]
+    fn the_confined_launcher_can_still_delete_the_sessions_data_root() {
+        let paths = Paths {
+            config: "/x/config".into(),
+            data: "/x/data".into(),
+            cache: "/x/cache".into(),
+            state: "/x/state".into(),
+            runtime: None,
+        };
+        let keep = confinement(&paths, None, Some("127.0.0.1:9050".parse().unwrap()));
+        let sessions = policy::sessions_dir(&paths);
+        assert!(
+            keep.write.iter().any(|w| sessions.starts_with(w)),
+            "{:?} must cover {}",
+            keep.write,
+            sessions.display()
+        );
+        assert!(!keep.write.iter().any(|w| paths.data.starts_with(w) || w.starts_with(&paths.data)), "not the data");
+        assert_eq!(keep.tcp_connect, [53, 9050], "name lookups and the proxy; nothing else offline");
     }
 
     #[test]

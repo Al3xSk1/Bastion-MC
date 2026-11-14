@@ -265,28 +265,52 @@ fn shown(path: &Path) -> String {
 /// Most version ids listed by name; the rest are counted.
 const LISTED_VERSIONS: usize = 8;
 
-/// The ids of the imported versions (directories in the store whose name is a valid id), and
-/// how many other entries the store holds; `None` when nothing was ever imported. A
-/// placeholder until the store package's own listing replaces it: that one checks each
-/// version against its manifest, this one only looks at names.
-fn imported_versions(paths: &Paths) -> std::result::Result<Option<(Vec<String>, usize)>, String> {
-    let dir = super::store::versions_dir(paths);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", shown(&dir))),
+/// The line about the imported versions, from the store package's listing (`store::list`:
+/// each version's manifest is read and checked; no file is hashed — `bastion-mc bedrock
+/// versions --verify` and every launch do that). A version whose manifest is missing or broken
+/// is damaged: named, with the reason, as a warning.
+fn versions_line(paths: &Paths, on: bool) -> Line {
+    let none_yet = "none (`bastion-mc bedrock import <dir>` imports a version that mcpelauncher-ui downloaded)";
+    let listing = match super::store::list(paths) {
+        Ok(listing) => listing,
+        Err(e) => return line(Level::Warn, "imported versions", format!("cannot be listed: {e}")),
     };
-    let (mut ids, mut others) = (Vec::new(), 0);
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("{}: {e}", shown(&dir)))?;
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        match entry.file_name().to_str() {
-            Some(name) if is_dir && validate_id(name).is_ok() => ids.push(name.to_string()),
-            _ => others += 1,
-        }
+    let mut text = listing.versions.iter().take(LISTED_VERSIONS).map(|v| v.id.clone()).collect::<Vec<_>>().join(", ");
+    if listing.versions.len() > LISTED_VERSIONS {
+        text.push_str(&format!(" and {} more", listing.versions.len() - LISTED_VERSIONS));
     }
-    ids.sort();
-    Ok(Some((ids, others)))
+    if !listing.leftovers.is_empty() {
+        text.push_str(&format!(
+            " ({} unfinished import(s) or removal(s) left in the store; the next import or removal clears them)",
+            listing.leftovers.len()
+        ));
+    }
+    if !listing.damaged.is_empty() {
+        let damaged: Vec<String> = listing
+            .damaged
+            .iter()
+            .take(LISTED_VERSIONS)
+            .map(|(name, why)| {
+                format!("{} ({})", util::sanitize_line(name.as_bytes(), 80), util::sanitize_line(why.as_bytes(), 160))
+            })
+            .collect();
+        let lead = if listing.versions.is_empty() { String::new() } else { format!("{text}; ") };
+        return line(
+            Level::Warn,
+            "imported versions",
+            format!(
+                "{lead}{} damaged entr(ies) in the store, which no launch uses: {}{}",
+                listing.damaged.len(),
+                damaged.join("; "),
+                if listing.damaged.len() > LISTED_VERSIONS { "; …" } else { "" }
+            ),
+        );
+    }
+    match (listing.versions.is_empty(), on) {
+        (false, _) => line(Level::Ok, "imported versions", text),
+        (true, true) => line(Level::Warn, "imported versions", format!("{none_yet}; a Bedrock launch needs one")),
+        (true, false) => line(Level::Info, "imported versions", none_yet),
+    }
 }
 
 /// The line about the installed client.
@@ -341,22 +365,7 @@ pub fn doctor(paths: &Paths, cfg: &Config) -> Vec<Line> {
     });
     lines.push(client_line(bedrock));
 
-    let none_yet = "none (`bastion-mc bedrock import <dir>` imports a version that mcpelauncher-ui downloaded)";
-    lines.push(match imported_versions(paths) {
-        Ok(Some((ids, others))) if !ids.is_empty() => {
-            let mut listed = ids.iter().take(LISTED_VERSIONS).cloned().collect::<Vec<_>>().join(", ");
-            if ids.len() > LISTED_VERSIONS {
-                listed.push_str(&format!(" and {} more", ids.len() - LISTED_VERSIONS));
-            }
-            if others > 0 {
-                listed.push_str(&format!(" ({others} other entr(ies) in the store, not versions)"));
-            }
-            line(Level::Ok, "imported versions", listed)
-        }
-        Ok(_) if on => line(Level::Warn, "imported versions", format!("{none_yet}; a Bedrock launch needs one")),
-        Ok(_) => line(Level::Info, "imported versions", none_yet),
-        Err(e) => line(Level::Warn, "imported versions", format!("cannot be listed: {e}")),
-    });
+    lines.push(versions_line(paths, on));
 
     let policy = "the game's Xbox sign-in lives one session: the data directory the game keeps it in is per-session \
                   scratch, deleted when the session ends (and, after a crash, at the next start or by `bastion-mc \
@@ -711,28 +720,44 @@ mod tests {
     #[test]
     fn doctor_lists_imported_versions_and_warns_about_leftover_sign_ins() {
         let (root, paths) = paths("doc2");
-        let versions = crate::bedrock::store::versions_dir(&paths);
+        // Versions as the store package imports them.
+        let source = root.join("download");
+        crate::bedrock::store::write_stand_in_version(&source).unwrap();
+        let import = |id: &str| {
+            crate::bedrock::store::import(&paths, &source, Some(id), &Reporter::capture()).unwrap();
+        };
         for id in ["1.26.62.1", "1.26.70.24"] {
-            std::fs::create_dir_all(versions.join(id)).unwrap();
+            import(id);
         }
-        std::fs::create_dir_all(versions.join("Not An Id")).unwrap();
-        std::fs::write(versions.join("index.json"), b"{}").unwrap();
         std::fs::create_dir_all(sessions_dir(&paths).join("b-0011223344556677")).unwrap();
         let cfg = Config::default();
         let lines = doctor_text(&paths, &cfg);
         let versions_line = lines.iter().find(|(_, t)| t.starts_with("imported versions")).unwrap();
-        assert_eq!(versions_line.0, Level::Ok);
-        assert!(versions_line.1.contains("1.26.62.1, 1.26.70.24 (2 other entr(ies)"), "{lines:?}");
+        assert_eq!(versions_line.0, Level::Ok, "{lines:?}");
+        assert!(versions_line.1.contains("1.26.62.1, 1.26.70.24"), "{lines:?}");
         let sign_in = lines.iter().find(|(_, t)| t.starts_with("the game's sign-in")).unwrap();
         assert_eq!(sign_in.0, Level::Warn, "a crashed session's sign-in is reported even with Bedrock off");
         assert!(sign_in.1.contains("1 director(ies)") && sign_in.1.contains("bastion-mc scram"), "{sign_in:?}");
         assert!(sessions_dir(&paths).join("b-0011223344556677").exists(), "doctor reports, it does not delete");
-        for many in 0..10 {
-            std::fs::create_dir_all(versions.join(format!("1.0.{many}"))).unwrap();
+        // What the store's listing calls damaged (no manifest; a name that is no id) is a warning
+        // that names it; the good versions are still listed.
+        let versions = crate::bedrock::store::versions_dir(&paths);
+        std::fs::create_dir_all(versions.join("1.0.0")).unwrap();
+        std::fs::create_dir_all(versions.join("Not An Id")).unwrap();
+        let lines = doctor_text(&paths, &cfg);
+        let versions_line = lines.iter().find(|(_, t)| t.starts_with("imported versions")).unwrap();
+        assert_eq!(versions_line.0, Level::Warn, "{lines:?}");
+        assert!(versions_line.1.contains("1.26.62.1, 1.26.70.24; 2 damaged entr(ies)"), "{lines:?}");
+        assert!(versions_line.1.contains("1.0.0 (") && versions_line.1.contains("Not An Id ("), "{lines:?}");
+        std::fs::remove_dir_all(versions.join("1.0.0")).unwrap();
+        std::fs::remove_dir_all(versions.join("Not An Id")).unwrap();
+        for many in 0..7 {
+            import(&format!("1.0.{many}"));
         }
         let lines = doctor_text(&paths, &cfg);
-        assert!(lines.iter().any(|(_, t)| t.contains(" and 4 more")), "{lines:?}");
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(lines.iter().any(|(_, t)| t.contains(" and 1 more")), "{lines:?}");
+        // The store leaves imported versions read-only.
+        tree::remove(&root, None).unwrap();
     }
 
     #[test]

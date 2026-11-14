@@ -4,7 +4,8 @@
 //! ```text
 //! /usr, /etc (synthetic), /proc, /dev, /tmp, /run/user/1000   as for Java (`sandbox::base`)
 //! /bastion/game        the imported version, read-only, bound by the descriptor the store checked
-//! /bastion/data        THIS SESSION's data root: a fresh directory, deleted when the session ends
+//! /bastion/data        THIS SESSION's data root: a fresh directory (`policy::SessionDir`, under
+//!                      the cache's bedrock-sessions/), deleted when the session ends
 //!   games/com.mojang/minecraftWorlds   ┐ the instance's kept part (`persist_worlds`):
 //!   games/com.mojang/minecraftpe       │ bound read-write from instances/<id>/bedrock-data/
 //!   mcpelauncher-client-settings.txt   ┘
@@ -51,11 +52,10 @@ use std::{
 use nix::fcntl::{Flock, FlockArg};
 
 use crate::{
-    bedrock::{runtime::Client, signin},
+    bedrock::{policy::SessionDir, runtime::Client, signin},
     error::{Context, Error, Result},
     instance,
     paths::Paths,
-    running::{self, DirLock},
     sandbox::{Base, Mount, policy::LandlockPolicy},
     util,
 };
@@ -66,17 +66,24 @@ pub const SANDBOX_CACHE: &str = "/bastion/cache";
 pub const SANDBOX_BIN: &str = "/bastion/bin";
 /// The client's mod directory (`PathHelper::getPrimaryDataDirectory() + "mods/"`).
 pub const MODS_DIR: &str = "mods";
-/// The client's own settings (window, scale, overlay), kept with the worlds.
+/// The client's own settings (window, scale, overlay), kept with the worlds. Checked in the
+/// client's source (`src/settings.cpp` at the research clone's commit 7890498) before it was
+/// allowed to persist: its sixteen keys are UI switches and positions (`enable_imgui`,
+/// `enable_menubar`, `enable_fps_hud`, `fps_hud_x`/`_y`, `enable_keystroke_hud`,
+/// `keystroke_hud_x`/`_y`, `scale`, `fullscreen`, `vsync`), a video mode compared with the
+/// display's list (`videoMode`), a focus key compared with two fixed strings
+/// (`menubarFocusKey`), and three switches of the client's own built-in game patches
+/// (`enable_keyboard_autofocus_patches_1_20_60`, `…_paste_patches_1_20_60`,
+/// `enable_intel_sprint_strafe_patch`). None names a path, a library, a directory or a
+/// program, so a session cannot point the next one at anything with it; what it can do is
+/// switch the client's own patches on or off for the next session (code of the client, not of
+/// the session).
 pub const CLIENT_SETTINGS: &str = "mcpelauncher-client-settings.txt";
 /// What is kept from one session to the next, relative to the data root: the worlds and
 /// the game's own settings (`options.txt` and its neighbours). Nothing else survives.
 pub const KEPT_DIRS: [&str; 2] = ["games/com.mojang/minecraftWorlds", "games/com.mojang/minecraftpe"];
 /// The tmpfs at `/bastion/cache` (the client's telemetry cache, Mesa's shader cache).
 pub const CACHE_SIZE_MB: u32 = 512;
-/// Separates the instance id from the rest of a session directory's name. Not in the id
-/// alphabet (`paths::validate_id`), so a Java launch's game root (`<id>-<hex>`) can never
-/// look like a Bedrock session of another instance.
-const SESSION_MARK: &str = "+bedrock-";
 
 // ---------------------------------------------------------------- the data split
 
@@ -166,123 +173,6 @@ fn open_path(path: &Path, directory: bool) -> Result<OwnedFd> {
         .map_err(|e| Error::io(format!("opening {}", path.display()), std::io::Error::from(e)))
 }
 
-/// One session's data root on the host: `<cache>/scratch/<id>+bedrock-<hex>`, the token store
-/// of the game (see the module header). Locked while it exists, so that no sweep takes it
-/// from under a running session; deleted at the end ([`Session::remove`]), and if a session
-/// could not do that (it was killed, the machine lost power), by the next start of the same
-/// instance whatever its age ([`sweep_instance`]), by any later launch after a minute
-/// (`running::sweep_leftovers`), and by `bastion-mc scram`.
-pub struct Session {
-    dir: PathBuf,
-    lock: Option<DirLock>,
-    removed: bool,
-}
-
-impl Session {
-    pub fn create(paths: &Paths, id: &str) -> Result<Session> {
-        let base = paths.scratch();
-        util::create_private_dir_all(&base)?;
-        let dir = base.join(format!("{id}{SESSION_MARK}{}", util::hex_encode(&util::random_bytes::<8>()?)));
-        util::create_private_dir_all(&dir)?;
-        let lock = running::lock_dir(&dir).ctx(|| format!("locking {}", dir.display()))?;
-        Ok(Session { dir, lock: Some(lock), removed: false })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The data root as a mount (by descriptor: the directory created is the one bound).
-    pub fn mount(&self) -> Result<Mount> {
-        Ok(Mount::BindFd { dir: open_path(&self.dir, true)?, dst: SANDBOX_DATA.into() })
-    }
-
-    /// Delete the session's data — the game's sign-in tokens with it. The tree was written
-    /// by the sandbox: removed the careful way (`tree::remove`, bounded in time), and what
-    /// could not be removed is said, never passed over.
-    pub fn remove(&mut self, deadline: std::time::Instant) -> std::result::Result<(), String> {
-        self.removed = true;
-        self.lock = None;
-        match crate::tree::remove(&self.dir, Some(deadline)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("{}: {e}", self.dir.display())),
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // A launch that ends some other way (an error, a cancelled start): best effort; what
-        // stays is removed by the next start of this instance.
-        if !self.removed {
-            let _ = self.remove(std::time::Instant::now() + std::time::Duration::from_secs(30));
-        }
-    }
-}
-
-/// Is `name` the directory name of a session of instance `id`?
-fn is_session_of(name: &str, id: &str) -> bool {
-    name.strip_prefix(id)
-        .and_then(|rest| rest.strip_prefix(SESSION_MARK))
-        .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-}
-
-/// What [`sweep_instance`] did.
-#[derive(Debug, Default)]
-pub struct Swept {
-    pub removed: usize,
-    pub failed: Vec<String>,
-}
-
-/// Delete what earlier sessions of instance `id` left (sessions that were killed or
-/// crashed): their data roots hold the game's sign-in. Whatever their age — the caller holds
-/// the instance's lock ([`Kept::open`]), so none of them belongs to a running session. A
-/// directory that some process still holds locked is left alone and reported.
-pub fn sweep_instance(paths: &Paths, id: &str, deadline: std::time::Instant) -> Swept {
-    let mut swept = Swept::default();
-    let Ok(entries) = std::fs::read_dir(paths.scratch()) else { return swept };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
-        if !is_session_of(&name, id) || !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let path = entry.path();
-        // Taking the lock is the test for "nobody holds it"; it is dropped right after.
-        let free = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(&path)
-            .ok()
-            .and_then(|file| Flock::lock(file, FlockArg::LockExclusiveNonblock).ok());
-        if free.is_none() {
-            swept.failed.push(format!("{name}: held by a running process"));
-            continue;
-        }
-        drop(free);
-        match crate::tree::remove(&path, Some(deadline)) {
-            Ok(()) => swept.removed += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => swept.failed.push(format!("{name}: {e}")),
-        }
-    }
-    swept
-}
-
-/// Every session data root present now, of any instance (for `scram`, which deletes them).
-pub fn session_dirs(paths: &Paths) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(paths.scratch()) else { return Vec::new() };
-    entries
-        .flatten()
-        .filter(|entry| {
-            entry.file_name().to_str().and_then(|name| name.split_once(SESSION_MARK)).is_some_and(|(id, hex)| {
-                crate::paths::validate_id(id).is_ok() && is_session_of(&format!("{id}{SESSION_MARK}{hex}"), id)
-            })
-        })
-        .map(|entry| entry.path())
-        .collect()
-}
-
 // ---------------------------------------------------------------- the profile
 
 /// The sign-in stub: the launcher's own executable, opened once per place it is mounted
@@ -323,7 +213,9 @@ pub struct Inputs<'a> {
     pub client_file: File,
     /// The imported version's directory (`OpenedVersion::dir`).
     pub version_dir: OwnedFd,
-    pub session: &'a Session,
+    /// This session's data root (the risk package's `SessionDir`), bound at `/bastion/data` by
+    /// a descriptor: the directory created is the one mounted.
+    pub session: &'a SessionDir,
     /// Borrowed, not taken: its lock must outlive the session, not the building of the profile.
     pub kept: &'a mut Kept,
     pub stub: Stub,
@@ -379,7 +271,7 @@ pub fn build(base: Base, mut input: Inputs<'_>) -> Result<Profile> {
     // The game, read-only; the data root, then what is kept inside it, then the empty and
     // sealed mod directory (after the kept binds, so nothing can come to lie over it).
     mounts.push(Mount::RoBindFd { file: File::from(input.version_dir), dst: SANDBOX_GAME.into() });
-    mounts.push(input.session.mount()?);
+    mounts.push(Mount::BindFd { dir: open_path(input.session.path(), true)?, dst: SANDBOX_DATA.into() });
     mounts.extend(input.kept.mounts());
     let mods = Path::new(SANDBOX_DATA).join(MODS_DIR);
     mounts.push(Mount::Tmpfs { dst: mods.clone(), size_bytes: Some(4096), mode: 0o555 });
@@ -572,7 +464,7 @@ mod tests {
             Fixture { root, paths, inst_dir, client, version, webview }
         }
 
-        fn build(&self, session: &Session, kept: &mut Kept, window: Option<(u32, u32)>) -> Profile {
+        fn build(&self, session: &SessionDir, kept: &mut Kept, window: Option<(u32, u32)>) -> Profile {
             let base = crate::sandbox::base(&BaseOptions {
                 tmp_size_mb: 64,
                 jvm: None,
@@ -629,7 +521,7 @@ mod tests {
     #[test]
     fn the_game_is_read_only_the_data_root_is_the_sessions_and_the_mod_directory_is_sealed() {
         let f = Fixture::new("mounts");
-        let session = Session::create(&f.paths, "bedrock").unwrap();
+        let session = SessionDir::create(&f.paths, "bedrock").unwrap();
         let mut kept = Kept::open(&f.inst_dir, "bedrock", true).unwrap();
         let profile = f.build(&session, &mut kept, None);
         // The instance stays locked for as long as the session holds `kept`, not just while
@@ -669,7 +561,7 @@ mod tests {
     #[test]
     fn nothing_writable_is_executable_and_the_stub_and_client_are() {
         let f = Fixture::new("landlock");
-        let session = Session::create(&f.paths, "bedrock").unwrap();
+        let session = SessionDir::create(&f.paths, "bedrock").unwrap();
         let profile = f.build(&session, &mut Kept::open(&f.inst_dir, "bedrock", true).unwrap(), None);
         let l = &profile.landlock;
         for writable in [SANDBOX_DATA, SANDBOX_CACHE, "/tmp", "/dev/shm", crate::sandbox::RUNTIME_DIR] {
@@ -692,7 +584,7 @@ mod tests {
     #[test]
     fn the_client_gets_its_arguments_and_an_environment_from_scratch() {
         let f = Fixture::new("argv");
-        let session = Session::create(&f.paths, "bedrock").unwrap();
+        let session = SessionDir::create(&f.paths, "bedrock").unwrap();
         let profile = f.build(&session, &mut Kept::open(&f.inst_dir, "bedrock", false).unwrap(), Some((1280, 720)));
         let program = f.client.program.display().to_string();
         assert_eq!(profile.exec, f.client.program);
@@ -751,38 +643,6 @@ mod tests {
     }
 
     #[test]
-    fn earlier_sessions_of_this_instance_are_deleted_and_nothing_else_is() {
-        let f = Fixture::new("sweep");
-        let scratch = f.paths.scratch();
-        util::create_private_dir_all(&scratch).unwrap();
-        let crashed = scratch.join("bedrock+bedrock-0123456789abcdef");
-        std::fs::create_dir_all(crashed.join("xal")).unwrap();
-        std::fs::write(crashed.join("xal/token.json"), b"{}").unwrap();
-        // Not this instance's, not a session at all, a name that only looks similar.
-        let keep = [
-            "other+bedrock-0123456789abcdef",
-            "bedrock-0123456789abcdef",
-            "bedrock+bedrock-0123",
-            "bedrock+bedrock-0123456789abcdeg",
-        ];
-        for name in keep {
-            std::fs::create_dir_all(scratch.join(name)).unwrap();
-        }
-        // A running session holds its lock: never swept.
-        let running = Session::create(&f.paths, "bedrock").unwrap();
-        let swept = sweep_instance(&f.paths, "bedrock", std::time::Instant::now() + std::time::Duration::from_secs(5));
-        assert_eq!(swept.removed, 1, "{swept:?}");
-        assert!(!crashed.exists());
-        assert!(running.path().exists() && swept.failed.len() == 1 && swept.failed[0].contains("held"), "{swept:?}");
-        for name in keep {
-            assert!(scratch.join(name).exists(), "{name} was removed");
-        }
-        let all = session_dirs(&f.paths);
-        assert_eq!(all.len(), 2, "{all:?}");
-        assert!(all.contains(&running.path().to_path_buf()) && all.contains(&scratch.join(keep[0])));
-    }
-
-    #[test]
     fn a_client_below_a_directory_the_sandbox_makes_is_refused() {
         for path in ["/tmp/x/mcpelauncher-client", "/run/user/1000/c", "/bastion/data/c", "/dev/shm/c", "relative/c"] {
             assert!(matches!(outside_sandbox_made("the client", Path::new(path)), Err(Error::Policy(_))), "{path}");
@@ -835,22 +695,22 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// What the launch says about deleting the data root rests on `Session::remove`: nothing
-    /// when the tree is gone, also one the game left without permission bits.
+    /// The data root the client gets is the risk package's per-session directory — where
+    /// scram, doctor and the leftover removal look — bound by its descriptor, not a path.
     #[test]
-    fn a_sessions_data_root_is_deleted_even_with_its_permission_bits_taken() {
-        let f = Fixture::new("remove");
-        let mut session = Session::create(&f.paths, "bedrock").unwrap();
-        let dir = session.path().to_path_buf();
-        std::fs::create_dir_all(dir.join("xal")).unwrap();
-        std::fs::write(dir.join("xal/token.json"), b"{}").unwrap();
-        std::fs::set_permissions(dir.join("xal"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        assert_eq!(session.remove(std::time::Instant::now() + std::time::Duration::from_secs(5)), Ok(()));
-        assert!(!dir.exists());
-        // Dropping a session that was never removed removes it too.
-        let dropped = Session::create(&f.paths, "bedrock").unwrap();
-        let path = dropped.path().to_path_buf();
-        drop(dropped);
-        assert!(!path.exists());
+    fn the_data_root_is_the_sessions_directory_from_the_risk_package() {
+        let f = Fixture::new("sessiondir");
+        let session = SessionDir::create(&f.paths, "bedrock").unwrap();
+        assert_eq!(session.path().parent(), Some(crate::bedrock::policy::sessions_dir(&f.paths).as_path()));
+        let profile = f.build(&session, &mut Kept::open(&f.inst_dir, "bedrock", true).unwrap(), None);
+        let data: Vec<&Mount> = profile
+            .mounts
+            .iter()
+            .filter(|m| matches!(m, Mount::BindFd { dst, .. } if dst == Path::new(SANDBOX_DATA)))
+            .collect();
+        assert_eq!(data.len(), 1, "one data root");
+        let Mount::BindFd { dir, .. } = data[0] else { unreachable!() };
+        let bound = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(dir))).unwrap();
+        assert_eq!(bound, session.path(), "the directory created is the one mounted");
     }
 }
