@@ -6,6 +6,12 @@
 //! Without that, a sign-in that was waiting for the user when scram ran would complete a
 //! minute later and put a fresh token back on the machine.
 //!
+//! A Bedrock session is marked as a launch of its own kind ([`Activity::Bedrock`]): it is
+//! stopped like a Java launch, and counts as one wherever "a launch is in progress" matters,
+//! but what it holds is different — its game holds the account's Xbox sign-in itself, in
+//! memory and in a per-session token store on disk (`bedrock::policy`) — and `scram` says
+//! that when it stops one, or cannot.
+//!
 //! A marker holds the kernel's start time of the process that wrote it, what it is doing,
 //! and its command name. Pids are reused; the pair (pid, start time) is not, so a marker can
 //! only ever point at the process that wrote it. A marker whose process is gone, or is some
@@ -69,14 +75,24 @@ fn identity(pid: u32) -> Option<(u64, String)> {
 pub enum Activity {
     /// Supervising (or preparing) a launch of this instance.
     Launch(String),
+    /// Supervising (or preparing) a Bedrock session of this instance. Its game holds the
+    /// account's Xbox sign-in while it runs (see `bedrock::policy`).
+    Bedrock(String),
     /// Another command that may store a credential: `login`, `skin`, `vault`, …
     Command(String),
 }
 
 impl Activity {
+    /// A launch of either edition: something that starts a game and holds directories in the
+    /// cache while it runs.
+    pub fn is_launch(&self) -> bool {
+        matches!(self, Activity::Launch(_) | Activity::Bedrock(_))
+    }
+
     fn encode(&self) -> String {
         match self {
             Activity::Launch(instance) => format!("launch:{instance}"),
+            Activity::Bedrock(instance) => format!("bedrock:{instance}"),
             Activity::Command(name) => format!("command:{name}"),
         }
     }
@@ -85,6 +101,9 @@ impl Activity {
         let valid = |id: &str| validate_id(id).is_ok();
         match text.split_once(':') {
             Some(("launch", instance)) if valid(instance) => Some(Activity::Launch(instance.to_string())),
+            // (A launcher older than Bedrock support does not know this kind, takes such a
+            // marker for a stale one and removes it: one version at a time is supported.)
+            Some(("bedrock", instance)) if valid(instance) => Some(Activity::Bedrock(instance.to_string())),
             Some(("command", name)) if valid(name) => Some(Activity::Command(name.to_string())),
             // Markers written before commands were marked: the instance name alone.
             None if valid(text) => Some(Activity::Launch(text.to_string())),
@@ -101,6 +120,13 @@ impl Marker {
     pub fn create(paths: &Paths, instance: &str) -> Result<Self> {
         validate_id(instance)?;
         Self::write(paths, &Activity::Launch(instance.to_string()))
+    }
+
+    /// Mark a Bedrock session of `instance`. Made before anything of the session exists (its
+    /// per-session directory included), and dropped after that directory is gone.
+    pub fn bedrock(paths: &Paths, instance: &str) -> Result<Self> {
+        validate_id(instance)?;
+        Self::write(paths, &Activity::Bedrock(instance.to_string()))
     }
 
     /// Mark a command other than a launch that may store a credential.
@@ -289,7 +315,7 @@ pub fn lock_dir(path: &Path) -> std::io::Result<DirLock> {
 }
 
 /// Is some process holding [`lock_dir`] on `path`?
-fn in_use(path: &Path) -> bool {
+pub(crate) fn in_use(path: &Path) -> bool {
     match open_dir(path).map(|file| Flock::lock(file, FlockArg::LockExclusiveNonblock)) {
         Ok(Ok(_free)) => false,
         Ok(Err((_, nix::errno::Errno::EWOULDBLOCK))) => true,
@@ -323,7 +349,8 @@ pub struct Sweep {
 /// stops at `deadline`; what is left then is in [`Sweep::failed`].
 pub fn sweep_leftovers(paths: &Paths, min_age: Duration, deadline: Option<Instant>) -> Sweep {
     let mut sweep = Sweep::default();
-    if list(paths).iter().any(|running| matches!(running.activity, Activity::Launch(_))) {
+    // A Bedrock session counts: it makes directories here too (the nested compositor's).
+    if list(paths).iter().any(|running| running.activity.is_launch()) {
         return sweep;
     }
     let old_enough = |path: &Path| {
@@ -597,6 +624,40 @@ mod tests {
         assert!(matches!(stopped.as_slice(), [(running, Stopped::Killed)] if running.pid == child.id()), "{stopped:?}");
         let status = child.wait().unwrap();
         assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Bedrock session is a launch of its own kind: found as that, it holds up a sweep the
+    /// way a Java launch does (it has directories in the cache too), and it is stopped.
+    #[test]
+    fn a_bedrock_session_is_marked_as_a_launch_of_its_own_kind_and_stopped_like_one() {
+        let (root, paths) = paths();
+        let own = Marker::bedrock(&paths, "bedrock-main").unwrap();
+        let text = std::fs::read_to_string(dir(&paths).join(std::process::id().to_string())).unwrap();
+        assert_eq!(text.lines().nth(1), Some("bedrock:bedrock-main"));
+        drop(own);
+        assert!(Marker::bedrock(&paths, "../x").is_err());
+        for bad in ["bedrock:", "bedrock:../x", "bedrock:UPPER", "bedrock:a/b"] {
+            assert_eq!(Activity::decode(bad), None, "{bad:?}");
+        }
+        assert_eq!(Activity::decode("bedrock:b1"), Some(Activity::Bedrock("b1".into())));
+        assert!(Activity::Bedrock("b1".into()).is_launch() && Activity::Launch("j".into()).is_launch());
+        assert!(!Activity::Command("login".into()).is_launch());
+
+        std::fs::create_dir_all(paths.cache.join("display-0011223344556677")).unwrap();
+        let mut session = idle(&std::env::current_exe().unwrap(), None);
+        marker_for(&paths, &session, "bedrock:b1");
+        assert_eq!(list(&paths)[0].activity, Activity::Bedrock("b1".into()));
+        assert_eq!(sweep_leftovers(&paths, Duration::ZERO, None).removed, 0, "nothing is swept under a session");
+        assert!(paths.cache.join("display-0011223344556677").exists());
+        let stopped = stop_all(&paths, Duration::from_secs(5));
+        assert!(
+            matches!(stopped.as_slice(), [(running, Stopped::Killed)] if running.pid == session.id()),
+            "{stopped:?}"
+        );
+        let status = session.wait().unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL));
+        assert_eq!(sweep_leftovers(&paths, Duration::ZERO, None).removed, 1, "and once it is gone, it is swept");
         std::fs::remove_dir_all(root).unwrap();
     }
 

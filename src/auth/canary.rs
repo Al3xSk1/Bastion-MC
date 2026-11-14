@@ -146,6 +146,13 @@ impl Snapshot {
         }
         out
     }
+
+    /// Capes `now` owns that this (pinned) state does not list: what an event, a challenge, a
+    /// code or a Bedrock sign-in added since. Never a difference (see [`Snapshot::differences`]),
+    /// but worth saying: it is how a cape claimed in Bedrock becomes visible on this side.
+    pub fn gained(&self, now: &Snapshot) -> Vec<String> {
+        now.capes_owned.iter().filter(|c| !self.capes_owned.contains(c)).cloned().collect()
+    }
 }
 
 fn file(paths: &Paths, account: &str) -> Result<PathBuf> {
@@ -178,6 +185,14 @@ pub fn load(paths: &Paths, account: &str) -> Result<Option<Record>> {
         return Err(damaged());
     }
     Ok(Some(record))
+}
+
+/// The capes `profile` owns that the pin does not list yet (none when nothing is pinned).
+pub fn gained(paths: &Paths, account: &str, profile: &Profile) -> Result<Vec<String>> {
+    Ok(match load(paths, account)? {
+        None => Vec::new(),
+        Some(record) => record.current.gained(&Snapshot::of(profile, 0)),
+    })
 }
 
 pub fn check(paths: &Paths, account: &str, profile: &Profile) -> Result<Check> {
@@ -369,6 +384,12 @@ mod tests {
             texture: "abcdef0123456789".into(),
         });
         assert_eq!(check(&paths, "default", &gained).unwrap(), Check::Unchanged);
+        // …but it is named, until it is pinned.
+        assert_eq!(super::gained(&paths, "default", &gained).unwrap(), ["15th Anniversary"]);
+        assert!(super::gained(&paths, "default", &profile()).unwrap().is_empty());
+        assert!(super::gained(&paths, "nobody", &gained).unwrap().is_empty(), "nothing pinned, nothing gained");
+        accept(&paths, "default", &gained).unwrap();
+        assert!(super::gained(&paths, "default", &gained).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

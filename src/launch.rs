@@ -2015,9 +2015,18 @@ pub fn canary_verdict(
             )))
         }
         canary::Check::Unchanged => {
-            // Records capes gained since; a no-op otherwise.
+            // Records capes gained since (an event's, a Bedrock sign-in's); a no-op otherwise.
+            let gained = canary::gained(paths, account, profile)?;
             canary::accept(paths, account, profile)?;
-            Ok(CanaryNote::routine("canary: profile unchanged since it was pinned (name, skin, cape)"))
+            Ok(CanaryNote::routine(match gained.first() {
+                None => "canary: profile unchanged since it was pinned (name, skin, cape)".to_string(),
+                Some(first) => format!(
+                    "canary: profile unchanged since it was pinned (name, skin, cape); new cape(s) on the account: \
+                     {} — pinned now (a cape the account gains is never an alarm). `bastion-mc cape set \"{first}\"` \
+                     wears it.",
+                    gained.join(", ")
+                ),
+            }))
         }
         canary::Check::Changed(differences) if cfg.auth.canary == CanaryMode::Enforce => {
             Err(canary::refusal(account, &differences))
@@ -2103,6 +2112,51 @@ mod canary_tests {
         let damaged = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap();
         assert!(damaged.notable && damaged.text.contains("damaged"), "{damaged:?}");
         assert_eq!(std::fs::read(&pin).unwrap(), b"{}", "the damaged record was replaced by a warning");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A cape the account gained (a Bedrock event's, for example) lets the launch go on, is
+    /// named once with the command that wears it, and is pinned: the next look is quiet again.
+    #[test]
+    fn a_gained_cape_is_named_pinned_and_never_stops_a_launch() {
+        use crate::auth::minecraft::Cape;
+        let root = std::env::temp_dir()
+            .join(format!("bastion-cvg-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        let paths = Paths {
+            config: root.join("config"),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            state: root.join("state"),
+            runtime: None,
+        };
+        paths.ensure().unwrap();
+        let cfg = Config::default();
+        canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().unwrap();
+
+        let mut after_event = profile("Notch");
+        after_event.capes.push(Cape {
+            id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            active: false,
+            alias: "Zombie Horse".into(),
+            texture: "abcdef0123456789".into(),
+        });
+        let note = canary_verdict(&paths, &cfg, "default", &after_event).unwrap().unwrap();
+        assert!(!note.notable, "good news, not a warning: {note:?}");
+        assert!(note.text.contains("new cape(s) on the account: Zombie Horse"), "{note:?}");
+        assert!(note.text.contains("bastion-mc cape set \"Zombie Horse\""), "{note:?}");
+        let again = canary_verdict(&paths, &cfg, "default", &after_event).unwrap().unwrap();
+        assert_eq!(again.text, "canary: profile unchanged since it was pinned (name, skin, cape)");
+        // Gaining a cape does not cover anything else: a rename that comes with one is refused.
+        let mut renamed = after_event.clone();
+        renamed.name = "Stolen".into();
+        renamed.capes.push(Cape {
+            id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            active: false,
+            alias: "Yearn".into(),
+            texture: "0123456789abcdef".into(),
+        });
+        let refusal = canary_verdict(&paths, &cfg, "default", &renamed).unwrap().unwrap_err().to_string();
+        assert!(refusal.contains("Notch → Stolen") && !refusal.contains("Yearn"), "{refusal}");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

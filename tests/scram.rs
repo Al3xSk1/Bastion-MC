@@ -95,6 +95,8 @@ fn scram_removes_every_credential_and_keeps_the_evidence() {
     assert!(text.contains("revoked NOTHING at Microsoft"));
     assert!(text.contains("not securely wiped"));
     assert!(text.contains("bastion-mc wiki scram"));
+    // Bedrock was never set up here: nothing is said about it.
+    assert!(!text.contains("Bedrock"), "{text}");
 
     // Evidence is not a credential, and stays.
     assert!(canary::load(&paths, &account).unwrap().is_some());
@@ -250,6 +252,33 @@ fn other_process() {
             println!("\nready");
             wait_for_a_line();
         }
+        // A Bedrock session's data directory, held by a process with a second thread whose id it
+        // leaves for the test (which marks the thread: a marker that cannot be stopped).
+        "bedrock-threaded" => {
+            let _session = bastion_mc::bedrock::policy::SessionDir::create(&paths, "bedrock-main").unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _thread = std::thread::spawn(move || {
+                // SAFETY: gettid takes no arguments and cannot fail.
+                tx.send(unsafe { libc::syscall(libc::SYS_gettid) }).unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(120));
+            });
+            let tid = rx.recv().unwrap();
+            let root = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+            std::fs::write(root.join("thread-id"), tid.to_string()).unwrap();
+            println!("\nready");
+            wait_for_a_line();
+        }
+        // A Bedrock session in progress: its marker, and its data directory (locked), into which
+        // the game wrote its sign-in.
+        "bedrock" | "bedrock-unmarked" => {
+            let _marker = (role == "bedrock").then(|| running::Marker::bedrock(&paths, "bedrock-main").unwrap());
+            let session = bastion_mc::bedrock::policy::SessionDir::create(&paths, "bedrock-main").unwrap();
+            std::fs::write(session.path().join("xal_tokens.json"), b"{\"refresh_token\":\"M.C5_BAY.STAND-IN\"}")
+                .unwrap();
+            std::fs::create_dir_all(session.path().join("games/com.mojang")).unwrap();
+            println!("\nready");
+            std::thread::sleep(std::time::Duration::from_secs(120));
+        }
         // A second login session: signs in again, then runs scram.
         "session-b" => {
             join_new_session_keyring();
@@ -355,6 +384,7 @@ fn a_launch_without_a_marker_is_reported_by_the_directory_it_holds() {
         text.contains("COULD NOT stop a launch that left no marker: the directory vanilla-00112233aabbccdd"),
         "{text}"
     );
+    assert!(!text.contains("no launch was in progress"), "not next to a launch that runs:\n{text}");
     assert!(
         paths.scratch().join("vanilla-00112233aabbccdd/saves/world/level.dat").exists(),
         "its files are not deleted"
@@ -492,6 +522,139 @@ fn a_token_that_only_another_login_session_holds_is_reported_not_passed_over() {
         eprintln!("note: the first session's token did not survive; nothing to report:\n{first_out}");
         assert!(second_out.contains("incomplete=false"), "{second_out}");
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------- Bedrock
+
+/// A world of a Bedrock instance, where the launch keeps them (a stand-in path: the layout is
+/// the launch package's). Scram must never touch it.
+fn bedrock_world(paths: &Paths) -> PathBuf {
+    let world = paths.instances().join("bedrock-main/data/games/com.mojang/minecraftWorlds/w1");
+    std::fs::create_dir_all(&world).unwrap();
+    std::fs::write(world.join("level.dat"), b"a world").unwrap();
+    world.join("level.dat")
+}
+
+/// A running Bedrock session is stopped like a Java launch, and what its game kept of the
+/// Xbox sign-in on disk goes with the credentials — after the launcher's own, before what Java
+/// games left — while Bedrock worlds stay, and the output says both.
+#[test]
+fn a_bedrock_session_is_stopped_and_its_sign_in_on_disk_goes_with_the_credentials() {
+    let (root, paths) = paths("bedrock");
+    let account = format!("scram-bedrock-{}", std::process::id());
+    let world = bedrock_world(&paths);
+    std::fs::create_dir_all(paths.vault()).unwrap();
+    std::fs::write(paths.vault().join("default.age"), b"age-encryption.org/v1 ...").unwrap();
+    std::fs::create_dir_all(paths.scratch().join("vanilla-0011001100110011/saves")).unwrap();
+    let mut session = other("bedrock", &root, &account);
+    let sessions = bastion_mc::bedrock::policy::sessions_dir(&paths);
+    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 1);
+    assert!(matches!(running::list(&paths)[0].activity, running::Activity::Bedrock(_)));
+
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(!report.incomplete, "{text}");
+    assert_eq!(signal_of(&mut session), Some(libc::SIGKILL), "the session was killed");
+    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 0, "its sign-in is still on disk:\n{text}");
+    assert_eq!(std::fs::read(&world).unwrap(), b"a world", "a Bedrock world was touched");
+
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no {needle:?} in:\n{text}"));
+    let killed = at("killed the Bedrock session of instance bedrock-main");
+    let vault = at("deleted the vault file \"default.age\"");
+    let bedrock = at("deleted what 1 Bedrock session(s) left on disk (bedrock-main-");
+    let swept = at("deleted 1 leftover game director(ies)");
+    assert!(killed < vault && vault < bedrock && bedrock < swept, "order:\n{text}");
+    assert!(text.contains("a Bedrock game holds your Xbox sign-in itself while it runs"), "{text}");
+    assert!(text.contains("Also kept: Bedrock worlds and the game's own settings"), "{text}");
+    assert!(!text.contains("COULD NOT"), "{text}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// What a crashed session left is removed. A session that runs without a marker — it was
+/// deleted, or the launcher was compromised — is not found by its marker; its directory is
+/// still locked, so it is neither deleted under it nor passed over: the result is incomplete
+/// and says to end it and to sign out everywhere. Once it is gone, scram completes.
+#[test]
+fn a_crashed_sessions_sign_in_is_removed_and_a_running_session_without_marker_is_reported() {
+    let (root, paths) = paths("bedrock-left");
+    let account = format!("scram-bedrock-left-{}", std::process::id());
+    let sessions = bastion_mc::bedrock::policy::sessions_dir(&paths);
+    let crashed = sessions.join("bedrock-main-0123456789abcdef");
+    std::fs::create_dir_all(crashed.join("games")).unwrap();
+    std::fs::write(crashed.join("xal_tokens.json"), b"{\"refresh_token\":\"left behind\"}").unwrap();
+    let mut session = other("bedrock-unmarked", &root, &account);
+    assert!(running::list(&paths).is_empty(), "no marker anywhere");
+
+    let report = scram::run_for(&paths, [account.clone()].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(!crashed.exists(), "the crashed session's sign-in is still there:\n{text}");
+    assert!(text.contains("deleted what 1 Bedrock session(s) left on disk (bedrock-main-0123456789abcdef)"), "{text}");
+    let about: Vec<&String> = report.lines.iter().filter(|l| l.contains("a running Bedrock session")).collect();
+    assert_eq!(about.len(), 1, "one line about it:\n{text}");
+    assert!(about[0].starts_with("COULD NOT delete the Bedrock session directory bedrock-main-"), "{text}");
+    assert!(about[0].contains("one that left no marker") && about[0].contains("sign out everywhere"), "{text}");
+    assert!(!text.contains("no launch was in progress"), "not next to a session that runs:\n{text}");
+    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 1, "nothing is deleted under a running session");
+
+    session.kill().unwrap();
+    let _ = session.wait();
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    assert!(!report.incomplete, "{}", report.lines.join("\n"));
+    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A Bedrock session that cannot be stopped is reported with what makes it different from a
+/// Java launch: its game holds the Xbox sign-in, so the line says to sign out everywhere; and
+/// its directory is not deleted under it, said once, as belonging to that session.
+#[test]
+fn a_bedrock_session_that_cannot_be_stopped_says_to_sign_out_everywhere() {
+    let (root, paths) = paths("bedrock-unstoppable");
+    let account = format!("scram-bedrock-unstoppable-{}", std::process::id());
+    let mut process = other("bedrock-threaded", &root, &account);
+    let tid: u32 = std::fs::read_to_string(root.join("thread-id")).unwrap().parse().unwrap();
+    // (See `a_command_that_cannot_be_stopped_is_reported_as_that_and_as_nothing_else`: a marker
+    // naming a thread passes as live, and no pidfd can be had for it.)
+    let stat = std::fs::read_to_string(format!("/proc/{tid}/stat")).unwrap();
+    let close = stat.rfind(')').unwrap();
+    let comm = &stat[stat.find('(').unwrap() + 1..close];
+    let start = stat[close + 1..].split_ascii_whitespace().nth(19).unwrap();
+    let markers = paths.cache.join("running");
+    std::fs::create_dir_all(&markers).unwrap();
+    std::fs::write(markers.join(tid.to_string()), format!("{start}\nbedrock:bedrock-main\n{comm}\n")).unwrap();
+
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    let text = report.lines.join("\n");
+    process.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    assert!(process.wait().unwrap().success(), "the process was never signalled");
+    assert!(report.incomplete, "{text}");
+    let stop: Vec<&String> = report.lines.iter().filter(|l| l.contains(&format!("(pid {tid})"))).collect();
+    assert_eq!(stop.len(), 1, "one line about stopping it:\n{text}");
+    assert!(stop[0].starts_with(&format!("COULD NOT stop the Bedrock session of instance bedrock-main (pid {tid})")));
+    assert!(stop[0].contains("sign out everywhere"), "{text}");
+    let dir: Vec<&String> =
+        report.lines.iter().filter(|l| l.contains("COULD NOT delete the Bedrock session")).collect();
+    assert_eq!(dir.len(), 1, "one line about its directory:\n{text}");
+    assert!(dir[0].contains("one this run could not stop"), "{text}");
+    assert!(!text.contains("started while this was running"), "{text}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A directory of Bedrock sessions that cannot be read is not taken for an empty one.
+#[test]
+fn an_unreadable_directory_of_bedrock_sessions_is_not_taken_for_an_empty_one() {
+    let (root, paths) = paths("bedrock-unreadable");
+    let sessions = bastion_mc::bedrock::policy::sessions_dir(&paths);
+    std::fs::create_dir_all(sessions.join("bedrock-main-0011223344556677")).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = scram::run_for(&paths, [format!("scram-bedrock-unreadable-{}", std::process::id())].into()).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(text.contains("COULD NOT read the directory of Bedrock sessions"), "{text}");
+    assert!(text.contains("was NOT deleted"), "{text}");
     std::fs::remove_dir_all(root).unwrap();
 }
 

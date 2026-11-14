@@ -520,6 +520,17 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
         r.warn("seccomp", "mode = \"log\": violations are only logged. Diagnostics only.");
     }
 
+    println!("bedrock");
+    for line in crate::bedrock::policy::doctor(paths, cfg) {
+        use crate::bedrock::policy::Level;
+        match line.level {
+            Level::Ok => r.ok(line.what, &line.detail),
+            Level::Info => r.info(line.what, &line.detail),
+            Level::Warn => r.warn(line.what, &line.detail),
+            Level::Fail => r.fail(line.what, &line.detail),
+        }
+    }
+
     println!("trust");
     match crate::net::tls::load_system_roots() {
         Ok(roots) => r.ok(

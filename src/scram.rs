@@ -13,7 +13,8 @@
 //!    vault, whichever store is configured now, because the configuration may have changed
 //!    since a token was stored. Then the remembered identities and the default-account
 //!    choice.
-//! 3. If a command appeared in the meantime, 1 and 2 are done once more.
+//! 3. If a command appeared in the meantime, 1 and 2 are done once more. Then what Bedrock
+//!    sessions left on disk, which can hold their game's sign-in (see below).
 //! 4. **Last**, and for a bounded time only: what killed or crashed launches left in the
 //!    cache (game directories). A game can leave millions of files there; no credential may
 //!    wait behind their deletion.
@@ -26,6 +27,19 @@
 //!
 //! What it deliberately keeps: the profile canary and the activity log. They hold no
 //! credential, and they are the evidence `export-proofs` hands to Mojang's support.
+//!
+//! **Bedrock.** A Bedrock session is stopped like a Java launch (its marker says what it is),
+//! but what it holds is different: its game holds the account's Xbox sign-in itself, in memory
+//! and in the session's data directory (`bedrock::policy`). That directory is therefore a
+//! credential here: what killed or crashed sessions left is deleted at the end of step 3 —
+//! after the launcher's own credentials, because how long it takes is the game's doing, and
+//! after the last round of stopping — for a bounded time, and confirmed by reading the
+//! directory again. A directory that a live process still holds belongs to a session that is
+//! running; it is not deleted under it, and the line says to end it and to sign out
+//! everywhere, because a running Bedrock game can use, and copy, the sign-in. Bedrock worlds
+//! and the game's own settings are kept, and the output says so: they are not meant to hold a
+//! credential (not checked against the real game, which never ran here). Deleting them is the
+//! user's decision, not an emergency measure.
 //!
 //! What it cannot do is said in its own output (and in `docs/SCRAM_RUNBOOK.md`): nothing is
 //! revoked at Microsoft, and deleting a file is not a secure wipe. And one thing it cannot
@@ -42,6 +56,7 @@ use std::{
 
 use crate::{
     auth::{identity, registry, store},
+    bedrock,
     error::Result,
     paths::{Paths, validate_id},
     running::{self, Activity, Stopped},
@@ -75,6 +90,8 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 const KEY_SETTLE: Duration = Duration::from_secs(2);
 /// Deleting what games left behind may take this long and no longer.
 const SWEEP_TIME: Duration = Duration::from_secs(15);
+/// Said when no marker names a running command.
+const NOTHING_RUNNING: &str = "no launch was in progress";
 
 /// Account labels with a live refresh-token key in the kernel's own list (`/proc/keys`
 /// text). A key that is revoked, dead or already invalidated (flags `R`, `D`, `i`) is on its
@@ -125,6 +142,7 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
 
     // 1. Everything that could still write a credential.
     let first = stop_commands(paths, &mut report);
+    let bedrock_session_stopped = first.iter().any(|running| matches!(running.activity, Activity::Bedrock(_)));
     match running::unreadable(paths) {
         // Then a command whose marker could not be read was not stopped, and "nothing was
         // running" is not known.
@@ -133,7 +151,7 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
              be read was not stopped. Look for one yourself (`pgrep -a bastion-mc`), end it (`kill -9 <pid>`), \
              and run `bastion-mc scram` again."
         )),
-        None if first.is_empty() => report.say("no launch was in progress"),
+        None if first.is_empty() => report.say(NOTHING_RUNNING),
         None => {}
     }
     // 2. The credentials.
@@ -154,6 +172,10 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
             ));
         }
     }
+    // The last credentials: what Bedrock sessions left on disk. After every launcher's own
+    // credentials (how long it takes is the game's doing) and after the last round of stopping
+    // (so that a session stopped in the second round is not reported as still running).
+    let mut unmarked_launch = remove_bedrock_sessions(paths, &mut report);
 
     // 4. Last: what the games left behind. Bounded, because its size is the game's choice.
     let sweep = running::sweep_leftovers(paths, Duration::ZERO, Some(Instant::now() + SWEEP_TIME));
@@ -175,6 +197,7 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
     // this command therefore did not find, and did not stop.
     if running::list(paths).is_empty() {
         for name in &sweep.in_use {
+            unmarked_launch = true;
             report.could_not(format!(
                 "stop a launch that left no marker: the directory {name} in {} is held by a running launcher. Its \
                  game — and a session token, if it was signed in — are still there. Find that process (`pgrep -a \
@@ -184,17 +207,32 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
         }
     }
 
-    // A second pass repeats what it still could not do; say each thing once.
+    // A second pass repeats what it still could not do; say each thing once. And "no launch
+    // was in progress", said from the markers, is not left standing next to a launch that runs
+    // without one.
     let mut seen = BTreeSet::new();
-    report.lines.retain(|line| seen.insert(line.clone()));
+    report.lines.retain(|line| seen.insert(line.clone()) && !(unmarked_launch && line == NOTHING_RUNNING));
 
+    let bedrock_here = bedrock_session_stopped || bedrock::policy::set_up(paths);
     report.say(String::new());
     report.say("This removed the copies on this machine. It revoked NOTHING at Microsoft or Mojang:");
     report.say("  - a refresh token that was copied earlier works until you \"sign out everywhere\";");
     report.say("  - a Minecraft session token that was already issued is valid for up to about 24 hours.");
+    if bedrock_here {
+        report.say("  - a Bedrock game holds your Xbox sign-in itself while it runs: whatever a hostile game or");
+        report.say("    server copied of it works until you sign out everywhere.");
+    }
     report.say("Deleted files are not securely wiped (SSDs and copy-on-write file systems keep old blocks);");
     report.say("an age vault file was encrypted, and its token is worthless once you sign out everywhere.");
     report.say("Kept on purpose: the profile canary history and the activity log (no credentials; evidence).");
+    if bedrock_here {
+        report.say(format!(
+            "Also kept: Bedrock worlds and the game's own settings (in each Bedrock instance under {}),",
+            paths.instances().display()
+        ));
+        report.say("and imported Bedrock versions. They are not meant to hold a sign-in (not checked against the");
+        report.say("real game); delete an instance yourself if you want its worlds gone too.");
+    }
     report.say("Next: `bastion-mc wiki scram` — the recovery steps, with verified links. If this machine may be");
     report.say("compromised, do those steps from another device.");
     Ok(report)
@@ -203,6 +241,7 @@ pub fn run_with(paths: &Paths, only: Option<BTreeSet<String>>, key_list: KeyList
 fn describe(activity: &Activity) -> String {
     match activity {
         Activity::Launch(instance) => format!("the launcher of instance {instance}"),
+        Activity::Bedrock(instance) => format!("the Bedrock session of instance {instance}"),
         Activity::Command(name) => format!("`bastion-mc {name}`"),
     }
 }
@@ -216,10 +255,19 @@ fn stop_commands(paths: &Paths, report: &mut Report) -> Vec<running::Running> {
             (Stopped::Killed, Activity::Launch(_)) => {
                 report.say(format!("killed {what} (pid {pid}): its session token is gone with it"))
             }
+            // Its game dies with it (parent-death signal, pid namespace); what the game kept of
+            // the sign-in on disk is the session's directory, deleted with the credentials.
+            (Stopped::Killed, Activity::Bedrock(_)) => report
+                .say(format!("killed {what} (pid {pid}): its game, and the Xbox sign-in in its memory, ended with it")),
             (Stopped::Killed, Activity::Command(_)) => {
                 report.say(format!("killed {what} (pid {pid}) before it could store a sign-in"))
             }
             (Stopped::AlreadyGone, _) => report.say(format!("{what} (pid {pid}) ended by itself")),
+            (Stopped::Failed(why), Activity::Bedrock(_)) => report.could_not(format!(
+                "stop {what} (pid {pid}): {why}. Its game holds your Xbox sign-in (a refresh token of your Microsoft \
+                 account) and can use it, and copy it, while it runs: end it yourself (`kill -9 {pid}`), run \
+                 `bastion-mc scram` again, and sign out everywhere at Microsoft (`bastion-mc wiki scram`)."
+            )),
             (Stopped::Failed(why), _) => report.could_not(format!(
                 "stop {what} (pid {pid}): {why}. While it runs it holds, or can store, a credential; end it yourself \
                  (`kill -9 {pid}`) and run `bastion-mc scram` again."
@@ -410,6 +458,89 @@ fn remove_credentials(paths: &Paths, only: Option<&BTreeSet<String>>, key_list: 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => report.could_not(format!("forget which account is the default: {e}")),
     }
+}
+
+/// The data directories that Bedrock sessions left behind: they can hold the game's Xbox
+/// sign-in (a refresh token of the Microsoft account), so they are removed as credentials, in
+/// every run (they are files under the directories this run was pointed at), for a bounded
+/// time, and confirmed by reading the directory again.
+///
+/// Returns whether a directory is held by a session that no marker names — a launch running
+/// without a marker, which this run did not find and did not stop.
+fn remove_bedrock_sessions(paths: &Paths, report: &mut Report) -> bool {
+    let base = bedrock::policy::sessions_dir(paths);
+    let done = match bedrock::policy::remove_leftovers(paths, Some(Instant::now() + SWEEP_TIME)) {
+        Ok(done) => done,
+        Err(e) => {
+            report.could_not(format!(
+                "read the directory of Bedrock sessions ({e}): what killed or crashed Bedrock sessions left there, \
+                 which can hold the game's Xbox sign-in, was NOT deleted"
+            ));
+            return false;
+        }
+    };
+    // A session that is still marked was listed, and could not be stopped (said above).
+    let marked = running::list(paths).iter().any(|running| matches!(running.activity, Activity::Bedrock(_)));
+    if !done.removed.is_empty() {
+        report.say(format!(
+            "deleted what {} Bedrock session(s) left on disk ({}): the game's data directory, which can hold its Xbox \
+             sign-in",
+            done.removed.len(),
+            done.removed.join(", ")
+        ));
+    }
+    for name in &done.in_use {
+        report.could_not(format!(
+            "delete the Bedrock session directory {name} in {}: a running Bedrock session still uses it ({}), and its \
+             game holds your Xbox sign-in, in memory too. End that launcher (`pgrep -a bastion-mc`, then `kill -9 \
+             <pid>`), run `bastion-mc scram` again, and sign out everywhere at Microsoft (`bastion-mc wiki scram`).",
+            base.display(),
+            if marked { "one this run could not stop" } else { "one that left no marker, so this run did not find it" }
+        ));
+    }
+    for failure in &done.failed {
+        report.could_not(format!(
+            "delete what a Bedrock session left in {} ({failure}). It can hold the game's Xbox sign-in: run \
+             `bastion-mc scram` again, and if it stays, delete that directory yourself.",
+            base.display()
+        ));
+    }
+    // Confirmed, not assumed from the removals: the directory is read again, and whatever is
+    // there that was not reported above (passed over, or new since) is said.
+    let reported = |name: &str| {
+        done.in_use.iter().any(|n| n == name) || done.failed.iter().any(|f| f.starts_with(&format!("{name}: ")))
+    };
+    let unconfirmed = |e: std::io::Error| {
+        format!(
+            "read the directory of Bedrock sessions {} again ({e}): that no Bedrock sign-in is left there is not \
+             confirmed",
+            base.display()
+        )
+    };
+    match std::fs::read_dir(&base) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let name = util::sanitize_line(entry.file_name().as_encoded_bytes(), 120);
+                        if !reported(&name) {
+                            report.could_not(format!(
+                                "clear the directory of Bedrock sessions: {name:?} in {} is still there",
+                                base.display()
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        report.could_not(unconfirmed(e));
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => report.could_not(unconfirmed(e)),
+    }
+    !marked && !done.in_use.is_empty()
 }
 
 /// Is a live Spotify refresh-token key in the kernel's list (`/proc/keys` text)?
