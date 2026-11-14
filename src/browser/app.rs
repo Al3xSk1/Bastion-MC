@@ -13,7 +13,7 @@ use super::{
 use crate::phone::{Command, Outbox, PhoneApp, VerbLimit};
 
 /// How far one `scroll` may move, either way, in pixels.
-pub const MAX_SCROLL: i32 = 5000;
+pub const MAX_SCROLL: i32 = 10_000;
 
 /// The verbs and how often each may be used.
 pub const LIMITS: &[VerbLimit] = &[
@@ -104,7 +104,7 @@ impl BrowserCommand {
                 let dx: i32 = number(dx).ok_or("scroll: two numbers")?;
                 let dy: i32 = number(dy).ok_or("scroll: two numbers")?;
                 if dx.abs() > MAX_SCROLL || dy.abs() > MAX_SCROLL {
-                    return Err("scroll: at most 5000 pixels at once");
+                    return Err("scroll: at most 10000 pixels at once");
                 }
                 BrowserCommand::Scroll(dx, dy)
             }

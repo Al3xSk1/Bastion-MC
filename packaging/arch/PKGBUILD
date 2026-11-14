@@ -160,13 +160,17 @@ package_bastion-mc() {
     'jdk25-openjdk: Minecraft 26.x'
     'age: encrypted refresh-token vault (hardware keys via age plugins)'
     'gamescope: isolate the game from the X11 session (nested compositor)'
+    'firefox: the browser of the in-game phone ([browser])'
+    'xdg-dbus-proxy: Spotify desktop app control from the phone ([spotify])'
+    'ffmpeg: clips of the game ([clips])'
   )
   cd "$_srcdir"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc"
   # The documents as a tree, so that the README's relative links work where it is installed.
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/" docs/README.md docs/THREAT_MODEL.md \
-    docs/TOKEN_INJECTION.md docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md docs/COMPANION.md docs/MODS.md
+    docs/TOKEN_INJECTION.md docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md docs/COMPANION.md docs/MODS.md \
+    docs/PHONE.md
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/images/" docs/images/*.png
   install -Dm0644 examples/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

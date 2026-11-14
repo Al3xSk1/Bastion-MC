@@ -298,8 +298,9 @@ pub const LIMITS: &[VerbLimit] = &[
     VerbLimit { verb: "toggle", per_minute: 60, burst: 10 },
     VerbLimit { verb: "next", per_minute: 60, burst: 10 },
     VerbLimit { verb: "previous", per_minute: 60, burst: 10 },
-    VerbLimit { verb: "seek", per_minute: 60, burst: 10 },
-    VerbLimit { verb: "volume", per_minute: 120, burst: 20 },
+    // The phone sends up to four of these a second while a slider is dragged.
+    VerbLimit { verb: "seek", per_minute: 240, burst: 40 },
+    VerbLimit { verb: "volume", per_minute: 240, burst: 40 },
     VerbLimit { verb: "shuffle", per_minute: 20, burst: 5 },
     VerbLimit { verb: "repeat", per_minute: 20, burst: 5 },
     VerbLimit { verb: "open", per_minute: 20, burst: 5 },

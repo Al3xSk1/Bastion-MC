@@ -435,7 +435,9 @@ impl Plan {
                 JAR.len(),
                 injection.features.join(", "),
                 match &injection.endpoint {
-                    Ok(_) => "channel to the launcher: on (what arrives is logged, never acted on)".to_string(),
+                    Ok(_) => "channel to the launcher: on (diagnostics are logged; with the phone, its commands go to \
+                              the launcher's dispatcher, which allows each app only its own commands and limits)"
+                        .to_string(),
                     Err(why) => format!("no channel to the launcher ({why})"),
                 },
                 match &injection.untested {

@@ -1040,7 +1040,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             paths,
             program: &opts.program,
             bus_address: std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
-            offline: opts.burner,
+            // No network for the Web API or album art where the instance has none.
+            offline: opts.burner || mode == NetworkMode::None,
             log: launch_log.clone(),
         })
         .await
@@ -1101,6 +1102,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     } else if !phone_wanted {
         if cfg.browser.enabled {
             say("browser: not started — no phone in this launch (the companion is not added to this instance)");
+        }
+        None
+    } else if mode == NetworkMode::None {
+        if cfg.browser.enabled {
+            say("browser: not started — this instance's network mode is \"none\"");
         }
         None
     } else {
@@ -1308,7 +1314,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             (None, true, Some((number, socket))) => crate::clips::GameDisplay::X11 { socket, number },
             _ => crate::clips::GameDisplay::Wayland,
         };
+        if phone_wanted && opts.burner && cfg.clips.enabled {
+            say("clips: not recording — a burner session keeps nothing");
+        }
         if phone_wanted
+            && !opts.burner
             && let Some(service) = crate::clips::prepare(crate::clips::Setup {
                 cfg,
                 paths,
