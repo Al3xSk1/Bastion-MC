@@ -516,7 +516,7 @@ nothing was typed. Those runs covered all three of the launcher's display paths 
 compositor, the game as a direct X11 client, a Wayland security context on a headless sway);
 the fourth round's ran through the nested compositor only.
 
-**On the merged tree** (commit `09a62c1`, 2026-11-14): the real-game test again on 1.20.1,
+**On the merged tree** (commit `c6f25a8`, 2026-11-14): the real-game test again on 1.20.1,
 1.21.4 and 26.3 (26.3 in world mode), passed; and one end-to-end run with the real services
 behind the phone on 26.3 (§7 E32).
 

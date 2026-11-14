@@ -8,14 +8,18 @@ The fourth round — the in-game phone and its services (Spotify, the browser wi
 clips, Realms, settings sync), the redone home screen and dark menus, and the companion mod
 on every Fabric release from 1.20.1 to 26.3 — was built by five engineers in separate
 working copies against one contract (`docs/notes/round4-contract.md`) and is **merged**
-(merge commits `148fde2`, `5fd61be`, `a58a510`, `e793ebc`; integration commits `479196c`,
-`51a54db`, `09a62c1`; then the documents). The third round — the "workshop HUD" front end,
+(commits `a671183`, `afd43a9`, `18d3911`, `06e6ff0`; integration commits `d3f6931`,
+`a533e43`, `c6f25a8`; then the documents). The third round — the "workshop HUD" front end,
 the first-party companion Fabric mod, the UDP relay for voice chat with the fix of review
 finding B-M3, verified mod installs from Modrinth, and the fixes for the two independent
-reviews — was merged before it (merge commits `3025219`, `aef85df`, `263498c`, `2dd827a`,
-`35d57cd`; integration fixes `1dbb587`, `c383196`). The project website (`site/`, published
+reviews — was merged before it (commits `db878be`, `c65762d`, `b6bc924`, `6d76956`,
+`74a1101`; integration fixes `edc7efc`, `785c2a6`). The project website (`site/`, published
 to GitHub Pages by `.github/workflows/pages.yml`) and continuous integration
 (`.github/workflows/ci.yml`) were merged after the fourth round.
+
+Commit references are to this repository's history. Rounds 3 and 4 were built in separate
+working copies and are committed here one step per merge or fix; each such commit's message
+lists the commits of the working copy it contains.
 
 How to read this file: **Open** is what is left and why; **Blocked on you** needs
 something only you have; **Done in the fourth round**, **Done in the third round** and
@@ -31,7 +35,7 @@ warnings, `cargo test --workspace` 768 passed, 0 failed; with `BASTION_NET_TESTS
 BASTION_X11_TESTS=1 BASTION_BROWSER_TESTS=1` 768 passed; the nested-compositor suite 4/4
 with the clipboard test; the Wayland suite 2/2; `tests/nested_game.rs` (vanilla 26.3);
 `tests/companion_game.rs` on 26.3 (in the demo world), 1.21.4 and 1.20.1;
-`tests/clips_game.rs` 2/2; `tests/browser_game.rs` (after `2660a67`); demo launches of the
+`tests/clips_game.rs` 2/2; `tests/browser_game.rs` (after `de5fb18`); demo launches of the
 voice-chat and catalog instances and of a vanilla 1.21.4 instance (the bootstrap fix: the
 same instance did not start with the third round's binary); `cargo deny check` ok. The phone
 end to end with the real services (not the demo), in the real game (26.3, demo mode): the
@@ -525,7 +529,7 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
   carrying a field of view changed in the game (`docs/notes/realms-sync-evidence/`). Its
   branch: `cargo test --workspace` 633 passed.
 
-### Integration (`479196c`, `51a54db`, `09a62c1`, and the documents)
+### Integration (`d3f6931`, `a533e43`, `c6f25a8`, and the documents)
 - One list of phone services in `src/launch.rs`: Spotify, clips and the browser are started
   only when the launch's companion has the phone on (a phone to serve); settings sync is
   prepared for every launch but a burner session, and Realms only where the launch has the
@@ -541,8 +545,8 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
   TOTP secret from the keyring, confirmed against the kernel's key list as for the Spotify
   token, which it already removed. Test: `tests/scram.rs`,
   `scram_deletes_the_browsers_profile_unless_a_browser_holds_it`.
-- Fixes found while the documents were written and reviewed (`2660a67`, `7dec17f`,
-  `cc65c6a`, `bc3bded`): the phone's services start only when the companion's phone is on,
+- Fixes found while the documents were written and reviewed (`de5fb18`, `8ad1e26`,
+  `5dc136d`, `f6dcc1b`): the phone's services start only when the companion's phone is on,
   not whenever it has its channel; a Realms join in a launch without the phone is refused at
   once, with the reason, instead of waiting 120 s for an approval nothing could give; in
   network mode `none` no service goes online (no browser, no Spotify Web API or covers);
@@ -556,15 +560,15 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
   `COMPANION.md`, `MODS.md` and the README's images, and names firefox, xdg-dbus-proxy and
   ffmpeg as optional dependencies; the header of `tests/jvm.rs` names the bootstrap's new
   class.
-- The website (merged `694c81c`, brought up to rounds 3 and 4 in `7c839d4`: the three
+- The website (`cce21f4`, brought up to rounds 3 and 4 before it was committed: the three
   hand-written pages rewritten where the facts had changed, `docs/PHONE.md`,
   `docs/COMPANION.md` and `docs/MODS.md` rendered, the threat model's table repairs retired,
   HTML comments in documents left out as GitHub leaves them out). What its review found in
-  the documents was fixed in `28c0c57`: Realms is brokered only in a launch with the phone,
+  the documents was fixed in `42b879e`: Realms is brokered only in a launch with the phone,
   burner sessions record no clips, DNS is UDP too (§5 item 7), `audio = "alsa"` gives the
   game `/dev/snd` and its device ioctls (D4, the §3 drawing, `examples/config.toml`), the
   front end holds no token, and its scram line names everything scram removes.
-- CI (`9c99344`): `.github/workflows/ci.yml` and the manual `integration.yml` (see Open).
+- CI (`e0b93fe`): `.github/workflows/ci.yml` and the manual `integration.yml` (see Open).
   Simulating its test job found that `check()` needs fonts: `PKGBUILD` has
   `checkdepends=('adwaita-fonts')` now (without a monospace face two layout tests fail, and a
   clean chroot has no fonts at all).
@@ -653,7 +657,7 @@ is right.
   — which found that "open" meant "not yet closed by both sides" (fixed: the first hang-up
   ends it) —, and Simple Voice Chat loading with its native libraries.
 
-### Integration (`1dbb587`, `c383196`, `c588bea`, and the commit after the documents)
+### Integration (`edc7efc`, `785c2a6`, `70357c6`, and the commit after the documents)
 - `profile add` says, after adding Simple Voice Chat, what becomes of its UDP in the
   instance's network mode: in `filtered` a server rule must name the port, datagrams go
   only while a game connection to that server is open and only to its address (so a
