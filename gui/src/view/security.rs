@@ -270,8 +270,8 @@ pub fn open_id(index: usize) -> Id {
 
 fn links<'a>() -> Element<'a, Message> {
     let mut list = column![kit::small(
-        "The only pages this window will open, taken from Microsoft's own help articles. \
-         Each opens in your browser; copy the address instead to use it on another device."
+        "These pages come from Microsoft's own help articles; besides them the window opens only the \
+         sign-in pages a sign-in asks for. Each opens in your browser; copy the address to use another device."
     )]
     .spacing(theme::S3);
     for (index, (link, what)) in runbook::LINKS.iter().enumerate() {
