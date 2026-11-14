@@ -1,7 +1,8 @@
 # Minecraft: Bedrock Edition
 
-<!-- Written against docs/notes/round5-contract.md before the five packages were merged. The
-statements to check against the merged code are listed in docs/notes/bedrock-risk.md, section 5. -->
+<!-- Written by the risk package against docs/notes/round5-contract.md; checked against the merged
+code and brought up to date by the integrator (docs/notes/bedrock-integration.md, which answers the
+re-check list of docs/notes/bedrock-risk.md, section 5). -->
 
 bastion-mc can run Minecraft: Bedrock Edition: the Android build of the game ("Minecraft for
 Android"), started by the `mcpelauncher-client` program you installed, inside bastion-mc's
@@ -104,20 +105,29 @@ Versions: mcpelauncher 1.8.7 knew x86_64 builds up to 1.26.62.1 (release) and 1.
 ## Importing a version
 
 ```sh
+bastion-mc bedrock client                     # the installed client bastion-mc would run, and why (or why not)
+bastion-mc bedrock versions                   # what is imported, and what mcpelauncher-ui has that is not
 bastion-mc bedrock import ~/.local/share/mcpelauncher/versions/<version>
-bastion-mc bedrock versions                   # what is imported, by id
+bastion-mc bedrock versions --verify          # check every file again, as each launch does
 bastion-mc bedrock remove <id>
 ```
 
 With the Flatpak build of `mcpelauncher-ui` the versions are under
-`~/.var/app/io.mrarm.mcpelauncher/data/mcpelauncher/versions/`.
+`~/.var/app/io.mrarm.mcpelauncher/data/mcpelauncher/versions/` (`bedrock versions` lists both
+places).
 
 Import copies one version directory into bastion-mc's store
-(`~/.local/share/bastion-mc/bedrock/versions/<id>/`) and records the SHA-256 of every file.
-It refuses symbolic links, hard links, device files, paths that lead outside the directory and
-trees that are too large, and it accepts only a version directory, never an APK. Each launch
-checks the version against that record again, from the very directory it then gives the game,
-read-only.
+(`~/.local/share/bastion-mc/bedrock/versions/<id>/`), and only what the client reads:
+`AndroidManifest.xml`, `lib/x86_64/` and `assets/`. It takes x86_64 builds of
+`com.mojang.minecraftpe` only. It refuses symbolic links, hard links, device files, names that are
+not plain, and trees beyond its limits (8 GiB, 2 GiB for one file, 200,000 entries, 24 levels below
+`assets/`, 64 libraries — guesses, since no real version could be measured), and it accepts only a
+version directory, never an APK. It records the SHA-256 of every file, last, and leaves the copy
+read-only. The version is named by its version name (`1.26.62.1`), or `--id`; an imported version
+is never replaced (remove it first). Each launch checks the version against that record again, from
+the very directory it then gives the game, read-only; a changed, added or missing file stops the
+launch with "INTEGRITY VIOLATION" and its name. `bedrock remove` is refused while a session uses
+the version.
 
 ## Creating an instance
 
@@ -130,12 +140,21 @@ The instance's `instance.toml`:
 
 ```toml
 kind = "bedrock"
+# width = 1280          # the window the client opens with, both or neither
+# height = 720
+
 [bedrock]
-version = "1.26.62.1"
-servers = [{ host = "play.example.org", port = 19132 }]
+version = "1.26.62.1"   # an id in the store (`bastion-mc bedrock versions`)
+servers = [{ host = "play.example.org", port = 19132 }]   # added to [bedrock] servers
+
+[network]
+# mode = "filtered"     # or "none": offline single-player, nothing reachable ("open" is refused)
 ```
 
-Java-only commands (`install`, `profile …`) refuse a Bedrock instance and say so.
+Java keys mean nothing in a Bedrock instance and are refused with the reason (`minecraft`,
+`memory_mb` — the session's memory ceiling is `[sandbox] memory_max_mb` —, `[network] servers`,
+`[companion]`). Java-only commands (`install`, `profile …`, `pack …`) refuse a Bedrock instance
+and say so. One session per instance runs at a time.
 `bastion-mc doctor` has a Bedrock section: whether the licence substitution is accepted,
 whether the client was found and is root-owned, which versions are imported, and whether a
 session that did not end properly left its sign-in behind.
@@ -146,17 +165,22 @@ session that did not end properly left its sign-in behind.
 
 * The game runs in the sandbox Java games run in: its own namespaces, an empty file system with
   `/usr` read-only, no home directory, none of your files; it may execute only the client, its
-  libraries, the dynamic loader and bastion-mc's sign-in stub; a system-call allowlist; your
-  desktop only through the
-  game's own display connection (the Wayland security context, or a nested gamescope on X11);
-  sound as for Java; memory and process limits. The client's mod loader gets no mods
-  directory: native mods are not supported.
-* The network is always filtered: the game reaches Microsoft's and Mojang's Bedrock services by
-  name, the Bedrock servers you listed, and nothing else (below).
+  libraries, the dynamic loader and bastion-mc's sign-in stub; a system-call allowlist of the
+  client's own (with the same tripwire as Java's; new namespaces and the kernel keyrings are always
+  refused); your desktop only through the game's own display connection (the Wayland security
+  context, or a nested gamescope on X11); sound as for Java; memory and process limits. The
+  client's mod loader finds an empty, read-only mods directory: native mods are not supported.
+* The network is filtered (the default): the game reaches Microsoft's and Mojang's Bedrock
+  services by name, the Bedrock servers you listed, and nothing else (below). With
+  `[network] mode = "none"` in the instance nothing is reachable (single-player, no sign-in);
+  `"open"` is refused for Bedrock.
 * No Java credential exists in a Bedrock session: the Java sign-in is skipped, and the sandbox
-  can reach neither bastion-mc's token store nor the kernel keyring.
-* When the session ends, the game's data directory is deleted, with the sign-in in it. Your
-  worlds and the game's own settings are kept (`persist_worlds = true`, the default).
+  can reach neither bastion-mc's token store nor the kernel keyring. `launch --demo` therefore
+  changes nothing for Bedrock (the front end does not pass it); `--burner`, `--join` and
+  `--repair` are Java features and are refused with what to do instead.
+* The game's data directory belongs to this session alone: a fresh directory in bastion-mc's cache,
+  deleted when the session ends, with the sign-in in it. Your worlds and the game's own settings
+  are kept (`persist_worlds = true`, the default; see [Worlds](#worlds)).
 
 ### Signing in, every session
 
@@ -165,23 +189,35 @@ Microsoft account (servers, Realms, events, capes) starts with a sign-in. Single
 work without one.
 
 When the game wants you to sign in, bastion-mc shows Microsoft's sign-in page **outside the
-game**: in your browser, which the front end opens for you, or at an address the launcher
-prints on the terminal (and, if the launch could start it, in a window of bastion-mc's own
-sandboxed browser). Sign in there, with two-factor steps as usual. Never type your password into
-the game: it never asks for it.
+game**: the front end's *Microsoft sign-in for Bedrock* panel opens it in your browser (*Open
+sign-in page*; only `https://login.live.com/…` is ever offered), and a terminal launch prints its
+address on a line of its own. Sign in there, with two-factor steps or a passkey as usual. Never
+type your password into the game: it never asks for it.
 
-If the page was in your own browser: when you are signed in, the browser ends at an address
-that starts with
+At the end, Microsoft sends your browser to an address that starts with
 
 ```
 ms-xal-0000000048183522://auth?code=
 ```
 
-and it says it cannot open it. That is expected: no program on your computer handles that
-address, and none should. Copy the whole address from the address bar and paste it where the
-launcher asks: at its prompt on the terminal, or in the front end's sign-in prompt. The game
-gets that address and nothing else. The code in it is useless to anyone without the secret the
-game made for this sign-in.
+— an address for the game, which your browser cannot open. **Your browser may not show it at
+all**: Firefox (checked with version 159) stays on the page before, with nothing in the address bar
+and nothing in the console. To get it:
+
+1. Before the last step of the sign-in (or before you start it), open the browser's developer
+   tools with **F12** and choose the **Network** tab.
+2. Sign in. The last request in the list has failed (in Firefox its transfer column shows an
+   error beginning `NS_ERROR_UNKNOWN`; its status is 302). Select it.
+3. In its **response headers**, the `Location` header holds the address. Copy its value.
+4. Paste it into the field of the front end's panel and press *Send* (or Enter) — or, on a
+   terminal launch, paste it into the terminal and press Enter.
+
+bastion-mc checks it (it must be the game's address, carry a sign-in code, and belong to *this*
+sign-in) and hands the game only the code and the sign-in's state, nothing else you pasted. The
+prompt says why an address was not accepted; you have 10 tries and 15 minutes. *Cancel* (or typing
+`cancel` on the terminal) refuses the sign-in, and the game is told that it failed. If you did not
+press *Sign in* in the game, cancel. One prompt at a time, at most 6 per session, and after one
+ends without an address the next waits 10 seconds: a game cannot keep a prompt in front of you.
 
 What bastion-mc checks: it shows only Microsoft's sign-in page for Minecraft for Android's own
 client (`login.live.com`, client id `0000000048183522`), and returns only an address of that
@@ -199,10 +235,16 @@ The game can reach the Bedrock servers you list, and no others:
 servers = [{ host = "play.example.org", port = 19132 }]   # every Bedrock instance
 ```
 
-An instance adds its own in its `instance.toml` (above). The port defaults to 19132. When the
-game tries a server that is not listed, the launcher says so once, with the name and port:
-add it and start again. LAN games and friends' worlds (they use NetherNet, WebRTC) are refused
-in this version, with a message.
+An instance adds its own in its `instance.toml` (above). The port defaults to 19132; ports from
+1024 up; at most 64 servers and 16 different ports in all; an IPv4 address works too, an IPv6
+address does not (use a name: it may resolve to IPv6). The launcher looks each name up once per
+session, and the game's datagrams go to the address it found and nowhere else. When the game
+looks up a name that is not listed, the launcher says so once, with what to add
+(`add { host = "…" } … to [bedrock] servers`): add it and start again. A server typed into the
+game as an IP address that is not listed never reaches the launcher (the game's datagrams have
+no route), so there is nothing to say about it: list it. Servers on a private or loopback address
+(a LAN server, one on this computer), LAN games and friends' worlds (they use NetherNet, WebRTC)
+are refused in this version, with a message.
 
 ### Realms and event servers
 
@@ -216,10 +258,15 @@ address. Off by default:
 approve = "code"   # or "totp"; "off" (the default) refuses Realms and event-server joins
 ```
 
-With `"code"` the launcher shows a code and waits for you to type it at its prompt or in the
-front end; with `"totp"`, the code of your authenticator app (`bastion-mc realms totp-setup`).
-If you did not ask to join, do nothing: the join is refused. A Realm that uses NetherNet is
-refused, with a message.
+The launcher shows the Realm (or event) and the server's address with a six-digit code: approve
+in the front end's Realms panel (*Approve join*, which sends the code shown; *Refuse*), or type
+the code on the terminal of a terminal launch and press Enter (`cancel` refuses; when a sign-in
+waits at the same time, start the line with `realms `). There is no phone in a Bedrock session:
+the code is typed outside the game, where the game cannot type. `"totp"` acts as `"code"` in a
+Bedrock session — the TOTP secret is in bastion-mc's token store, which a Bedrock session never
+opens — and the launch log says so. If you did not ask to join, do nothing: the join is refused.
+Approved, the game gets a one-time pass that leads to that one server (one join, at most four
+connections within 30 seconds). A Realm that uses NetherNet is refused, with a message.
 
 ### Telemetry
 
@@ -231,11 +278,20 @@ Microsoft's telemetry hosts are reachable by default, because whether a challeng
 telemetry = false   # the game cannot reach Microsoft's telemetry; a challenge cape may then not be granted
 ```
 
+With `false` the relay refuses the telemetry hosts, and the client is also told to keep the
+game's telemetry from starting (`MCPELAUNCHER_DISABLE_TELEMETRY=1`, its own switch).
+
 ### Worlds
 
-Worlds and the game's own settings (`games/com.mojang`) are kept in the instance between
-sessions, and `scram` keeps them too: they are not meant to hold a credential.
-`persist_worlds = false` deletes them with each session.
+Kept in the instance's `bedrock-data/` between sessions, and nothing else: the worlds
+(`games/com.mojang/minecraftWorlds/`), the game's own settings (`games/com.mojang/minecraftpe/`,
+with `options.txt`), and the client's settings file (`mcpelauncher-client-settings.txt`: window,
+scale, overlay switches — none of its keys names a file or a program). They have mcpelauncher's own
+layout, so worlds can be copied in and out there; anything else copied into `bedrock-data/` is not
+shown to the game. Everything else the game writes — global resource packs, skin packs and world
+templates included — ends with the session. `scram` keeps the worlds too: they are not meant to
+hold a credential (not checked against the real game). `persist_worlds = false` keeps nothing at
+all: every session starts empty.
 
 ## Capes: from Bedrock to your Java profile
 
@@ -362,10 +418,14 @@ credential:
 * **A Realm or event server is refused**: `[realms] approve` is `"off"`, or the join was not
   approved in time, or the Realm uses NetherNet.
 * **LAN games or a friend's world**: not supported in this version.
-* **The game ends at once, with a message about the system-call filter**: the client made a
-  system call that its allowlist does not have. Run it once with `[bedrock] seccomp = "log"`:
-  the filter then reports instead of stopping the game. Set it back to `"enforce"` afterwards,
-  and report the calls the log names.
+* **The game ends at once, or a feature fails, and the system-call filter is the suspect**: the
+  client's allowlist was derived from its source code, not measured on the real client. Run one
+  session with `[bedrock] seccomp = "log"`: calls outside the allowlist are then let through and
+  logged by the kernel (`journalctl -k -g 'type=1326'`; `syscall=` is the x86-64 number); the
+  tripwire and the refusal of namespaces, keyrings, io_uring, userfaultfd and perf events still
+  hold. Put what it names into `[bedrock] extra_syscalls = ["name", …]`, set `seccomp` back to
+  `"enforce"`, and report the calls. (A kill by the tripwire, SIGSYS, is not this: the launch log
+  says to treat the server and content as hostile.)
 * **`doctor` warns about a leftover session directory**: a session did not end properly. The
   next Bedrock start deletes it, and so does `bastion-mc scram`.
 * **Xbox invitations do not arrive, and friends cannot join your world**: known limits of
@@ -381,9 +441,12 @@ of this ran with the real game:
 | Part | Verified against | Not run |
 |---|---|---|
 | The licence gate, `doctor`'s Bedrock section | unit tests; `doctor` in isolated directories with a stand-in store and a stand-in leftover session | the client's discovery against the real package |
+| Finding the client, importing and checking versions | unit tests on fake install trees and synthetic versions (links, devices, limits, tampering); the `bedrock` commands end to end with the real binary; `/usr/bin/true` standing in for a root-owned client | a real `mcpelauncher-linux` package, a real downloaded version |
+| A whole session | the launch end to end with a stand-in client (a program the test compiles, started as the client in the real sandbox): its arguments, the read-only version opened from the store, the data split (a world kept, tokens and a planted library gone, a crashed session's directory deleted at the next start), the stub over the installed webview, no home, no keyring, no namespaces, HTTPS through the relay with the system's libcurl, the launcher confining itself | the real client and game, a display, sound, a GPU, resource limits |
+| The sign-in | the stand-in running `mcpelauncher-webview` inside the sandbox under the client's own filters: the stub reached the launcher, the page was offered, another sign-in's address was refused, the right one came back to the stand-in rebuilt; cancelling; a wrong state; the front end's prompt in its emulator; Firefox 159 against a stand-in redirect page (where the final address shows) | Microsoft's real sign-in, two-factor, passkeys, the game's sign-in library accepting the address |
+| The network | a sandboxed client (Python, the system's curl) with the real relay: RakNet to stand-in servers, refusals, a Realms and an event-server join through stand-in services over TLS approved through the trusted input, the per-launch authority accepted by curl, the relay working after the launcher confined itself | a real Bedrock server, Realm or event server; the game's own TLS stack |
 | `scram` for Bedrock | tests with stand-in sessions (processes that hold a session directory, with and without a marker, one that cannot be stopped) and stand-in token files | a real game's token files |
 | The canary and new capes | unit tests with stand-in profiles | a real profile with a cape claimed in Bedrock |
-| The sandbox, the network filter, the sign-in, import | the other work packages' tests, against a stand-in client, stand-in servers and a stand-in sign-in page (their notes) | the real client and game, Microsoft's sign-in, a real server, Realm or event |
 
 ## What is blocked on you
 

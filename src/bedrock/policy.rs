@@ -416,7 +416,8 @@ pub fn doctor(paths: &Paths, cfg: &Config) -> Vec<Line> {
         line(
             Level::Info,
             "Microsoft telemetry",
-            "not reachable ([bedrock] telemetry = false): a challenge cape may then not be granted (not known)",
+            "not reachable ([bedrock] telemetry = false), and the client is told to keep the game's telemetry from \
+             starting: a challenge cape may then not be granted (not known)",
         )
     });
     lines.push(if bedrock.persist_worlds {
@@ -432,6 +433,13 @@ pub fn doctor(paths: &Paths, cfg: &Config) -> Vec<Line> {
         crate::realms::Approve::Off => {
             line(Level::Info, "Realms and event servers", "joins are refused ([realms] approve = \"off\")")
         }
+        crate::realms::Approve::Totp => line(
+            Level::Info,
+            "Realms and event servers",
+            "each join waits for your approval outside the game ([realms] approve = \"totp\"; in a Bedrock session \
+             with the launcher's six-digit code instead of the authenticator's: the TOTP secret is in the token \
+             store, which a Bedrock session never opens)",
+        ),
         mode => line(
             Level::Info,
             "Realms and event servers",
