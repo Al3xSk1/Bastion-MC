@@ -14,10 +14,11 @@ bastion-mc is pre-release.
 - [MODS.md](MODS.md) — signed profiles, `profile add` and `profile check` against Modrinth, the aliases, ViaFabric, Simple Voice Chat and the server rule that lets its UDP through; for anyone who plays with mods.
 - [COMPANION.md](COMPANION.md) — the launcher's own Fabric mod (the Minecraft versions it runs on; zoom, HUD read-out, fullbright): settings, when it is added, its channel to the launcher, how it is built, what was verified; for Fabric players and for anyone reviewing what the launcher adds to the game.
 - [PHONE.md](PHONE.md) — the in-game phone and its services (Spotify, Discord and the browser, clips, Realms, settings sync): what each app does, its settings and limits, and what the game can see; for anyone who turns one of them on.
+- [BEDROCK.md](BEDROCK.md) — Minecraft: Bedrock Edition, the Android build in bastion-mc's sandbox: what it is and is not (no Windows edition), what you need (the AUR packages, a Google Play purchase), the licence substitution, importing a version, signing in every session (the desktop's handler, pasting as the fallback), servers, Realms and event servers, capes from Bedrock to Java, and what bastion-mc cannot protect (the game holds your Xbox sign-in); for anyone who wants to play Bedrock under it.
 
 ## Engineering notes (`notes/`)
 
-Each work package of the review round, the third round and the fourth round left a notes
+Each work package of the review round and of the third, fourth and fifth rounds left a notes
 file — its deliverable: user documentation, threat-model rows, what was verified and how,
 what is open — and a hand-over log (`*-progress.md`) with the state of the work, the runs and
 what was learned. They describe each branch as it was handed in; where a note and the code
@@ -51,6 +52,24 @@ one contract:
 - [notes/media-progress.md](notes/media-progress.md) — hand-over log of Spotify and clips.
 - [notes/realms-sync.md](notes/realms-sync.md) — Realms through the broker with an approval outside the game and a one-time pass, and settings sync across instances: threat-model rows, decisions, what ran against a stand-in Realms service and in the real game, what is open.
 - [notes/realms-sync-progress.md](notes/realms-sync-progress.md) — hand-over log of Realms and settings sync, with what was read from the game's own client classes; [notes/realms-sync-evidence/](notes/realms-sync-evidence/) holds excerpts of the three launch logs of the settings-sync run, the synced copy after it and a screenshot of the game's options.
+
+The project website (`site/`) was built by a team of its own against the documents of the
+second pass, and brought up to the documents of each later round:
+
+- [notes/website.md](notes/website.md) — the site for its owner and maintainer: what exists, previewing it, the two publishing steps, what the workflow does, the palette, what has to be refreshed when, what the site found in the documents, what was not verified, and a dated entry per pass.
+- [notes/website-progress.md](notes/website-progress.md) — hand-over file of the site, with the `{{REQUIRE}}` ties and the claim maps that tie every hand-written sentence of the pages to its source.
+
+The fifth round (Minecraft: Bedrock Edition, the Android build) was built by five engineers in
+parallel against one contract, then integrated:
+
+- [notes/bedrock-research.md](notes/bedrock-research.md) — the research behind it: why BedrockOnLinux's Windows route is circumvention and is not built, the Android route with mcpelauncher, the cape events of 2023 to 2026, what Bedrock needs on the network, and the security design.
+- [notes/round5-contract.md](notes/round5-contract.md) — what the user decided, the invariants every package kept (no circumvention, an installed client only, no Java credential in a Bedrock session, the game's tokens for one session, sign-in pages outside the game, the filtered network only), and who owned what.
+- [notes/bedrock-store.md](notes/bedrock-store.md) — finding the installed `mcpelauncher-client` and the store of imported versions: user text, threat-model rows, what was verified against fake install trees and synthetic versions; hand-over log [notes/bedrock-store-progress.md](notes/bedrock-store-progress.md).
+- [notes/bedrock-launch.md](notes/bedrock-launch.md) — the Bedrock instance, the client's sandbox profile and system-call allowlist, the per-session data and the kept worlds, the stand-in client; hand-over log [notes/bedrock-launch-progress.md](notes/bedrock-launch-progress.md).
+- [notes/bedrock-net.md](notes/bedrock-net.md) — what a Bedrock session can reach: HTTPS by name, RakNet to listed servers, the broker for Realms and event-server joins and their approval; hand-over log [notes/bedrock-net-progress.md](notes/bedrock-net-progress.md).
+- [notes/bedrock-signin.md](notes/bedrock-signin.md) — the sign-in bridge and its stub, trusted answers from the terminal and the front end, the front end's prompts, where browsers show the final address; hand-over log [notes/bedrock-signin-progress.md](notes/bedrock-signin-progress.md).
+- [notes/bedrock-risk.md](notes/bedrock-risk.md) — the licence gate, `doctor`, the per-session data directories and their removal, scram and the canary for Bedrock, and the threat-model and runbook texts; hand-over log [notes/bedrock-risk-progress.md](notes/bedrock-risk-progress.md).
+- [notes/bedrock-integration.md](notes/bedrock-integration.md) — the integration: the merge, each reconciliation between the packages, the desktop's sign-in handler, the wiring of a launch, contract changes, what was verified with the numbers and what was not, and the consolidated threat-model rows.
 
 ## Images (`images/`)
 

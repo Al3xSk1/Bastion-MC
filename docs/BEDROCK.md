@@ -1,9 +1,5 @@
 # Minecraft: Bedrock Edition
 
-<!-- Written by the risk package against docs/notes/round5-contract.md; checked against the merged
-code and brought up to date by the integrator (docs/notes/bedrock-integration.md, which answers the
-re-check list of docs/notes/bedrock-risk.md, section 5). -->
-
 bastion-mc can run Minecraft: Bedrock Edition: the Android build of the game ("Minecraft for
 Android"), started by the `mcpelauncher-client` program you installed, inside bastion-mc's
 sandbox. It exists mainly for the Bedrock-only steps of Mojang's cape promotions (an event
@@ -171,8 +167,9 @@ session that did not end properly left its sign-in behind.
   `/usr` read-only, no home directory, none of your files; it may execute only the client, its
   libraries, the dynamic loader and bastion-mc's sign-in stub; a system-call allowlist of the
   client's own (with the same tripwire as Java's; new namespaces and the kernel keyrings are always
-  refused); your desktop only through the game's own display connection (the Wayland security
-  context, or a nested gamescope on X11); sound as for Java; memory and process limits. The
+  refused); your desktop as Java games get it — through the game's own display connection (the
+  Wayland security context, or a nested gamescope on X11), with the same exceptions (README,
+  "Display isolation"); sound as for Java; memory and process limits. The
   client's mod loader finds an empty, read-only mods directory: native mods are not supported.
 * The network is filtered (the default): the game reaches Microsoft's and Mojang's Bedrock
   services by name, the Bedrock servers you listed, and nothing else (below). With

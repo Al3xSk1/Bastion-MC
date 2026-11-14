@@ -18,6 +18,12 @@ Realms joins, settings sync), a redone title screen and darker menus. The mod is
 only: the launcher decides what each command from the phone may do, and no token, cookie or
 other secret of these services enters the game.
 
+It can also run Minecraft: Bedrock Edition — the Android build, started by your installed
+`mcpelauncher-client` from your own Google Play purchase — in the same sandbox, with a
+profile of its own, mainly for Mojang's Bedrock-only cape events. There, unlike on Java,
+the game itself holds your Xbox sign-in for the session;
+[Minecraft: Bedrock Edition](#minecraft-bedrock-edition) says what that means.
+
 ## Status
 
 **Pre-release.** Version 0.1.0. There is no release, no signed tag and no binary download:
@@ -25,7 +31,10 @@ it is built from source. Everything below was built and checked on one developme
 machine. The Microsoft → Xbox → Minecraft sign-in has never run against Microsoft, so
 nothing that needs a signed-in account has run against the live services yet. Neither has
 anything of the fourth round that needs an account of yours: the Spotify Web API, a
-signed-in Discord in the phone's browser, Realms.
+signed-in Discord in the phone's browser, Realms. Nor has Minecraft: Bedrock Edition (the
+fifth round) run with the real game at all: there was no `mcpelauncher-client`, no game
+file, no Google Play purchase and no Microsoft account on the development machine, so all
+of it ran against stand-ins.
 
 Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on any of it. It lists
 what is defended, how each claim is tested, and — in §5 — what is **not** defended.
@@ -36,10 +45,10 @@ xdg-dbus-proxy).
 
 | | |
 |---|---|
-| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod, the phone's channel and dispatcher, the phone's services (browser, Spotify, clips, Realms, settings sync) | 768 tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker and JVM suites start the real sandbox, those of Spotify and Realms the D-Bus proxy and the Realms dialer in theirs; 7 confine a real multi-threaded process the way the launcher confines itself (4 in the confinement suite; the other three read the companion channel, drive the Spotify proxy and save a clip from inside that confinement), and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 24 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
+| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod, the phone's channel and dispatcher, the phone's services (browser, Spotify, clips, Realms, settings sync), Bedrock's version store, sandbox profile, relay, sign-in bridge and scram | 986 tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker, JVM and Bedrock suites start the real sandbox, those of Spotify and Realms the D-Bus proxy and the Realms dialer in theirs; 9 confine a real multi-threaded process the way the launcher confines itself (4 in the confinement suite; the others read the companion channel, drive the Spotify proxy, save a clip, relay Bedrock's traffic and run a whole Bedrock session — its relay, sign-in bridge and hand-back — from inside that confinement), and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the voice relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 31 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
 | Display isolation | Wayland security context: against a real headless sway (the game's socket is listed: 37 interfaces, none of the 16 known privileged ones). Nested compositor: against real gamescope 3.17 on a private X display, including the clipboard cut-off in all four directions and the control run without it. Both with real Minecraft 26.3 started through them. **Not** on a real Wayland desktop session, and playability inside gamescope is not assessed. Both suites were run again on the merged trees of the third and fourth rounds |
-| Graphical front end | 120 unit tests (33 of them lay out, click and render the widgets in software; since the fourth round also the Realms approval prompt, laid out at four window sizes) and 4 tests of the whole application against a stand-in launcher, run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree of the third round); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland; the Realms prompt never shown for a real join |
-| Arch packages (`makepkg`) | both build, their `check()` passes and both binaries pass the hardening check — run again on the merged tree of the fourth round, from a `git archive` of that tree (the PKGBUILD's own `source` fetches the repository); on GitHub the CI workflow builds them the same way |
+| Graphical front end | 131 unit tests (37 of them lay out, click and render the widgets in software; since the fourth round also the Realms approval prompt, and since the fifth the Bedrock sign-in prompt and a Bedrock session's six protection aspects, laid out at four window sizes) and 5 tests of the whole application against a stand-in launcher (one of them plays a Bedrock instance), run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree of the third round); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland; the Realms prompt never shown for a real join, nor the Bedrock sign-in prompt for a real sign-in |
+| Arch packages (`makepkg`) | both build, their `check()` passes and both binaries pass the hardening check — run again on the merged tree of the fifth round, from a `git archive` of that tree (the PKGBUILD's own `source` fetches the repository); the `bastion-mc` package also holds `docs/BEDROCK.md` and the desktop entry of the Bedrock sign-in handler. On GitHub the CI workflow builds them the same way; its second run there (2026-11-14, on the tree the fifth round started from) passed all five jobs. **Not**: the packages installed with pacman (the hook that registers the desktop entry was read, not run on them), the fifth round's tree on GitHub (simulated on the development machine) |
 | Real Minecraft 26.3 client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile | runs: hardware OpenGL, window, audio, HTTPS through the relay and the broker, mods loaded from the sealed mount; also as a `--burner` session. Run again after the review fixes (launcher confined before it reads anything from the game; THREAT_MODEL §7 E16), and on the merged trees of the third and fourth rounds, without sound: vanilla and Fabric through the nested compositor, with the companion mod, and with ViaFabric and Simple Voice Chat (whose native libraries load inside the sandbox) |
 | Companion mod: zoom, HUD read-out, fullbright (third round) | in the real game (Minecraft 26.3, Fabric Loader 0.20.1): it loads, reports to the launcher while the launcher is confined, and the effect of each feature was measured in a running demo world, on the nested-compositor, direct-X11 and Wayland display paths; on the X11 paths also with the zoom key pressed through XTEST on a private display. **Not**: a person at the keyboard, a multiplayer server; on the nine other families of versions these three switch themselves off (they are written for 26.3's classes) |
 | Companion mod on every Fabric release from 1.20.1 to 26.3 (ten families), protocol 2 of its channel, the phone's dispatcher | in the real game (demo mode, Fabric Loader 0.20.1, the nested compositor on a private X display), on the representative of each family — 1.20.1, 1.20.4, 1.21.1, 1.21.4, 1.21.5, 1.21.8, 1.21.10, 26.1.2, 26.2, 26.3 — in four rounds each: at the title screen; in the demo world; in the demo world with the phone key really pressed (XTEST); at the title screen with the final jar, including a menu of the game's own with the dark background. Each time: no warning from Mixin, the family the table names, a hello of protocol 2, commands in and state, notices and pictures out through the dispatcher — all of it against the demo service (fake apps, a test switch). The channel and the dispatcher also under generated and mutated frames. **Not**: the other versions of each family (built against the same stand-ins, never started), Fabric Loader other than 0.20.1, Quilt, the direct-X11 and Wayland display paths |
@@ -54,21 +63,31 @@ xdg-dbus-proxy).
 | Mod catalog (`profile add`, `profile check`) | against scripted registry answers (28 kinds of refusal, each of which leaves `mods/`, the manifest and the signature as they were) and against a stand-in registry over TLS; the six aliases looked up live at Modrinth; real demo launches with mods it fetched: they load, and their update checks (and Sodium's `lspci`) are refused by the sandbox. **Not**: ViaFabric translating a connection, a Quilt profile, Modrinth through Tor |
 | Voice-chat relay (UDP) | 14 tests — 13 in the real sandbox (one of them with a real JVM) and one in a process confined the way the launcher confines itself —, unit tests of its decision table, one generated-input harness; inside a real launch, with the launcher confined, it relayed datagrams for a stand-in client placed in the game's network namespace. **Not**: a real voice session (needs a server and a signed-in account), capture (sound is off on the development machine) |
 | `network.launcher_proxy` for the game's connections to Mojang's services (review finding B-M3, fixed in the third round) | against a stand-in SOCKS5 proxy, in the real sandbox; **not** against Tor |
+| Minecraft: Bedrock Edition (fifth round): finding the installed `mcpelauncher-client`, importing versions and checking them at every launch (`bedrock client`, `import`, `versions`, `remove`) | against stand-ins only: unit tests on fake install trees and synthetic versions (links, devices, limits, a 3 GiB sparse file, tampering); the `bedrock` commands end to end with the real binary; `/usr/bin/true` standing in for a root-owned client from a package; the parsers of imported files under generated input. **Not**: a real `mcpelauncher-linux` package or a version that `mcpelauncher-ui` downloaded — so the import's limits and the time a launch spends checking a real version are guesses |
+| Bedrock: a session in the sandbox — the client's own system-call allowlist, Landlock, a data directory of the session's own, the kept worlds, the stub in place of the client's sign-in window; scram and `doctor` for Bedrock | against a stand-in client (a program the test compiles and starts as the client, in the real sandbox), three sessions of one instance: its arguments, the version held for the session, the world kept and the tokens, a planted library and a crashed session's directory gone, no home, no keyring, no namespaces, the launcher confined; the allowlist's two modes in the kernel with a Python payload; scram with stand-in sessions and token files; `doctor` in isolated directories. **Not**: the real client and game (the allowlist was derived from the client's source and never profiled), a display, sound, a GPU, resource limits, a terminal launch (it takes only a root-owned client under `/usr`) |
+| Bedrock: the network — HTTPS by name, RakNet to the servers you list, Realms and event-server joins brokered and approved outside the game | a sandboxed client (Python for RakNet, the system's curl for HTTPS) with the real relay and broker, against a stand-in RakNet server and stand-in Realms and gatherings services over TLS: listed servers reached and everything else refused with the reason, a Realms and an event-server join approved through the trusted input, the pass reaching exactly the approved server, the per-launch authority accepted by curl, the relay working after the launcher confined itself. **Not**: a real Bedrock server, Realm or event server, the game's own TLS stack (the services' paths and answers come from reading a third-party client, gophertunnel) |
+| Bedrock: the sign-in outside the game — the bridge, the desktop's handler (`bastion-mc bedrock hand-back`), the front end's panel | the stand-in ran `mcpelauncher-webview` inside the sandbox under the client's own filters: the stub reached the launcher, the page was offered, another sign-in's address was refused, the right one came back rebuilt — pasted at the trusted input, and handed back by the real `bastion-mc bedrock hand-back` with the launcher confined; the desktop entry registered and resolved by `xdg-mime` and `gio` in isolated directories, and `gio open` running the command; the front end's panel in its emulator; Firefox 159 against a stand-in redirect page (it shows the final address only in its developer tools). **Not**: Microsoft's real sign-in, two-factor steps, passkeys, the game's sign-in library accepting the address, a real browser calling the handler, Chromium-based browsers |
+| Bedrock: the licence gate, capes on the Java profile, the canary after a session | unit tests: the gate refuses without its switch and says what is accepted; the lines after a signed-in session; the canary names a gained cape, pins it and never stops a launch for it (stand-in profiles). **Not**: a cape claimed in Bedrock appearing in `skin show` and worn with `cape set` — that needs your accounts and bastion-mc's own Java sign-in, which has never run live |
 | Microsoft → Xbox → Minecraft sign-in, and everything that needs a signed-in account (the broker against the real Mojang API, `skin`/`cape`, the canary on a real profile, joining a real multiplayer server, Realms) | implemented and tested against scripted replies and a stand-in Mojang; **not yet run against the live services** (needs your client ID). Realms was tested against a stand-in Realms service, and needs a Realm as well |
 | Accounts of other services: the Spotify Web API, Discord signed in in the phone's browser | implemented and tested against stand-ins (rows above); **not run against the live services** (needs your Spotify client ID and account, Premium for playback control, and your Discord account) |
 | NVIDIA, Java 8-era versions end to end, real `age` binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) | implemented, **not exercised** on the development machine |
 
-**What "768 tests" counts.** The integrator's run of `cargo test --workspace --no-fail-fast`
-on the merged tree of the fourth round (no display, separate XDG directories, no session
-bus) printed 38 `test result` lines — 35 test binaries and 3 doc-test runs, 5 of them
-without tests — that add up to 768 passed, 0 failed, 0 ignored: the launcher 635 (452 unit,
-183 integration), the front end 126 (120 unit, 4 emulator, 2 live) and the event protocol 7.
+**What "986 tests" counts.** A run of `cargo test --workspace --no-fail-fast -- --show-output`
+on the merged tree of the fifth round, made for these documents on 2026-11-14 (no display, no
+session bus, separate XDG directories and a private runtime directory), printed 44 `test
+result` lines — 41 test binaries and 3 doc-test runs; 4 of them hold no test, and the
+launcher's doc-test run only an ignored one — that add up to 986 passed, 0 failed, 2 ignored:
+the launcher 835 (617 unit, 218 integration), the front end 138 (131 unit, 5 emulator, 2
+live) and the event protocol 13. The two ignored ones are a probe of the terminal reader that
+needs a pseudo-terminal, and a usage example in the documentation of `src/realms/answers.rs`.
 Not every one of them tests something in such a run: 27 are opt-in and return at once
-without their environment variables (see [Tests](#tests)), 9 are halves that other tests
+without their environment variables (see [Tests](#tests)), 11 are halves that other tests
 start again as child processes, and a few return early, with a message, on a machine that
-lacks what they need. With `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1 BASTION_BROWSER_TESTS=1`
-the same 768 passed; the display suites, the real-game tests and three demo launches were
-run separately on the same code. The complete
+lacks what they need — in that run the 3 tests of the resource limits, because the private
+runtime directory has no systemd user manager in it. The integrator's run of the same code
+counted the same; the display suites, the real-game tests and three demo launches were run
+separately on it, the tests that reach Mojang's and Microsoft's live services
+(`BASTION_NET_TESTS=1`) not. The complete
 lists of what is not defended and what was not exercised are THREAT_MODEL §5 and §7; what
 is open, and what needs something only you have, is in [`TODO.md`](TODO.md).
 
@@ -96,6 +115,7 @@ is open, and what needs something only you have, is in [`TODO.md`](TODO.md).
 - [The home screen and dark menus](#the-home-screen-and-dark-menus)
 - [Realms](#realms)
 - [Settings sync](#settings-sync)
+- [Minecraft: Bedrock Edition](#minecraft-bedrock-edition)
 - [Accounts](#accounts)
 - [Emergency](#emergency)
 - [Configuration](#configuration)
@@ -276,8 +296,10 @@ the broker also answers for the Realms hosts, and every join waits for an approv
 outside the game before the game gets one connection to that Realm's server
 ([Realms](#realms)).
 
-**Voice chat** is the only UDP the launcher relays out of the sandbox, and only to a port
-that a server's rule names: [Voice chat on a server](#voice-chat-on-a-server).
+**Voice chat** is the only UDP the launcher relays out of a Java game's sandbox, and only to
+a port that a server's rule names: [Voice chat on a server](#voice-chat-on-a-server). (A
+Bedrock game's servers speak RakNet, over UDP, and are relayed only when you list them:
+[Minecraft: Bedrock Edition](#minecraft-bedrock-edition).)
 
 **Proxy.** `launcher_proxy = "socks5h://127.0.0.1:9050"` under `[network]` sends everything
 that goes to Microsoft and Mojang through a SOCKS5 proxy such as Tor, which also resolves
@@ -354,8 +376,9 @@ Every helper of the phone's services is started, and every socket to one connect
 that point; the launch log's confinement line names the directories added for them. The
 whole of it needs Landlock ABI 9. On an older kernel `launcher.confine = "auto"` applies what
 it can and says what is missing — in the launch log, in `doctor` and in the front end —, and
-`"require"` refuses to launch. Not restricted even then: UDP (the DNS responder and the
-voice relay answer to the game's ephemeral ports), TCP by destination (the rules are per
+`"require"` refuses to launch. Not restricted even then: UDP (the DNS responder, the voice
+relay and, in a Bedrock session, the RakNet relay answer to the game's ephemeral ports), TCP
+by destination (the rules are per
 port), signals to your other processes (stopping the game needs them), and the access
 token the broker holds for the session — a compromised launcher has it, and can ask the
 Spotify token keeper for fresh Spotify access tokens and the Realms dialer for its few
@@ -446,6 +469,8 @@ cape changed behind your back ([The profile canary](#the-profile-canary)), `bast
 to remove every credential the launcher keeps from the machine in one step — the sign-ins,
 the Spotify token, the Realms TOTP secret, the phone browser's profile — and to say what it
 could not remove, and a built-in recovery runbook with verified links ([Emergency](#emergency)).
+Scram also stops a running Bedrock session and deletes what killed or crashed Bedrock
+sessions left on disk, which can hold the game's Xbox sign-in.
 
 ## The graphical front end
 
@@ -482,7 +507,11 @@ What the launcher is doing is named at the top right of every page.
   stop a game. While a Realms join waits for your approval, the page shows the prompt: the
   Realm, the server address the game would connect to, in `code` mode the six-digit code
   (in two groups of three), and how long it is still valid; when the prompt ends it says
-  how ([Realms](#realms)).
+  how ([Realms](#realms)). A Bedrock instance needs neither a Java sign-in nor demo mode. While
+  its game waits for a Microsoft sign-in, the page shows the *Microsoft sign-in for Bedrock*
+  panel (*Open the sign-in page*, *Copy link*, a field to paste the address into with
+  *Send*, and *Cancel*), and a Bedrock session's Realms prompt is answered on the page, with *Approve join* or *Refuse*
+  ([Minecraft: Bedrock Edition](#minecraft-bedrock-edition)).
 
   The gauge, from the outside in: the **sequence** (one arc per stage — files, verify,
   sign-in, sandbox, game; the stage being worked on has a highlight travelling along it),
@@ -491,8 +520,9 @@ What the launcher is doing is named at the top right of every page.
   the **protection** ring with one segment per aspect of the launch.
 
 * **Protection read-outs.** A launch reports five aspects — *display*, *network*,
-  *credential*, *limits*, *launcher* — each at one of three levels. The level is always a
-  word and a shape, never a colour alone:
+  *credential*, *limits*, *launcher* — each at one of three levels; a Bedrock launch reports
+  a sixth, *sign-in*: where the game's sign-in pages are shown, and who may answer them. The
+  level is always a word and a shape, never a colour alone:
 
   | Level | Word | Mark | Ring segment |
   |---|---|---|---|
@@ -558,7 +588,8 @@ Sans and the system's monospace face where they are installed and whatever sans-
 monospace faces there are otherwise; every symbol is drawn as geometry. It knows nothing of
 voice chat, the companion mod or the phone's services beyond the log lines in its console,
 except the Realms prompt above. It offers none of the fourth round's commands
-(`browser login`, `spotify …`, `realms totp-setup`): they are run in a terminal.
+(`browser login`, `spotify …`, `realms totp-setup`): they are run in a terminal. Nor the
+`bedrock` commands that find the client and import versions.
 
 It is a separate program on purpose, not a mode of the launcher:
 
@@ -571,7 +602,8 @@ It is a separate program on purpose, not a mode of the launcher:
  │ backend  tokio task per command:          │           logout · versions · instance new
  │        child stdout ─▶ typed Update ─▶    │           launch · scram --yes
  │        tokio mpsc ─▶ iced Task ─▶ update  │ ◀──────── stdout: one JSON event per line
- │                                           │ ────────▶ stdin:  "stop" (or just closing it)
+ │                                           │ ────────▶ stdin:  "stop", or an answer to a
+ │                                           │           prompt (or just closing it)
  └───────────────────────────────────────────┘
 ```
 
@@ -579,7 +611,10 @@ It is a separate program on purpose, not a mode of the launcher:
   runs in a child process supervised by a tokio task; progress arrives as messages.
 * Tokens stay in the launcher process. The event protocol
   ([`crates/proto`](crates/proto/src/lib.rs)) has no field that could carry one, and the
-  launcher binary links none of the GUI's dependencies.
+  launcher binary links none of the GUI's dependencies. What the front end writes back, in a
+  Bedrock session, is what you answer a prompt with: a Realms code, or the address a
+  Microsoft sign-in ended on (`answer realms …`, `answer signin …`), whose code is
+  single-use and worthless without the verifier the game holds.
 * If the window is closed, or the front end dies, the launcher notices its control pipe
   closing and shuts the game down properly. A scram is the exception: the front end never
   ends the launcher that is removing credentials.
@@ -858,8 +893,9 @@ The phone shows only the apps the launcher set up for this launch:
 Spotify, clips and the browser are started only for a launch whose companion has its phone
 on: without a phone there is nothing to use them with. Settings sync works without it — in a
 vanilla instance too. Realms is brokered only in a launch with the phone, because a join is
-approved there; in any other launch Realms joins are refused at once, and the launch log
-says why. A `--burner` session starts no browser, records no clips, takes no part in settings
+approved there; in any other Java launch Realms joins are refused at once, and the launch log
+says why (a Bedrock session has no phone, and is approved outside the game:
+[Minecraft: Bedrock Edition](#minecraft-bedrock-edition)). A `--burner` session starts no browser, records no clips, takes no part in settings
 sync or Realms, and its Spotify has neither the Web API nor album art.
 
 ```toml
@@ -1081,7 +1117,9 @@ tests (no account, no Mod Menu here).
 
 ## Realms
 
-Realms works in the filtered network once you decide how a join is approved:
+Realms works in the filtered network once you decide how a join is approved (this section is
+about Java; Bedrock's Realms and event servers are approved outside the game, without a phone:
+[Minecraft: Bedrock Edition](#minecraft-bedrock-edition)):
 
 ```toml
 [realms]
@@ -1155,6 +1193,159 @@ elsewhere, change a volume, the field of view, the language. Nothing else crosse
 must be on the list, and its value must have the shape the game writes for that setting (a
 boolean, a number, a short identifier, a language code, a key name) — never free text, a
 resource pack or a server.
+
+## Minecraft: Bedrock Edition
+
+bastion-mc can also run Minecraft: Bedrock Edition — the Android build of the game, started by
+the `mcpelauncher-client` you installed, in the sandbox Java games run in, with a profile of
+its own. It exists mainly for the Bedrock-only steps of Mojang's cape promotions (an event
+server, a challenge in Bedrock survival, signing in to Bedrock once), but it is the whole
+game. The real game has never run under bastion-mc: there was no Google Play purchase, no
+game file and no Microsoft account on the development machine, and everything below was
+verified against stand-ins ([Status](#status)). The guide, with every detail, is
+[`docs/BEDROCK.md`](docs/BEDROCK.md).
+
+**What it is not.** It is not the Windows edition, in any form. Projects such as
+BedrockOnLinux run the Windows (GDK) build, and that build runs on Linux only after keys are
+extracted from Microsoft's licence data and the game is decrypted outside Microsoft's
+protected path. That is circumventing a technical protection measure, so bastion-mc does not
+do it, does not wrap a tool that does, and has no switch for it. Nor is it a downloader:
+bastion-mc contains no Google Play client and no Minecraft files, and it never downloads or
+builds `mcpelauncher-client`. Nothing in bastion-mc decrypts, patches or answers a licence
+check.
+
+**The licence substitution, and its switch.** When the game starts, it asks Google Play
+whether this copy is licensed. There is no Google Play on Linux, so `mcpelauncher-client`
+answers that question itself, with "licensed"; the real check happened earlier, when
+`mcpelauncher-ui` downloaded the game only after Google said that your Google account bought
+it. bastion-mc cannot check that a version you import was bought: import only versions from
+your own purchase. Every Bedrock launch is refused until you accept this:
+
+```toml
+[bedrock]
+accept_licence_substitution = true   # every Bedrock launch is refused without it
+```
+
+### What you need
+
+* An x86_64 computer, and `mcpelauncher-linux` (the client) and `mcpelauncher-ui` (the
+  download tool) from the AUR: source builds of about thirty git repositories, so read each
+  PKGBUILD before you build it. Installed that way the client is a root-owned file in `/usr`,
+  which bastion-mc requires; a Flatpak or AppImage client is refused.
+* Minecraft bought on Google Play: a purchase of its own, which owning Java or the Windows
+  edition does not replace. **Use a Google account of its own for it**, not the one with your
+  mail and photos: `mcpelauncher-ui` keeps a Google sign-in on your disk, and whether Google
+  ever acts against accounts used with unofficial clients is not known. Sign out in
+  `mcpelauncher-ui` once your versions are downloaded.
+* Your Microsoft account, to sign in to in each Bedrock session — the one that owns your Java
+  profile, if you want the capes on Java.
+
+### Importing a version and playing
+
+```sh
+bastion-mc bedrock client         # the installed client bastion-mc would run, and why (or why not)
+bastion-mc bedrock import ~/.local/share/mcpelauncher/versions/<version>
+bastion-mc bedrock versions       # what is imported, and what mcpelauncher-ui has that is not
+bastion-mc instance new bedrock --bedrock 1.26.62.1
+bastion-mc launch bedrock         # or Play in the front end
+```
+
+The import copies only what the client reads (x86_64 builds only, no links or special files,
+within limits), records the SHA-256 of every file and leaves the copy read-only; every launch
+checks the version against that record again, and `bastion-mc bedrock remove <id>` is refused
+while a session uses it. A Bedrock instance's `instance.toml` has `kind = "bedrock"`, the
+window's `width` and `height`, a `[bedrock]` table with the `version` and the instance's own
+`servers`, and `[network] mode`: `filtered` (the default) or `none` for offline single-player;
+`open` is refused. Java keys in it are refused with the reason, and the Java-only commands
+(`install`, `profile …`, `pack …`) refuse a Bedrock instance.
+
+In a session the game reaches Microsoft's and Mojang's Bedrock services by name, the servers
+you listed and the Realms and event servers you approved, and nothing else. It may execute
+only the client, its libraries, the dynamic loader and bastion-mc's sign-in stub, under a
+system-call allowlist of the client's own; native mods are not supported (the mods directory
+is empty and read-only). No Java credential exists in a Bedrock session: the Java sign-in is
+skipped, and the token store and the vault are not opened — so `--demo` changes nothing for
+Bedrock, and `--burner`, `--join` and `--repair` are refused with what to do instead. The
+game's data directory belongs to the session alone and is deleted at its end, with the game's
+sign-in in it. Kept between sessions, in the instance's `bedrock-data/`, are only the worlds
+(`games/com.mojang/minecraftWorlds`), the game's own settings (`games/com.mojang/minecraftpe`)
+and the client's settings file (`mcpelauncher-client-settings.txt`) — and with
+`persist_worlds = false` nothing. `bastion-mc doctor` has a Bedrock section.
+
+### Signing in, every session
+
+Each session that needs your Microsoft account (servers, Realms, events, capes) starts with a
+sign-in; single-player works without one. Microsoft's sign-in page opens **outside the
+game**: the front end's *Microsoft sign-in for Bedrock* panel opens it in your browser, and a
+terminal launch prints its address. Only Microsoft's page for Minecraft for Android's own
+client (`https://login.live.com/…`) is ever offered, and your password and two-factor codes
+never reach the game.
+
+At the end Microsoft sends your browser to an address meant for the game,
+`ms-xal-0000000048183522://auth?code=…`. **Where bastion-mc's handler for these links is
+registered, the browser hands it back by itself**: the Arch package installs a desktop entry
+for that scheme, desktop-file-utils' pacman hook registers it, your browser may ask once
+whether to open such links with bastion-mc (allow it), and it then runs
+`bastion-mc bedrock hand-back <address>`, which hands the address to the running session. The
+handler serves one session at a time and needs `XDG_RUNTIME_DIR`. **Otherwise, paste the
+address** into the front end's panel or into the terminal. Your browser may not show it at
+all — Firefox shows it only in its developer tools, as the `Location` header of the last
+request — and [`docs/BEDROCK.md`](docs/BEDROCK.md) has the steps. Either way bastion-mc
+accepts only this sign-in's own address, and hands the game nothing but its code and state.
+
+### Servers, Realms and event servers
+
+```toml
+[bedrock]
+servers = [{ host = "play.example.org", port = 19132 }]   # every Bedrock instance; an instance adds its own
+```
+
+Only listed servers can be reached (RakNet over UDP; the port defaults to 19132). When the
+game looks up a name that is not listed, the launcher says once what to add. Servers on a
+private or loopback address, LAN games and friends' worlds (NetherNet) are refused in this
+version. Realms and Mojang's event servers are reached only through a join you approve,
+with `[realms] approve = "code"`; `"totp"` acts as `"code"` in a Bedrock session (the TOTP
+secret is in the token store, which a Bedrock session never opens), and `"off"`, the
+default, refuses them. The launcher holds the join and shows the Realm or event, the server's
+address and a six-digit code. There is no phone in a Bedrock session, so you approve
+**outside the game**: in the front end's Realms panel (*Approve join*, *Refuse*), or by
+typing the code on the terminal of a terminal launch — never in the game. Approved, the game
+gets a one-time pass to that one server.
+
+Microsoft's telemetry hosts are reachable by default, because whether a challenge cape is
+credited without them is not known; `[bedrock] telemetry = false` refuses them and tells the
+client to keep the game's telemetry from starting.
+
+### Capes from Bedrock to Java
+
+A cape claimed in Bedrock belongs to the Microsoft account, and shows on that account's Java
+profile later (Mojang has announced anything from at once to within 30 days). Sign in to
+Bedrock with the account that owns your Java profile; when a signed-in session ends, the
+launcher says what comes next. On Java, `bastion-mc skin show` lists the capes your profile
+owns and `bastion-mc cape set "<name>"` wears one, and the profile canary names a newly owned
+cape at the next Java sign-in and pins it without an alarm. Never verified with an account:
+it needs yours, and bastion-mc's own Java sign-in has never run live.
+
+### What it protects, and what it cannot
+
+**The game holds your Xbox identity.** Once you sign in, the game holds a refresh token of
+your Microsoft account for Minecraft for Android, the key it made to sign its Xbox requests,
+and the tokens made with them: the game's own sign-in code needs them, so nothing can take
+them away from it — unlike Java, where the launcher keeps the token. A game taken over (by a
+flaw that a hostile server, Realm or add-on exploits, or through a compromised client) can
+use that sign-in, and copy it out through any connection it is allowed. Then your Realms
+(with the owner's rights), your **Minecoins**, your Bedrock character and cape and your Xbox
+friends are at stake, and possibly your Java profile (not verified), until you **sign out
+everywhere** at Microsoft (`bastion-mc wiki scram` has the page; Microsoft says it takes
+effect within 24 hours).
+
+What bastion-mc does about it: the sandbox keeps the game from your files and your desktop,
+the network filter narrows where it can send anything, sign-in pages run outside the game, no
+Java credential exists in the session, and the game's sign-in lives one session (deleted at
+its end; after a crash, at the next Bedrock start or by `scram`). What it cannot do: stop the
+game from using or copying the sign-in during the session, or see the Bedrock side of the
+account — the canary watches the Java profile only, so look at your Minecoins, Realms and
+character yourself. THREAT_MODEL §4.8 has every row, and §5 says it once more.
 
 ## Accounts
 
@@ -1245,6 +1436,13 @@ in your Spotify account. To use them again afterwards: `bastion-mc spotify login
 `bastion-mc realms totp-setup` (a new secret for your authenticator app) and
 `bastion-mc browser login <site>`.
 
+Bedrock sessions are stopped like Java launches; what a killed or crashed Bedrock session left
+on disk — its data directory, with the game's Xbox sign-in — is deleted with the credentials
+and the deletion confirmed. A Bedrock session that cannot be stopped, or that runs without a
+marker, is a `COULD NOT` line that says to end it and to sign out everywhere: a running
+Bedrock game holds your sign-in. Bedrock worlds and imported versions are kept, and the output
+says so.
+
 The runbook is [`docs/SCRAM_RUNBOOK.md`](docs/SCRAM_RUNBOOK.md), compiled into the launcher
 (`bastion-mc wiki scram --links` lists its addresses). If this computer itself may be
 compromised, follow its account steps from another device: a compromised machine can show
@@ -1259,6 +1457,10 @@ link, and not writable by group or others, e.g. mode 0600). Unknown keys are err
 in a server's table. An instance's `instance.toml` can set its own Minecraft version
 (vanilla), `memory_mb`, `width`, `height`, `[network]` `mode` and additional `servers`, and
 any key of `[companion]` (the phone, its key, the home screen and the dark menus included).
+A Bedrock instance's `instance.toml` has keys of its own
+([Minecraft: Bedrock Edition](#minecraft-bedrock-edition)), and `[bedrock]` in `config.toml`
+(`accept_licence_substitution`, `client`, `telemetry`, `persist_worlds`, `seccomp`, `servers`,
+`extra_syscalls`) applies to every Bedrock instance.
 
 The sections of the phone's services are in `config.toml` only, the same for every instance:
 `[spotify]` ([Spotify](#spotify)), `[clips]` ([Clips](#clips)), `[browser]`
@@ -1273,14 +1475,20 @@ approval off.
 ~/.config/bastion-mc/        config.toml, trusted-keys.d/
 ~/.local/share/bastion-mc/   instances/<id>/, libraries/, versions/, assets/, vault/,
                              browser/ (the phone browser's profile and record of sign-ins),
-                             clips/ (the default clips folder), sync/ (the synced settings)
+                             clips/ (the default clips folder), sync/ (the synced settings),
+                             bedrock/versions/ (imported Bedrock versions; a Bedrock
+                             instance keeps its worlds in instances/<id>/bedrock-data/)
 ~/.cache/bastion-mc/         scratch/ (the per-launch game root, deleted on exit), running/,
-                             realms-totp-last-step (no secret: the last TOTP step used)
+                             realms-totp-last-step (no secret: the last TOTP step used),
+                             bedrock-sessions/ (each Bedrock session's data directory, with
+                             the game's sign-in; deleted at the session's end)
 ~/.local/state/bastion-mc/   logs/<instance>/launch-*.log (the newest 20), profile-serials/,
                              accounts/, canary/, activity/, default-account
 $XDG_RUNTIME_DIR/bastion-mc/ short-lived: the game's Wayland socket (wl-*), the companion
                              mod's channel (companion-*), the D-Bus proxy's socket
-                             directory (mpris-*), the clip buffer in memory (clips-*)
+                             directory (mpris-*), the clip buffer in memory (clips-*), the
+                             Bedrock sign-in bridge (signin-*) and the socket of the
+                             handler that hands a sign-in back (bedrock-signin.sock)
 ```
 
 `options.txt` and `servers.dat` are carried into each session and back by the launcher,
@@ -1305,6 +1513,29 @@ The phone's suites in the default run use more tools where they are installed, a
 `tests/clips.rs` ffmpeg and ffprobe. `tests/phone_ui.rs` drives the phone, the home screen
 and the dark menus in a stand-in game with the JDK, and `tests/realms.rs` runs a stand-in
 Realms service, the real dialer and the real relay.
+
+The fifth round's suites run in the default run as well, all against stand-ins:
+`tests/bedrock_launch.rs` (three Bedrock sessions of a stand-in client that it compiles with
+`rustc`, in the real sandbox, with the relay, the sign-in bridge and the real
+`bastion-mc bedrock hand-back`; its last session confines the test process itself),
+`tests/bedrock_sandbox.rs` (the client's system-call filter in the kernel, with a Python
+payload; its log mode makes the kernel log a few `type=1326` lines), `tests/bedrock_net.rs`
+(the relay and the broker with a sandboxed Python and curl client, against a stand-in RakNet
+server and stand-in Realms and gatherings services), `tests/signin_stub.rs` (the stub in
+bubblewrap), and `tests/bedrock_store.rs` and `tests/bedrock_cli.rs` (the real binary's
+`bedrock` and `instance` commands). They need what `tests/sandbox.rs` needs — bubblewrap,
+python3, unprivileged user namespaces, Landlock — and `tests/bedrock_launch.rs` also `rustc`
+and the system's libcurl, `tests/bedrock_net.rs` curl. `BASTION_TEST_RUNTIME` gives
+`tests/bedrock_launch.rs` a directory with a short path for its sockets (default:
+`XDG_RUNTIME_DIR`).
+
+The suite assumes a short temporary directory on a file system without fs-verity, as `/tmp`
+is on Arch (tmpfs). With `TMPDIR` pointed at a directory inside the checkout on btrfs (a path
+of 76 bytes), 50 tests failed on the development machine, 25 of them Bedrock's: most bind
+UNIX sockets under it (the companion's channel, the sound-server and Wayland checks, the
+Bedrock sign-in bridge and its stub), whose paths then exceed the 108 bytes a socket path
+may have; two tests of mods and packs rewrite a file that the launcher sealed with
+fs-verity, which btrfs supports; two expect the short paths of `/tmp` in what they check.
 
 The counts of the last full run are in [Status](#status). The opt-in suites return at once
 — and count as passed — unless their variables are set:
@@ -1385,7 +1616,9 @@ end's layout tests measure; a check that every fuzz harness still compiles; `car
 (also once a week, for new advisories); and both packages built from the commit with
 `makepkg`, `check()` and the hardening check included. The suites that start the real
 sandbox run on a development machine; on a GitHub runner they can be started by hand
-([`integration.yml`](.github/workflows/integration.yml)), which has not been tried yet.
+([`integration.yml`](.github/workflows/integration.yml)), which has not been tried yet. The
+workflow's second run on GitHub (2026-11-14, on the tree the fifth round started from) passed
+all five jobs; the fifth round's tree has been through a local simulation of it only.
 [`pages.yml`](.github/workflows/pages.yml) builds the website and publishes it.
 
 ## Documentation
@@ -1404,6 +1637,10 @@ sandbox run on a development machine; on a GitHub runner they can be started by 
 - [`docs/COMPANION.md`](docs/COMPANION.md) — the companion mod.
 - [`docs/PHONE.md`](docs/PHONE.md) — the in-game phone and its services: what each app does,
   its settings and limits, and what the game can see.
+- [`docs/BEDROCK.md`](docs/BEDROCK.md) — Minecraft: Bedrock Edition: what it is and is not,
+  what you need, the licence substitution, importing, signing in every session, servers,
+  Realms and event servers, capes, what bastion-mc cannot protect, troubleshooting, and what
+  was verified.
 - [`docs/README.md`](docs/README.md) — an index of everything under `docs/`, including the
   engineering notes in `docs/notes/` (how each part was built and verified) and the
   screenshots.
@@ -1417,7 +1654,7 @@ sandbox run on a development machine; on a GitHub runner they can be started by 
 | Path | What |
 |---|---|
 | `src/sandbox/` | bubblewrap orchestration, in-sandbox init, Landlock, seccomp, netns helper, display/audio/GPU exposure; `wayland.rs` (security context), `nested.rs` (gamescope), `cgroup.rs` (limits) |
-| `src/egress/` | DNS responder, SNI parser, allowlisting relay, texture gateway, `broker.rs` (credential broker), `udp.rs` (datagram relay for voice chat) |
+| `src/egress/` | DNS responder, SNI parser, allowlisting relay, texture gateway, `broker.rs` (credential broker), `udp.rs` (datagram relay for voice chat and for Bedrock's servers); for Bedrock `bedrock.rs` (its rules), `raknet.rs` (RakNet's opening messages) and `services.rs` (the broker for Realms and event-server joins) |
 | `src/auth/` | OAuth (PKCE, device code), Xbox, Minecraft services (profile, skins, capes), token stores, account registry, canary, activity log |
 | `src/confine.rs`, `src/confine/filter.rs`, `src/persist.rs` | the launcher's self-confinement (Landlock, and its system-call filter); strict re-encoding of settings files |
 | `src/scram.rs`, `src/running.rs`, `src/proofs.rs` | emergency removal of credentials, markers of running commands and locks on their directories, the ownership export |
@@ -1428,21 +1665,22 @@ sandbox run on a development machine; on a GitHub runner they can be started by 
 | `src/browser/` | the phone's browser: configuration and the `discord` preset, Firefox's sandbox and the stage inside it, the relay and its budgets, WebSocket and WebDriver BiDi, the phone app, `login.rs` (`browser login`) |
 | `src/spotify/` | Spotify: the D-Bus client and MPRIS through `xdg-dbus-proxy`, the Web API, the sign-in, the token keeper, album art, `spotify:` addresses |
 | `src/clips/` | clips: the recorder's sandbox and its X11 helper, the buffer, the library of saved clips |
-| `src/realms/`, `src/sync/` | Realms: the endpoint table, approvals, TOTP, the dialer; settings sync: the list of synced settings, translations between versions, the synced copy |
+| `src/realms/`, `src/sync/` | Realms: the endpoint table, approvals, TOTP, the dialer, `answers.rs` (approvals typed at the trusted input); settings sync: the list of synced settings, translations between versions, the synced copy |
+| `src/bedrock/` | Minecraft: Bedrock Edition: `runtime.rs` (finding the installed `mcpelauncher-client`), `store.rs` and `store/` (importing versions, the manifest, checking them at each launch), `launch.rs` and `launch/` (the instance, the client's sandbox profile, the session), `net.rs` (what a session may reach; the relay's Bedrock parts are `src/egress/bedrock.rs`, `raknet.rs` and `services.rs`), `signin/` (the bridge, its checks, the stub, the hand-back), `policy.rs` (the gate, `doctor`'s section, the sessions' data directories) |
 | `native/noclip.c` | the library preloaded into gamescope that cuts its clipboard bridge |
-| `docs/` | threat model, token path, the scram runbook, the dedicated-account guide, mods, the companion mod, the phone; `notes/` (engineering notes), `images/` (screenshots) |
-| `tests/support/` | scripts that fetch, verify and run the compositors the display tests need; the stand-in Spotify player, stand-in HTTPS sites, XTEST keys, clicks and screenshots on a private display, `phone-shots.sh` |
+| `docs/` | threat model, token path, the scram runbook, the dedicated-account guide, mods, the companion mod, the phone, Bedrock; `notes/` (engineering notes), `images/` (screenshots) |
+| `tests/support/` | scripts that fetch, verify and run the compositors the display tests need; the stand-in Spotify player, stand-in HTTPS sites, XTEST keys, clicks and screenshots on a private display, `phone-shots.sh`; `bedrock_standin.rs`, the stand-in for `mcpelauncher-client` |
 | `tests/java/` | Java programs the tests start: the broker and voice probes, a stand-in "game" for the companion mod (`fakegame*`), a stand-in platform and the phone's check (`FakePlatform.java`, `PhoneUiCheck.java`) |
 | `src/mojang/` | version metadata, argument rendering, launch frame, verified download store |
 | `src/profile/` | signed manifest, Ed25519 trust store, strict `mods/` verification, authoring, `capabilities.rs` (the scan of what jars refer to), `modrinth.rs` (registry client), `catalog.rs` (`profile add`, `profile check`), `packs.rs` (resource and shader packs), `zipdir.rs` (the strict zip directory reader they are checked with) |
 | `src/secret.rs`, `src/hardening.rs` | locked self-wiping memory, zero-on-free allocator, process hardening |
-| `src/events.rs` | how the launcher reports progress: text for a terminal, JSON events for a front end |
+| `src/events.rs`, `src/events/input.rs` | how the launcher reports progress: text for a terminal, JSON events for a front end; the trusted input that takes answers to prompts from the terminal and the front end |
 | `crates/proto/` | the event protocol shared by launcher and front ends (types only), and the runbook's text with the only links a front end may open |
 | `gui/` | `bastion-mc-gui`: `backend.rs` (worker), `app.rs` (state and logic), `view/` (the pages and the parts they are built from, the Realms prompt among them), `hud.rs` (drawn elements), `theme.rs`, `runbook.rs`, `console.rs` |
 | `java/BastionBootstrap.java` | the 122-line class (package `bastion.boot`) that receives the launch frame |
 | `java/companion/` | the companion mod: `src/` (version-independent: the platform API, the phone, the home screen, the theme, zoom and the other features), `platform/` (the adapters of each family and group of families) |
 | `java/stubs/` | compile-only stand-ins, never shipped: `common/` (Fabric Loader, Mixin, ASM), `minecraft/<family>/` (Minecraft's classes per family: names and signatures only), `tools/` (how they are made again from the published files, and the table of families) |
-| `packaging/arch/PKGBUILD` | hardened Arch packages (`bastion-mc`, `bastion-mc-gui`) |
+| `packaging/arch/PKGBUILD` | hardened Arch packages (`bastion-mc`, `bastion-mc-gui`); `bastion-mc-bedrock-signin.desktop`, the handler that hands a Bedrock sign-in back to the running session |
 
 ## Trademarks and licence
 
