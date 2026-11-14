@@ -84,8 +84,9 @@ Not every one of them tests something in such a run: 27 are opt-in and return at
 without their environment variables (see [Tests](#tests)), 11 are halves that other tests
 start again as child processes, and a few return early, with a message, on a machine that
 lacks what they need — in that run the 3 tests of the resource limits, because the private
-runtime directory has no systemd user manager in it. The integrator's run of the same code
-counted the same; the display suites, the real-game tests and three demo launches were run
+runtime directory has no systemd user manager in it. (An earlier run of this pass had one
+failure, a flaky unit test of the Bedrock store: [`TODO.md`](TODO.md).) The integrator's
+run of the same code counted the same; the display suites, the real-game tests and three demo launches were run
 separately on it, the tests that reach Mojang's and Microsoft's live services
 (`BASTION_NET_TESTS=1`) not. The complete
 lists of what is not defended and what was not exercised are THREAT_MODEL §5 and §7; what
@@ -510,8 +511,8 @@ What the launcher is doing is named at the top right of every page.
   how ([Realms](#realms)). A Bedrock instance needs neither a Java sign-in nor demo mode. While
   its game waits for a Microsoft sign-in, the page shows the *Microsoft sign-in for Bedrock*
   panel (*Open the sign-in page*, *Copy link*, a field to paste the address into with
-  *Send*, and *Cancel*), and a Bedrock session's Realms prompt is answered on the page, with *Approve join* or *Refuse*
-  ([Minecraft: Bedrock Edition](#minecraft-bedrock-edition)).
+  *Send*, and *Cancel*), and a Bedrock session's Realms prompt is answered on the page, with
+  *Approve join* or *Refuse* ([Minecraft: Bedrock Edition](#minecraft-bedrock-edition)).
 
   The gauge, from the outside in: the **sequence** (one arc per stage — files, verify,
   sign-in, sandbox, game; the stage being worked on has a highlight travelling along it),
@@ -895,8 +896,9 @@ on: without a phone there is nothing to use them with. Settings sync works witho
 vanilla instance too. Realms is brokered only in a launch with the phone, because a join is
 approved there; in any other Java launch Realms joins are refused at once, and the launch log
 says why (a Bedrock session has no phone, and is approved outside the game:
-[Minecraft: Bedrock Edition](#minecraft-bedrock-edition)). A `--burner` session starts no browser, records no clips, takes no part in settings
-sync or Realms, and its Spotify has neither the Web API nor album art.
+[Minecraft: Bedrock Edition](#minecraft-bedrock-edition)). A `--burner` session starts no
+browser, records no clips, takes no part in settings sync or Realms, and its Spotify has
+neither the Web API nor album art.
 
 ```toml
 [companion]

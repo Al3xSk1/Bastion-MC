@@ -65,7 +65,7 @@ owner.
   Bedrock sentence) and after point 16 (points 17 to 19), extended.
 
 Run on the final tree of this pass: `python3 -I site/build.py --check` passes (13 pages,
-1082 internal links, 86 outbound links, two runs byte-identical), and so does the deployable
+1082 internal links, 88 outbound links, two runs byte-identical), and so does the deployable
 build; `python3 -I -B -m unittest discover -s site -p "test_*.py"`: 361 tests, OK;
 `cargo test --test site`: 5 passed. Not done: the new and changed pages were not rendered in
 a browser or measured at the 44 widths (the tools of the earlier passes are not in this

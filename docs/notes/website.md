@@ -683,7 +683,7 @@ sections 1, 2, 3, 5, 6, 7 and 8, the runbook's Bedrock sentences and the user gu
   fourth round (TODO.md, the fourth round's "Integration") and are listed as settled now,
   after reading them again against the current documents and code; still open are the rows
   without a test (B3, B15 and B39 added) and the Realms prompt's fixture.
-- **Verified**: `python3 -I site/build.py --check` passes (13 pages, 1082 internal links, 86
+- **Verified**: `python3 -I site/build.py --check` passes (13 pages, 1082 internal links, 88
   outbound links, two runs byte-identical), and so does the deployable build;
   `python3 -I -B -m unittest discover -s site -p "test_*.py"`: 361 tests, OK; `cargo test
   --test site`: 5 passed. **Not done**: the new and changed pages were not rendered in a

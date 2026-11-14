@@ -35,8 +35,9 @@ notes files, which name the steps of its integration.
 How to read this file: **Open** is what is left and why; **Blocked on you** needs
 something only you have; **Done in the fifth round**, **Done in the fourth round**, **Done
 in the third round** and **Done in the second pass** are the record of what changed, with
-where it is and how it was checked; **Independent review** is the record of the review round; **Decided against /
-deferred** keeps the reasoning for the big ideas so they are not re-argued from scratch.
+where it is and how it was checked; **Independent review** is the record of the review
+round; **Decided against / deferred** keeps the reasoning for the big ideas so they are not
+re-argued from scratch.
 
 Verification state of the merged tree of the fifth round (the integrator's runs,
 2026-11-14, `docs/notes/bedrock-integration.md` section 6, and this documents pass's, with
@@ -44,7 +45,7 @@ separate XDG directories, a private runtime directory, only private displays, an
 session bus): `cargo fmt --check` clean, also in `fuzz/`; `cargo clippy --workspace
 --all-targets` without warnings; `cargo test --workspace` 986 passed, 0 failed, 2 ignored
 (44 result lines; how such a number is counted: README "Status"), and the same again in this
-pass, where one of five runs of the launcher's unit tests failed once on a flaky store test
+pass, where one of six runs of the launcher's unit tests failed once on a flaky store test
 (see Open); the Bedrock suites in it: `bedrock_launch` (three sessions of a stand-in client
 in the real sandbox — the sign-in pasted at the trusted input in one, handed back by the real
 `bastion-mc bedrock hand-back` with the launcher confined in another), `bedrock_sandbox` 3,
@@ -218,9 +219,9 @@ libFuzzer targets themselves.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
 - [ ] **A flaky unit test of the Bedrock store** (found in the documents pass of the fifth
       round): `bedrock::store::tests::remove_refuses_while_a_launch_holds_the_version_and_removes_it_after`
-      failed once in five runs of the launcher's unit tests — `remove` still found the version
+      failed once in six runs of the launcher's unit tests — `remove` still found the version
       locked after the test had dropped both of its descriptors ("in use by a running launch
-      (it holds the version open)") — and passed in the four others and in eight runs on its
+      (it holds the version open)") — and passed in the five others and in eight runs on its
       own. Not investigated further. One explanation that fits: the lock is shared by every
       copy of the descriptor, and a process that another test starts at that moment holds
       copies of the test process's descriptors until it executes its program (they are
