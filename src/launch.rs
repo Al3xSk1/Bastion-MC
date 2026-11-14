@@ -1296,15 +1296,16 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         };
         if phone_wanted
             && let Some(service) = crate::clips::prepare(crate::clips::Setup {
-            cfg,
-            paths,
-            program: &opts.program,
-            instance: &inst.id,
-            display,
-            game_pid: payload.and_then(|pid| u32::try_from(pid).ok()),
-            scopes: game_limits.is_some(),
-            log: launch_log.clone(),
-        }) {
+                cfg,
+                paths,
+                program: &opts.program,
+                instance: &inst.id,
+                display,
+                game_pid: payload.and_then(|pid| u32::try_from(pid).ok()),
+                scopes: game_limits.is_some(),
+                log: launch_log.clone(),
+            })
+        {
             log.line(Source::Launcher, &service.describe());
             services.push(service);
         }
