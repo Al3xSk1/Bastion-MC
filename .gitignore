@@ -1,2 +1,9 @@
 /target
 /.idea/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/packaging/arch/Bastion-MC/
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.pkg.tar.*
