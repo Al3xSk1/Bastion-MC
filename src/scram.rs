@@ -308,7 +308,17 @@ fn remove_credentials(paths: &Paths, only: Option<&BTreeSet<String>>, key_list: 
     // a key that is the same for everyone. (Its vault file goes with the directory below.)
     if only.is_none() {
         remove_spotify_key(key_list, report);
+        remove_key(
+            "the TOTP secret of the Realms approval",
+            store::REALMS_TOTP_KEY_DESCRIPTION,
+            &|| store::slot_keyutils_remove(store::Slot::RealmsTotp),
+            key_list,
+            report,
+        );
     }
+    // The in-game browser's profile: its site sessions are credentials too (a signed-in
+    // Discord). Files under the data directory only, so in every run.
+    remove_browser_profile(paths, report);
 
     // Every entry in the vault directory, whatever it is called.
     let vault = paths.vault();
@@ -404,10 +414,91 @@ fn remove_credentials(paths: &Paths, only: Option<&BTreeSet<String>>, key_list: 
 
 /// Is a live Spotify refresh-token key in the kernel's list (`/proc/keys` text)?
 fn spotify_key_listed(proc_keys: &str) -> bool {
+    key_listed(proc_keys, store::SPOTIFY_KEY_DESCRIPTION)
+}
+
+/// Is a live key with this description in the kernel's list (`/proc/keys` text)?
+fn key_listed(proc_keys: &str, description: &str) -> bool {
     proc_keys.lines().any(|line| {
-        line.contains(store::SPOTIFY_KEY_DESCRIPTION)
+        line.contains(description)
             && line.split_ascii_whitespace().nth(1).is_some_and(|flags| !flags.contains(['R', 'D', 'i']))
     })
+}
+
+/// Remove a key that is the same for every account (the Realms approval's TOTP secret), and
+/// confirm it against the kernel's list, as for the Spotify token.
+fn remove_key(
+    what: &str,
+    description: &str,
+    remove: &dyn Fn() -> crate::error::Result<bool>,
+    key_list: KeyList<'_>,
+    report: &mut Report,
+) {
+    let listed = key_list().ok().map(|text| key_listed(&text, description));
+    let mut invalidated = false;
+    for _ in 0..8 {
+        match remove() {
+            Ok(true) => invalidated = true,
+            Ok(false) => break,
+            Err(e) => {
+                report.could_not(format!("remove {what} from the keyring: {e}"));
+                return;
+            }
+        }
+    }
+    let deadline = Instant::now() + KEY_SETTLE;
+    let mut left = key_list().ok().map(|text| key_listed(&text, description));
+    while left == Some(true) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(40));
+        left = key_list().ok().map(|text| key_listed(&text, description));
+    }
+    match left {
+        Some(true) => report.could_not(format!(
+            "remove {what}: the kernel still lists a key for it that this login session cannot reach (another \
+             login session of yours holds it). Run `bastion-mc scram` there too, or log out of it."
+        )),
+        Some(false) if invalidated || listed == Some(true) => {
+            report.say(format!("removed {what} from the kernel keyring"))
+        }
+        None if invalidated => report.say(format!(
+            "invalidated {what} in this login session's keyring (not confirmed against the kernel's list)"
+        )),
+        _ => {}
+    }
+}
+
+/// The in-game browser's profile and its record of sign-ins. Deleted unless a browser still
+/// uses the profile (a `bastion-mc browser login` window, which nothing here stops): then it
+/// says so, and keeps it.
+fn remove_browser_profile(paths: &Paths, report: &mut Report) {
+    let profile = crate::browser::sandbox::profile_dir(paths);
+    let logins = profile.with_file_name("logins.json");
+    if !profile.exists() && !logins.exists() {
+        return;
+    }
+    let _lock = match crate::browser::sandbox::ProfileLock::take(paths) {
+        Ok(lock) => lock,
+        Err(e) => {
+            report.could_not(format!(
+                "delete the in-game browser's profile (its site sessions, such as a signed-in Discord): {e}"
+            ));
+            return;
+        }
+    };
+    let profile_gone = crate::tree::remove(&profile, Some(Instant::now() + SWEEP_TIME));
+    let logins_gone = match std::fs::remove_file(&logins) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    };
+    match (profile_gone, logins_gone) {
+        (Ok(()), Ok(())) => report.say(
+            "deleted the in-game browser's profile (its site sessions, such as a signed-in Discord). Sessions the \
+             sites keep on their side end only when you sign out there (Discord: Settings, Devices).",
+        ),
+        (Err(e), _) => report.could_not(format!("delete the in-game browser's profile {}: {e}", profile.display())),
+        (_, Err(e)) => report.could_not(format!("delete {}: {e}", logins.display())),
+    }
 }
 
 fn remove_spotify_key(key_list: KeyList<'_>, report: &mut Report) {

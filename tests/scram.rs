@@ -494,3 +494,33 @@ fn a_token_that_only_another_login_session_holds_is_reported_not_passed_over() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// The in-game browser's profile holds site sessions (a signed-in Discord): scram deletes it,
+/// with the record of sign-ins — but not while a browser still uses it (a `browser login`
+/// window holds the profile's lock): then the run is incomplete and says so.
+#[test]
+fn scram_deletes_the_browsers_profile_unless_a_browser_holds_it() {
+    let (root, paths) = paths("browser");
+    let account = format!("scram-browser-{}", std::process::id());
+    let profile = bastion_mc::browser::sandbox::profile_dir(&paths);
+    std::fs::create_dir_all(profile.join("storage")).unwrap();
+    std::fs::write(profile.join("cookies.sqlite"), b"a session").unwrap();
+    std::fs::write(profile.join("storage").join("ls.sqlite"), b"more").unwrap();
+    std::fs::write(profile.with_file_name("logins.json"), b"{}").unwrap();
+
+    // Held: kept, and said.
+    let lock = bastion_mc::browser::sandbox::ProfileLock::take(&paths).unwrap();
+    let report = scram::run_for(&paths, [account.clone()].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(text.contains("COULD NOT delete the in-game browser's profile"), "{text}");
+    assert!(profile.join("cookies.sqlite").exists(), "a profile in use is not deleted under the browser");
+    drop(lock);
+
+    // Free: deleted, with the record of sign-ins.
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(text.contains("deleted the in-game browser's profile"), "{text}");
+    assert!(!profile.exists() && !profile.with_file_name("logins.json").exists(), "{text}");
+    let _ = std::fs::remove_dir_all(root);
+}

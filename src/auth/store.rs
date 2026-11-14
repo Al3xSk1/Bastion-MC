@@ -217,6 +217,19 @@ impl TokenStore {
     }
 }
 
+/// The keyring description of the Realms approval's TOTP secret (`scram` removes it).
+pub const REALMS_TOTP_KEY_DESCRIPTION: &str = "bastion-mc:realms-totp";
+
+/// Invalidate `slot`'s key this login session's keyrings lead to (`scram`). `Ok(false)`:
+/// there is none (any more).
+pub fn slot_keyutils_remove(slot: Slot) -> Result<bool> {
+    match slot.keyutils_entry()?.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
 /// A secret that is not an account's refresh token, kept in the same store — kernel keyring,
 /// age vault or nowhere, as `auth.token_store` says — under a name of its own. No account
 /// label can take that name: labels start with a letter or a digit, slot names with `_`, and
@@ -236,7 +249,7 @@ impl Slot {
 
     fn description(self) -> &'static str {
         match self {
-            Slot::RealmsTotp => "bastion-mc:realms-totp",
+            Slot::RealmsTotp => REALMS_TOTP_KEY_DESCRIPTION,
         }
     }
 
