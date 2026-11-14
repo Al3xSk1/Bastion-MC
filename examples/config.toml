@@ -224,3 +224,16 @@ quality = 60               # their JPEG quality, 30 to 90
 width = 800                # the page size it starts with; the phone may change it (160 to 1280)
 height = 600
 memory_max_mb = 2048       # the browser's own memory ceiling (where the game's limits are in use)
+
+# Minecraft: Bedrock Edition — the Android build, run by your installed mcpelauncher-client
+# inside bastion's sandbox, on game files you downloaded with mcpelauncher-ui from your own
+# Google Play purchase (`bastion-mc bedrock import`). See docs/BEDROCK.md. Every Bedrock
+# launch is refused until you accept that mcpelauncher-client answers the game's Google Play
+# licence query itself (after mcpelauncher-ui checked with Google that you own the game).
+[bedrock]
+accept_licence_substitution = false
+# client = "/usr/bin/mcpelauncher-client"   # default: found where packages install it
+telemetry = true           # Microsoft's telemetry hosts; challenge capes may depend on them
+persist_worlds = true      # worlds survive a session; the game's sign-in tokens never do
+seccomp = "enforce"        # "enforce", or "log" once, to profile the real client
+servers = []               # Bedrock servers to join, e.g. [{ host = "play.example.org", port = 19132 }]

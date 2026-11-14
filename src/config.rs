@@ -48,6 +48,9 @@ pub struct Config {
     pub clips: crate::clips::ClipsConfig,
     /// The phone's web browser (see `browser`). Off by default.
     pub browser: crate::browser::BrowserConfig,
+    /// Minecraft: Bedrock Edition, the Android build in bastion's sandbox (see `bedrock`).
+    /// Refused until `accept_licence_substitution` is set.
+    pub bedrock: crate::bedrock::BedrockConfig,
 }
 
 impl Config {

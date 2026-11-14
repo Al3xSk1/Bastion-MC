@@ -210,6 +210,10 @@ pub const ALL: &[(&str, Harness)] = &[
     ("websocket", websocket),
     ("bidi", bidi),
     ("browser_command", browser_command),
+    // An imported Bedrock version as the store reads it: the AndroidManifest.xml mcpelauncher-ui
+    // extracted, the libraries' ELF headers, the store's own per-file manifest (re-read at every
+    // launch), and pacman's records about the client.
+    ("bedrock_store", crate::bedrock::store::fuzz),
 ];
 
 /// The WebSocket decoder of the browser's remote control.

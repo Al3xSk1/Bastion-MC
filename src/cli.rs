@@ -107,6 +107,15 @@ USAGE: bastion-mc [--events] <command> [options]
   profile sign <id> --key <file>      sign the manifest
   profile verify <id>                 verify signature and mods/ exactly as a launch would
 
+  bedrock client                      the installed mcpelauncher-client bastion would run, and why (or why not)
+  bedrock import <dir> [--id ID]      copy a Bedrock version mcpelauncher-ui downloaded (one directory in
+                                      ~/.local/share/mcpelauncher/versions/, or the Flatpak's in ~/.var/app/
+                                      io.mrarm.mcpelauncher/data/mcpelauncher/versions/) into bastion's store:
+                                      x86_64 only, no links or special files, every file hashed, read-only
+  bedrock versions [--verify]         imported versions, and the ones mcpelauncher-ui has that are not imported
+                                      (--verify: check every file against its SHA-256, as each launch does)
+  bedrock remove <id>                 delete an imported version (refused while a launch uses it)
+
   --help, --version
   --events    (first argument) report progress as JSON lines on standard output, for a front
               end such as bastion-mc-gui: status, login, logout, account, versions, instance, install, launch, scram
@@ -755,6 +764,94 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             let sub = args.positional("profile subcommand")?;
             let id = args.positional("instance id")?;
             profile_command(args, &paths, &sub, &id)?;
+        }
+        "bedrock" => {
+            // Minecraft: Bedrock Edition's client and version store (`bedrock::runtime`,
+            // `bedrock::store`). Not offered with --events: the lines are printed here.
+            use crate::bedrock::{runtime, store};
+            match args.positional("bedrock subcommand (`client`, `import`, `versions` or `remove`)")?.as_str() {
+                "client" => {
+                    args.flags(|_, _| Ok(false))?;
+                    let cfg = Config::load(&paths)?;
+                    let description = runtime::describe(&cfg.bedrock);
+                    let looked: Vec<String> = description.searched.iter().map(|p| p.display().to_string()).collect();
+                    match description.client {
+                        Ok(client) => {
+                            println!("client: {}", client.program.display());
+                            println!(
+                                "version: {}",
+                                client.version.as_deref().unwrap_or("not known (no package owns it)")
+                            );
+                            for dir in &client.lib_dirs {
+                                println!("data directory: {}", dir.display());
+                            }
+                            for note in &description.notes {
+                                println!("{note}");
+                            }
+                        }
+                        Err(e) => {
+                            println!("looked for: {}", looked.join(", "));
+                            for note in &description.notes {
+                                println!("{note}");
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                "import" => {
+                    let dir = PathBuf::from(args.positional("version directory")?);
+                    let mut id = None;
+                    args.flags(|name, a| {
+                        if name == "id" {
+                            id = Some(a.value("--id")?);
+                            return Ok(true);
+                        }
+                        Ok(false)
+                    })?;
+                    let imported = store::import(&paths, &dir, id.as_deref(), reporter)?;
+                    for note in &imported.notes {
+                        println!("{note}");
+                    }
+                    println!("{}", imported.summary.id);
+                }
+                "versions" => {
+                    let mut check = false;
+                    args.flags(|name, _| {
+                        check |= name == "verify";
+                        Ok(name == "verify")
+                    })?;
+                    let listing = store::list(&paths)?;
+                    for line in store::listing_lines(&listing, &store::ui_version_dirs_for_user()) {
+                        println!("{line}");
+                    }
+                    if check {
+                        let mut failed = 0;
+                        for version in &listing.versions {
+                            match store::verify(&paths, &version.id) {
+                                Ok(summary) => {
+                                    println!("{}: every file matches its SHA-256 ({} files)", summary.id, summary.files)
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    println!("{}: {e}", version.id);
+                                }
+                            }
+                        }
+                        if failed > 0 {
+                            return Err(Error::Integrity(format!("{failed} Bedrock version(s) failed the check")));
+                        }
+                    }
+                }
+                "remove" => {
+                    let id = args.positional("version id")?;
+                    args.flags(|_, _| Ok(false))?;
+                    for note in store::remove(&paths, &id)? {
+                        println!("{note}");
+                    }
+                    reporter.status(format!("removed Bedrock version {id}"));
+                }
+                other => return Err(usage(format!("unknown bedrock subcommand {other:?}"))),
+            }
         }
         other => return Err(usage(format!("unknown command {other:?}"))),
     }

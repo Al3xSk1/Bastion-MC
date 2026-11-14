@@ -694,6 +694,7 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             text("browser text -- héllo 👩\u{200d}💻"),
             text("browser frames on"),
         ],
+        "bedrock_store" => bastion_mc::bedrock::store::fuzz_seeds(),
         other => panic!("no seeds for {other}"),
     }
 }
@@ -767,12 +768,18 @@ fn every_harness_has_a_test_here() {
         "websocket",
         "bidi",
         "browser_command",
+        "bedrock_store",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
     expected.sort_unstable();
     assert_eq!(names, expected, "a harness was added without a robustness test (or the other way round)");
+}
+
+#[test]
+fn bedrock_android_manifests_version_manifests_and_elf_headers() {
+    run("bedrock_store");
 }
 
 #[test]
