@@ -21,10 +21,19 @@ did not make) and this machine is not in doubt, you can continue here.
 
     bastion-mc scram
 
-What it does: stops a running game and its launcher (the session token only ever existed
-in that launcher's memory, so it is gone with the process), removes every stored refresh
-token from the kernel keyring, deletes the age vault files, and forgets which player each
-local account was. It prints what it removed.
+What it does: first it stops whatever could still store a sign-in — a running game and
+its launcher (the session token is gone with them), a sign-in that is still waiting for
+you, a skin, cape, canary or vault command. Then it removes every stored refresh token
+from the kernel keyring, deletes the age vault files, and forgets which player each local
+account was. Last, and for at most 15 seconds, it deletes what stopped games left behind.
+It prints what it did.
+
+Read what it prints. A line that starts with `COULD NOT` means that something is still
+there or could not be checked, and it says what to do — for example end a process
+yourself, or run the command in another login session of yours that still holds a key
+(or log out of it). Do that, then run `bastion-mc scram` again. (The graphical front end
+runs the same command from its Security page, and shows such a result as SCRAM
+INCOMPLETE.)
 
 What it does **not** do:
 

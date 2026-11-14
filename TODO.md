@@ -1,28 +1,37 @@
 # TODO — where the work stands
 
-Snapshot of 2026-11-13, after the second pass ("finish the TODO list"). Everything below
-under "Done in the second pass" is committed.
+Snapshot of 2026-11-13, after the third round was merged into this tree. Everything under
+"Done in the third round" and "Done in the second pass" is committed.
 
-**A third round is in progress and is NOT in this tree yet.** It is being built in separate
-working copies (`target/agents/`, plan in `target/agents/INTEGRATION.md`): an original
-HUD-style front end, a first-party companion Fabric mod (zoom and other conveniences), a
-UDP relay for voice chat, verified mod installs from Modrinth (ViaFabric, Simple Voice
-Chat), the fixes for the two independent reviews, and a project website for GitHub Pages.
-(The review fixes are the exception once their branch is merged: the section "Independent
-review" below, and the entries marked "review" under Open, are written for the tree that
-has them.)
+The third round — the "workshop HUD" front end, the first-party companion Fabric mod, the
+UDP relay for voice chat with the fix of review finding B-M3, verified mod installs from
+Modrinth, and the fixes for the two independent reviews — was built in separate working
+copies and is **merged** (merge commits `3025219`, `aef85df`, `263498c`, `2dd827a`,
+`35d57cd`; integration fixes `1dbb587`, `c383196`). A project website for GitHub Pages is
+being built separately and is not in this tree yet.
 
 How to read this file: **Open** is what is left and why; **Blocked on you** needs
-something only you have; **Done in the second pass** is the record of what changed, with
-where it is and how it was checked; **Decided against / deferred** keeps the reasoning for
+something only you have; **Done in the third round** and **Done in the second pass** are
+the record of what changed, with where it is and how it was checked; **Independent review**
+is the record of the review round; **Decided against / deferred** keeps the reasoning for
 the big ideas so they are not re-argued from scratch.
 
-Verification state at the end of the pass: `cargo fmt --check` clean, `cargo clippy
---workspace --all-targets` clean, `cargo test --workspace` green (see the count in
-README "Status"), also with `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1`; nested-compositor and
-Wayland suites green against real gamescope 3.17 and sway 1.12; GUI live test green;
-`makepkg` from a tarball builds both packages and their `check()` passes; `cargo deny
-check` ok.
+Verification state of the merged tree (the integrator's runs, 2026-11-13, with separate XDG
+directories and only private displays): `cargo fmt --check` clean (re-checked on the final
+commit); `cargo clippy --workspace --all-targets` without warnings; `cargo test
+--workspace` 576 passed, 0 failed (README "Status" says what that number counts), and the
+same with `BASTION_NET_TESTS=1 BASTION_X11_TESTS=1`; the nested-compositor suite 4/4
+against gamescope 3.17 with the clipboard test; the Wayland suite 2/2 against headless
+sway; `tests/nested_game.rs` (vanilla) and `tests/companion_game.rs` (the signed Fabric
+profile, in the demo world) passed; two demo launches through the nested compositor — a
+signed Fabric profile with Simple Voice Chat and a voice rule, and one with ViaFabric and
+Simple Voice Chat — loaded their mods, native libraries included, and stopped with exit
+status 130; `cargo deny check` (offline): advisories, bans, licences and sources ok. The
+README's quick start (`instance new`, `install`, `launch --demo`, `doctor`, `status`,
+`versions`, `config example`) was run on the final commit by the README's writer, and the
+fuzz crate compiles there (`cargo check --bins` in `fuzz/`, all twelve targets). **Not run
+on the merged tree:** `makepkg`, the front end's live test, anything that needs an
+account, `age`, root or another kernel, and the libFuzzer targets themselves.
 
 ## Open
 
@@ -30,26 +39,110 @@ check` ok.
 - [ ] **Runbook as QR codes / print view** (§8 of the old list). Not built: needs a QR
       encoder (a dependency, or ~300 lines). The text is in the package docs and in
       `bastion-mc wiki scram`.
-- [ ] **`README.md` "Status" numbers** drift with every test added; re-count before a release.
+- [ ] **`README.md` "Status" numbers** drift with every test added; re-count before a
+      release (the README says how: the `test result` lines of `cargo test --workspace`).
+- [ ] **`makepkg` on the merged tree.** Last run in the second pass. Since then the review
+      fixes, the third round and the PKGBUILD's `java-environment>=17` came in; the
+      integrator's script for it exists, but it was not run.
+- [ ] **The package installs five documents** (`README.md`, `THREAT_MODEL.md`,
+      `TOKEN_INJECTION.md`, `SCRAM_RUNBOOK.md`, `MC_VAULT_ACCOUNT.md`), not the new
+      `docs/MODS.md`, `docs/COMPANION.md` and `docs/README.md` that the README links to
+      (`packaging/arch/PKGBUILD`, `package_bastion-mc`).
+- [ ] **Java runtimes from Arch's jre packages are not found** (review of the documents).
+      The launcher recognises a runtime by its `release` file (`src/java.rs`, `read_release`
+      and `discover_in`), and for Java 17 and later Arch ships that file only in the jdk
+      packages: `jre21-openjdk` is installed on the development machine and neither `launch`
+      nor `doctor` lists it, and the package file lists of `jre17-openjdk`, `jre25-openjdk`
+      and `jre-openjdk` have no `release` (read on 2026-11-13; `jre8-openjdk` has one,
+      through `jre8-openjdk-headless`). Yet the refusal in `java::select` recommends
+      `jre<N>-openjdk` or `jre-openjdk`, `doctor` recommends `jre21-openjdk`, and the
+      PKGBUILD's `depends=('java-runtime')` and its `optdepends` (`jre17-openjdk`,
+      `jre21-openjdk`, `jre-openjdk: current Minecraft releases`) can all be met by runtimes
+      the launcher ignores; `jre-openjdk` is moreover Java 27, while 26.3 declares Java 25 and
+      the default `java.match = "exact"` refuses 27 for it. Either determine the release
+      another way (the `java-NN-openjdk` directory name, or the runtime's `lib/modules`), or
+      name jdk packages everywhere (`jdk25-openjdk` for 26.3). Until then the README names
+      `jdk25-openjdk`.
 - [ ] **Remove `target/third-party/`, `target/tools/`, `target/probe/`** when you no longer
       need them (all three are reproducible: `tests/support/fetch.sh`, `cargo install
       --root target/tools …`, the makepkg recipe). Left in place because the display tests
       need the first one.
 - [ ] **Stale markers**: a launcher killed with SIGKILL leaves `cache/running/<pid>` and its
-      scratch directory; both are swept by the next launch or by `scram` (tested). Nothing
-      to do unless you want a `bastion-mc clean` command.
+      scratch directory; both are swept by the next launch or by `scram` (tested). The same
+      holds for the companion channel's socket name in `$XDG_RUNTIME_DIR/bastion-mc/` when
+      the launcher could not establish that the program in the sandbox exists, or was killed
+      or crashed before that point: the next launch sweeps it (tested). Nothing to do unless
+      you want a `bastion-mc clean` command.
+- [ ] **Leftover Wayland socket names are not swept** (integration review). The game's
+      security-context socket (`$XDG_RUNTIME_DIR/bastion-mc/wl-*`) loses its name in step 8
+      only when the program in the sandbox could be identified (`src/launch.rs`); otherwise
+      the name stays, and nothing removes it later: `src/sandbox/display.rs` and
+      `src/sandbox/wayland.rs` have no sweep like the companion channel's. The integrator
+      judged it harmless (once the launcher has exited, the compositor no longer accepts
+      connections on it); a sweep would tidy it.
+- [ ] **The front end shows the launcher's warnings as ordinary status lines** (integration
+      review). The event protocol has no warning flag: under `--events`, `Reporter::warn`
+      sends the same `Status` event as any progress note (`src/events.rs`), so a line such as
+      "limits: WARNING: … NOT in force" appears in the window's status line and console like
+      any other. The protection read-out still shows each aspect's level. A warning event
+      (or a flag on `Status`) and a way to set such lines apart are not built.
+- [ ] **No test of the default suite runs the voice relay's own code in a confined
+      process** (integration review). The test
+      `voice::the_relay_can_still_open_flows_after_the_launcher_has_confined_itself` does
+      what the relay does for a new flow with a plain UDP socket; the relay's own sockets
+      (`GameSocket` with `IP_PKTINFO`, `open_upstream` in `src/egress/udp.rs`) ran after
+      confinement only in the real launch of THREAT_MODEL §7 E22. A test that serves a flow
+      from a confined child would close that.
+- [ ] **Sandboxes killed at start when many start at once** (voice-chat.md §7, flake 2): with
+      four copies of a sandbox test binary running, now and then a payload ends with status
+      137 and no output, or a whole test binary is killed. Reproduced with plain bubblewrap
+      and no code of this project (`seq 1920 | xargs -P 48 …`: 2 of 1920); who sends the
+      signal was not found (no kernel log entry, no tracing tools on the machine). A real
+      launch starts one or two sandboxes, far below that level; a sandbox test can fail this
+      way when several suites run at the same moment — run it again before looking for a
+      cause in the code.
 - [ ] **Texture gateway memory** (review, adjacent to A-F5): the broker's buffers now come
       out of one 64 MiB budget, but the texture gateway in `src/egress/mod.rs` still holds
       up to 4 MiB per connection (256 connections) outside it. In practice Mojang's
       texture host serves skins of a few kilobytes; the bound is what the code allows.
       Either put it under the same budget or lower the per-texture cap.
-- [ ] **`network.launcher_proxy` and pass-through connections** (review B-M3, belongs to
-      the egress relay): until that fix is in, README "Limits, proxy" says that
-      `*.minecraft.net` connections do not go through the proxy. Remove that sentence
-      with the fix.
-- [ ] **`cargo deny check`** was not re-run after `flate2` became a direct dependency
-      (no `cargo-deny` in the working copy the fixes were made in). `Cargo.lock` gained
-      one dependency edge and no crate, so its result should be unchanged; run it once.
+- [ ] **A memory kill can be reported as "game exited with status 1"** (mod-catalog and
+      voice-chat notes). After the kernel's out-of-memory kill inside the scope, the user
+      manager (`DefaultOOMPolicy=stop`) stops the scope, and its SIGTERM can reach
+      bubblewrap before bubblewrap reports status 137; `launch.rs` turns a death by signal
+      into status 1. `OOMPolicy=continue` on the scope (`src/sandbox/cgroup.rs`) made the
+      `systemd-run` reproduction deterministic (137 in 48 of 48 runs); not tried in the
+      launcher. The test accepts either outcome since the review round, which hides the same
+      race in a real launch.
+- [ ] **Front end, small** (gui.md §7): the launch page's panels are stretched to one line
+      with the block around the gauge only when their words are of usual length (otherwise
+      each is as high as its content); the 5-per-second redraw while a game runs happens on
+      the launch page only, and whether it should stop while the window is hidden was not
+      looked into; a version name longer than 48 characters, or one that cleaning would
+      change, is not offered in the "new instance" form, and the form does not say what it
+      left out.
+- [ ] **Companion mod, small** (companion-mod.md part 5): `bastion-mc doctor` does not
+      mention it; the `instance.toml` template written by `instance new` and `profile new`
+      mentions voice chat but not `[companion]`; the front end has no indicator of its own
+      for it (its lines appear in the console like any other).
+- [ ] **Voice chat, small** (voice-chat.md §3): the front end says nothing about voice — a
+      line such as "voice: relayed to play.example.org:24454 while connected" in its
+      protection read-out would be honest, and was not built; `doctor` reports the Landlock
+      UDP rule but does not test the relay.
+- [ ] **Mod catalog, small** (mod-catalog.md §7): `profile check` exits 0 whatever it
+      flags (a `--strict` could make it a gate); `profile check` does not ask the file
+      server for each file's date (one request per jar, and it would tell the file server
+      which jars are in the profile — so "fresh" there goes by the build's date, and the
+      output says so); no `profile remove`, no "update everything", no `<mod>@<version>` to
+      pin a build (a downgrade is a manual copy plus `profile lock`); a replaced jar is
+      deleted, where keeping it aside until the next signature would make a wrong
+      replacement recoverable; not offered through `--events`, so the front end has no
+      button for it; the user agent has no contact address (Modrinth recommends one; the
+      project has no public home yet, the same blocker as the PKGBUILD's `url`); registry
+      file names with spaces, brackets or `%` are refused rather than renamed; whether a
+      kept dependency satisfies a version *range* is left to the loader; the alias table is
+      compiled in, and its live test failing (a project renamed or removed) is the cue to
+      update it.
 
 ### Needs a design decision first
 - [ ] **Wayland compositors without `wp_security_context_v1`** (Mutter/GNOME, Weston,
@@ -61,9 +154,12 @@ check` ok.
       filtering Wayland proxy in front of gamescope that withholds the data-device and
       primary-selection globals; (c) patch/flag upstream. Until decided, not wired in.
 - [ ] **Playability inside gamescope** (pointer capture, full screen `-f`, refresh rate):
-      needs you at the keyboard. Then pick defaults for `nested_compositor_args`.
-- [ ] **Login-protocol proxy**, **signed server allowlist**, **Fabric companion mod**,
-      **frozen `/usr`**: see "Decided against / deferred". Each is days of work; say which.
+      needs you at the keyboard. Then pick defaults for `nested_compositor_args`. The same
+      session can try the companion mod by hand: hold C in a world, turn the wheel, switch
+      fullbright on in a cave.
+- [ ] **Login-protocol proxy**, **signed server allowlist**, **approval prompts through the
+      companion mod**, **frozen `/usr`**: see "Decided against / deferred". Each is days
+      of work; say which.
 - [ ] **Signals from the confined launcher** (review, residual of A-F1): once the game runs
       the launcher can no longer read files, run programs or reach the keyring — but it
       can still signal every process of yours, because stopping the game is done with a
@@ -74,6 +170,59 @@ check` ok.
       strict reader accepts one unambiguous shape. If a pack you care about is refused,
       the choice is between re-zipping it (what the message says) and teaching the reader
       one more shape together with a proof that `java.util.zip.ZipFile` reads it the same.
+- [ ] **Voice for servers with a separate voice host** (`voice_host` pointing elsewhere, for
+      example behind a TCP-only proxy): not supported. Supporting it means relaying
+      datagrams to an address that no TCP connection vouches for — a weaker design (a
+      second name resolution, a second destination) that should be a deliberate decision,
+      not an extension of this one.
+- [ ] **Further companion features**: none were added. Candidates that fit "harmless
+      client-side convenience, nothing servers commonly forbid": a toggle mode for zoom,
+      the smooth camera while zoomed, a clock line in the HUD read-out. Deliberately not
+      candidates: free look, a minimap, anything that automates input or shows what the
+      unmodified game does not show.
+- [ ] **The companion mod beyond the tested combination**: Minecraft 26.3 with Fabric Loader
+      0.20.1 only. `force` on another Minecraft version was never tried in a real game; a
+      Fabric Loader too old to know `fabric.addMods` would ignore it silently (the launcher
+      would say "added" and no hello would follow); Quilt is not supported. Adding a
+      version is a procedure (`docs/COMPANION.md`, "Adding a tested Minecraft version").
+
+### Not verified here, by package (and why)
+- [ ] **Front end** (gui.md §7): no click was ever made in a real window — clicks cannot be
+      automated on the development machine and the window must not open on your desktop,
+      so everything about pressing things is from iced's simulator and emulator; `scram
+      --yes` was never run from the window, because it would remove the real sign-ins of
+      this machine (the scram path is tested against stand-ins that follow the launcher's
+      contract); Wayland was not used (X11 through Xwayland in a headless compositor only);
+      the GPU renderer was seen on the opening page only, and motion was never watched (the
+      gauge is tested as a function of time); other fonts only as an experiment (FreeSans
+      and FreeMono); high-density displays only as scale-2 snapshots; keyboard-only use not
+      examined.
+- [ ] **Companion mod** (companion-mod.md parts 4 and 5): no person at the keyboard (the key
+      press was synthetic, through XTEST, on a US layout); nobody looked at a dark place
+      with fullbright on (the input to the game's light-map shader was measured, what the
+      shader does with it was read, not watched); no other Minecraft version; the Wayland
+      path with a headless sway only and no key press there; no multiplayer; reproducibility
+      across compilers (one JDK is installed; two builds with it give the same bytes).
+- [ ] **Mod catalog** (mod-catalog.md §7): ViaFabric translating a connection and Simple
+      Voice Chat carrying voice (they need an account, a server, UDP and a microphone; only
+      loading was observed); a Quilt profile (the rule is unit-tested only); the cargo-fuzz
+      targets `registry` and `jar` (compile-checked only); the jar scan near its 512 MiB
+      limit; HTTP 429 and 410 (only the wording); download deadlines with a slow server;
+      Modrinth through Tor; game versions other than 26.3 in live lookups; the file-date
+      rule on a real fresh file (tested against scripted answers and a stand-in file server
+      over TLS); how often Modrinth's file server rewrites its storage (one such day was
+      found); what `date_published` is for a draft or scheduled build (undocumented; needs a
+      project of one's own); a file-server answer without `Last-Modified` (stand-in only).
+- [ ] **Voice chat** (voice-chat.md §3): a real voice session (needs a server running the
+      mod and a signed-in account); capture and playback (sound is off in the test
+      configuration); datagrams sent by the game itself in a real launch — the launcher's
+      side was exercised with a stand-in client in the game's network namespace, and the
+      Landlock UDP rule and the seccomp filter by `tests/voice.rs`; the B-M3 fix against a
+      real SOCKS5 proxy such as Tor; kernels without Landlock ABI 10; other voice mods
+      (anything that sends plain UDP to the game server's own address should work the same,
+      anything with another host, STUN/ICE or WebRTC will not); the cargo-fuzz target `udp`
+      (compile-checked only); Simple Voice Chat's own network code (read from its class
+      files, not run).
 
 ## Blocked on you (hardware, accounts, identity)
 - [ ] **Live Microsoft → Xbox → Minecraft sign-in.** Needs your Azure client ID and
@@ -82,7 +231,10 @@ check` ok.
 - [ ] **Everything that needs a signed-in account**, all built and tested against scripted
       replies / a stand-in Mojang only: the broker against the real API (join, chat signing,
       attributes, block list), `skin show|set|reset|export`, `cape set`, the canary on a
-      real profile, `export-proofs` with real history, multi-account with two real accounts.
+      real profile, `export-proofs` with real history, multi-account with two real accounts,
+      joining a real multiplayer server — and with that ViaFabric translating a connection,
+      the companion mod on a server, and Simple Voice Chat carrying voice through the relay
+      (which also needs a server running the mod and a microphone with `audio = "pulse"`).
 - [ ] **A real Wayland desktop session** (game and GUI), **NVIDIA**, **Java 8-era versions
       end to end with the broker** (TLS 1.2 fallback flag), **a real `age` binary and
       hardware plugins** (`vault reseal`, `doctor`'s identity and recipient classification).
@@ -94,18 +246,134 @@ check` ok.
       from the game. That nothing after that point needs the token store was established
       by reading the code; every launch run here was a demo or burner launch (no token).
 - [ ] **A kernel with Landlock ABI 8 or older** (review A-F2): the partial confinement and
-      its reporting are tested by asking this kernel (ABI 10) for less.
-- [ ] **PKGBUILD**: the real `url`, your release-signing key in `validpgpkeys`, a signed
-      tag. Everything else in it is done (auditable build, reproducibility notes, vendoring
-      recipe, new docs installed).
+      its reporting are tested by asking this kernel (ABI 10) for less. A kernel without
+      ABI 10 would also show the voice relay without its second, Landlock layer for UDP in
+      the sandbox.
+- [ ] **A person at the keyboard**: clicks in the real front-end window, playability inside
+      gamescope, and the companion mod by feel (see Open).
+- [ ] **A real SOCKS5 proxy (Tor)**: the B-M3 fix and Modrinth through the proxy are tested
+      against a stand-in proxy only.
+- [ ] **`scram --yes` from the window against the real launcher**: never run here, because it
+      removes the real sign-ins of this machine; worth doing once on a machine or account
+      whose sign-ins you can lose.
+- [ ] **PKGBUILD**: the real `url` (a value is there, still marked TODO), your
+      release-signing key in `validpgpkeys`, a signed tag. Everything else in it is done
+      (auditable build, reproducibility notes, vendoring recipe, the second pass's documents
+      installed — see Open for the documents of the third round).
 - [ ] **Coverage-guided fuzzing**: `rustup toolchain install nightly && cargo install
-      cargo-fuzz`, then `fuzz/README.md`. The targets compile; they have never run.
+      cargo-fuzz`, then `fuzz/README.md`. The twelve targets compile (checked on the merged
+      tree); they have never run.
 - [ ] **`mc-vault` account / `ptrace_scope=3`**: documented (`docs/MC_VAULT_ACCOUNT.md`),
       needs root; not exercised.
 - [ ] **Minecraft help-centre wording in the runbook**: their site needs a browser; only
       the request-form address was checked to exist. Read it once and adjust phase 3.
 
+## Done in the third round
+
+The record of each package — what was verified, how, and what was not — is its notes file
+in `docs/notes/` (index: `docs/README.md`). Where a note and the code disagree, the code
+is right.
+
+### The front end ("workshop HUD") — `docs/notes/gui.md`
+- New interface: a rail and five pages (Launch, Accounts, Instances, Console, Security);
+  the gauge around the launch control; account cards; the protection read-out, where a
+  level is always a word and a shape, never a colour alone; the sign-in panel. Nothing is
+  drawn outside the place it was given: every paragraph of every page in every state is
+  measured at thirteen window sizes, also with 3000-letter texts that cannot be broken.
+  No timer runs while nothing moves.
+- **B-M2 fixed**: "scram complete" only for exit status 0, no line starting `COULD NOT`
+  and a report that says something; anything else is SCRAM INCOMPLETE on every page.
+- **B-M1, the front end's half, fixed**: nothing in the front end ends the launcher that
+  runs a scram (no kill, a process group of its own, standard error to `/dev/null`); after
+  30 minutes the window stops waiting, leaves it running and says so.
+- **B-L2, the front end's half, fixed**: a sign-in this window started is ended before the
+  scram starts, and nothing that stores a token can start while a scram runs. Found along
+  the way: a window closed between "Yes, scram" and the scram's start took the scram with
+  it; it now waits until the scram has started.
+- Threat model rows G2, G3, G4 extended, G6 rewritten, G7 new (gui.md §5; now in the
+  threat model). New
+  dependency in the front end's tree only: lyon, through iced's `canvas` feature (six
+  crates); `cargo tree -p bastion-mc` has none of the front end's drawing crates.
+- Verified by its engineers: 118 unit tests and 4 emulator tests; the live test on a
+  private display against the real launcher and a real demo game, twice in one run; the
+  real window with the GPU and the software renderer, closed by `WM_DELETE_WINDOW`; 0
+  clock ticks of CPU in 15 idle seconds; `cargo deny check` ok.
+
+### The companion mod — `docs/notes/companion-mod.md`, `docs/COMPANION.md`
+- `bastion-companion`: zoom (on by default), a HUD read-out (off), fullbright (off). An
+  interface-only convenience that enforces nothing; added by the launcher, read-only and
+  outside `mods/`, through `fabric.addMods`, to Fabric profiles of tested versions (26.3);
+  settings under `[companion]`, per instance in `instance.toml`.
+- The channel: one socket, mod to launcher only; every line bounded and checked, logged as
+  game output, never acted on; read only after the launcher has confined itself; a
+  generated-input harness (`companion`).
+- Hermetic build: `build.rs` compiles it with the system `javac --release 17` — no Gradle,
+  no network, no Minecraft or Fabric code as input (compile-only stand-ins for seven types,
+  compared with the real jars by an opt-in test); two builds give the same bytes.
+- Verified in the real game on the nested-compositor, direct-X11 and Wayland paths, with
+  the effect of each feature measured in a running demo world; on the X11 paths also with
+  the zoom key really pressed (XTEST, private display).
+- With this, the old §7 idea of a Fabric companion mod exists as what "Decided against /
+  deferred" said it could only be: interface only. Approval prompts are not built.
+
+### The mod catalog — `docs/notes/mod-catalog.md`, `docs/MODS.md`
+- `profile add` and `profile check` against Modrinth: aliases by project id, releases only
+  unless `--prerelease`, a 48-hour quarantine that also reads the file server's own date
+  for each file, size + SHA-512 + SHA-1, all or nothing, nothing signed, the capability
+  scan printed before signing. `profile lock` keeps a recorded `source` while the file is
+  unchanged; the capability report holds every jar, also two that go by one identity.
+- Verified: scripted registry answers (a 28-case matrix of refusals that leave everything
+  as it was) and a stand-in registry over TLS (an add and a check end to end, a file that
+  does not match, a fresh file, an untrusted certificate, a deadline, the SOCKS5 proxy),
+  live lookups of the six aliases,
+  three real launches with
+  ViaFabric, Simple Voice Chat, Sodium, Lithium and Mod Menu (they load; update checks and
+  Sodium's `lspci` are refused by the sandbox).
+- Threat model rows C8–C12, N4, N5 (proposed in mod-catalog.md §6; now in the threat model).
+
+### Voice chat and B-M3 — `docs/notes/voice-chat.md`
+- A UDP relay per server rule (`voice = N` or `udp = [...]`), tied to an open game
+  connection and to the address it uses; 1400 bytes per datagram, 100 and 500 per second,
+  8 flows, 30 s without a datagram from the game; Landlock UDP rules in the sandbox for
+  exactly those ports; IPv4 first for such servers. A server table with an unknown key is
+  an error now (it used to be ignored), and `port = 0` is refused.
+- **B-M3 fixed**: with `launcher_proxy` set, the connections to Mojang's services that the
+  relay passes through go through the proxy (CONNECT by name); the confined launcher then
+  keeps no direct port 443; the launch log says per network mode what is and is not
+  proxied.
+- Verified: 14 tests in `tests/voice.rs` (13 in the real sandbox), unit tests of the
+  decision table, the `udp` harness, the relay inside a real launch with a stand-in client
+  — which found that "open" meant "not yet closed by both sides" (fixed: the first hang-up
+  ends it) —, and Simple Voice Chat loading with its native libraries.
+
+### Integration (`1dbb587`, `c383196`)
+- `profile add` says, after adding Simple Voice Chat, that its UDP needs a server rule
+  naming the port and that installing the mod opens nothing (`VOICE_CHAT_HINT` in
+  `src/profile/catalog.rs`; tested both ways).
+- PKGBUILD: `makedepends` `java-environment>=17` (the companion jar is compiled with
+  `--release 17`).
+- `src/confine.rs` header: the companion channel and relayed datagrams are among what the
+  confined launcher still handles; UDP is not restricted by it.
+- `tests/sandbox.rs`: the keyring test's key has a per-process name (two runs at once
+  removed each other's key). `tests/voice.rs`: the test of UDP after confinement applies
+  the whole reworked confinement, Landlock and the system-call filter.
+- `docs/notes/broker-test-race.patch` dropped: the review fixes had already made that test
+  independent of the race.
+- Documents (this pass): the README as a front page with the merged counts,
+  `docs/README.md` as the index of `docs/`, three screenshots in `docs/images/`, the new
+  `docs/MODS.md` and `docs/COMPANION.md`, and the threat model brought up to the round
+  (companion J19, voice relay J20, B-M3 in N1, mod catalog C8–C12, N4, N5, front end
+  G2–G4, G6, G7, experiments E19–E25). Then two reviews of the documents (accuracy against
+  the code, and a newcomer following the README in an empty data root) and their fixes,
+  finding by finding, in `docs/notes/docs-pass.md`.
+
 ## Done in the second pass
+
+Verification state at the end of the second pass: `cargo fmt --check` clean, `cargo clippy
+--workspace --all-targets` clean, `cargo test --workspace` green, also with
+`BASTION_NET_TESTS=1 BASTION_X11_TESTS=1`; nested-compositor and Wayland suites green
+against real gamescope 3.17 and sway 1.12; GUI live test green; `makepkg` from a tarball
+builds both packages and their `check()` passes; `cargo deny check` ok.
 
 ### §1 nested compositor — all open points closed
 - Clipboard: `native/noclip.c` (built by `build.rs` with the system C compiler, honours
@@ -197,7 +465,9 @@ here and are fixed without having been observed: a systemd user manager without 
 delegated controller (A-F7), a real compositor that takes a security context and filters
 nothing (A-F8, produced with a stand-in), a real `age` recipients file being widened (B-M4).
 
-**Fixed (25 of 27, and the adjacent one).**
+**Fixed (25 of 27, and the adjacent one)** in the review round; the remaining two (B-M2,
+B-M3) and the front-end halves of B-M1 and B-L2 in the third round — so all 27 now. The
+join residual behind A-F10 stays (it needs the login-protocol proxy).
 
 - *The launcher's own confinement* (A-F1, A-F2, A-F3, A-F6): a system-call filter on all
   threads next to Landlock — no kernel keyring, no `execve`, no new namespaces, the
@@ -237,13 +507,16 @@ nothing (A-F8, produced with a stand-in), a real `age` recipients file being wid
   configuration cannot widen or leave; `doctor` and the documents say exactly what a device
   identity does and does not protect.
 - *Wording* (A-F10): the threat model no longer understates what a mod can do with joins.
+- *Third round* (B-M2, B-M3, the front-end halves of B-M1 and B-L2): see "Done in the
+  third round".
 
-**Left, and why.**
+**Left, and why** (as recorded at the end of the review round).
 
 - B-M2 (the front end reporting an incomplete scram as done) and B-M3 (pass-through
   connections bypassing `launcher_proxy`) belong to the front end and to the egress relay;
   so do the front-end halves of B-M1 and B-L2. The launcher's contract for them is
-  unchanged: exit status 1 and `COULD NOT …` lines when scram is incomplete.
+  unchanged: exit status 1 and `COULD NOT …` lines when scram is incomplete. (All four
+  were done in the third round.)
 - The join residual itself (A-F10) needs the login-protocol proxy; see below.
 - Signals from the confined launcher, the texture gateway's buffers, and the items under
   "Blocked on you" that carry the word "review": see Open.
@@ -268,7 +541,8 @@ profile — each started, ran and stopped cleanly with the launcher confined
 (THREAT_MODEL §7 E16), and once more through gamescope on the final tree; the fuzz crate
 compiles (`cargo check`, all targets). Not run:
 `makepkg`, `cargo deny check`, the GUI live test, anything that needs an account, `age`,
-root, or another kernel.
+root, or another kernel. (`cargo deny check` and the GUI live test were run in the third
+round; see the verification state at the top.)
 
 ## Decided against / deferred, with the reason
 
@@ -284,6 +558,12 @@ root, or another kernel.
 - **Fabric companion mod (old §7).** Enforcement must live in the launcher; the mod would
   be interface only. The launcher-side gates exist for packs; servers and account requests
   are per-config-switch today. Per-request approval needs a prompt channel first.
+  *Third round:* built as exactly that — an interface-only convenience (zoom, HUD read-out,
+  fullbright) whose one-way channel the launcher logs and never acts on. Approval prompts
+  are still not built. Their design keeps the rule above: the decision is made and entered
+  outside the sandbox, in the launcher's own interface; the mod can at most tell the player
+  that the launcher is asking, and nothing arriving on the channel may create a prompt or
+  count as consent (`docs/notes/companion-mod.md` part 2).
 - **Hardware normalisation.** GPU renderer string cannot be normalised by mounts, so the
   result stays fingerprintable. `/proc/cpuinfo` and memory size are real. Documented (§5.9).
 - **Frozen `/usr` + JVM (EROFS/composefs).** Needs a root component.
@@ -291,7 +571,9 @@ root, or another kernel.
   notification** (unsafe for pointer arguments), **padding of auth traffic** (rustls 0.23
   has no record-padding setting; destinations are visible anyway), **cross-registry hash
   consensus** (CurseForge needs an API key; a compromised upstream publishes the same hash
-  everywhere). Not planned unless something changes.
+  everywhere). Not planned unless something changes. (Since the third round `profile
+  check` asks Modrinth alone; consensus across registries is still not built, for the
+  same reasons.)
 - **Packet-rate tripwire.** Without the login proxy the relay sees an encrypted stream;
   false positives from chunk loading. Covert channels to an allowlisted server are stated
   as not defended (THREAT_MODEL §5.8).
@@ -309,4 +591,8 @@ DISPLAY=:77 XAUTHORITY=/dev/null BASTION_NESTED_TESTS=1 BASTION_NESTED_CLIPBOARD
 # real game, invisible (on the private display):
 DISPLAY=:77 XAUTHORITY=/dev/null BASTION_E2E_ROOT=$PWD/target/e2e BASTION_E2E_INSTANCE=vanilla-latest \
     BASTION_NESTED_LAYERS=$(cat target/third-party/layers.txt) cargo test --test nested_game -- --nocapture
+# the companion mod in the real game (BASTION_COMPANION_WORLD=1: in the demo world as well):
+DISPLAY=:77 XAUTHORITY=/dev/null BASTION_E2E_ROOT=$PWD/target/e2e BASTION_E2E_INSTANCE=fab \
+    BASTION_COMPANION_WORLD=1 BASTION_NESTED_LAYERS=$(cat target/third-party/layers.txt) \
+    cargo test --test companion_game -- --nocapture
 ```

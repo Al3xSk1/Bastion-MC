@@ -45,7 +45,7 @@ process with your UID and is inherited by every child).
 ```
  launcher                                    sandbox
  ────────                                    ───────
- access token in mlock'd Secret
+ token (by default: the placeholder) in mlock'd Secret
         │
  build_frame()  ──────────────►  [ one mlock'd buffer, exact size ]
         │                          "BSTN" ver count  len main-class  len arg … len arg
@@ -53,9 +53,10 @@ process with your UID and is inherited by every child).
         ▼
    socketpair(AF_UNIX) ════════ fd 0 ═══════►  bwrap ─► init ─► java -cp … BastionBootstrap
         │                                                         │ (no program arguments)
- frame.wipe(); token.wipe()                                       │ read frame from fd 0
- launcher now holds no credential                                 │ zero the byte buffers
-                                                                  ▼
+ frame.wipe()                                                     │ read frame from fd 0
+ with the broker (default): the real token                        │ zero the byte buffers
+   stays in the launcher's secret memory                          ▼
+ without it: token.wipe(), no credential left
                                                Main.main(String[]{…, "--accessToken", token})
 ```
 
@@ -86,9 +87,12 @@ process with your UID and is inherited by every child).
    zeroes each byte buffer after decoding, replaces `System.in` with an empty stream,
    insists on EOF after the frame, then calls the real `main(String[])` reflectively.
    Reflective arguments do not appear in `sun.java.command`, `hsperfdata` or `hs_err`.
-5. **The launcher wipes** the frame and the token (`explicit_bzero`, then `munmap`) as soon
-   as the write returns, and has already written the rotated refresh token back to its
-   store and wiped that too. While the game runs, the launcher holds no credential.
+5. **The launcher wipes** the frame (`explicit_bzero`, then `munmap`) as soon as the write
+   returns, and has already written the rotated refresh token back to its store and wiped
+   that too. With the broker (the default) it keeps the access token, in its own locked
+   memory, for the length of the session, and confines itself before it reads anything the
+   game sends (`THREAT_MODEL.md`, row J18). Without the broker the token is wiped together
+   with the frame, and while the game runs the launcher holds no credential.
 
 ### Why a socketpair and not a pipe, a memfd or a file
 
@@ -117,27 +121,31 @@ disappears with its last descriptor.
 | Debug output | `Secret`'s `Debug` prints a length only; `Authorization` headers are marked sensitive |
 | Peeking at the launcher | non-dumpable + Yama: `/proc/<pid>/mem`, `process_vm_readv` and ptrace are refused for other same-UID processes, including the parent shell |
 | Lifetime | Microsoft token → dropped after the Xbox call; Xbox token → after XSTS; XSTS → after Minecraft login; Minecraft token → with the broker: held until the game exits, then wiped; without: wiped once the frame is written |
-| While the game runs | the launcher confines itself, on all threads and before it reads anything the game sends: Landlock (no program execution, no file access outside the instance's `persist/` directory and the cache, TCP only to the ports it relays to) and a system-call filter (no kernel keyring, where the refresh token rests by default) |
+| While the game runs | the launcher confines itself, on all threads and before it reads anything the game sends: Landlock (no program execution, no writing outside the instance's `persist/` directory and the cache, no reading beyond those, `/etc`, `/usr`, `/proc` and the name resolver's configuration, TCP only to the ports it relays to and to a configured proxy) and a system-call filter (no kernel keyring, where the refresh token rests by default) |
 
 ## What other processes see
 
-From the real Minecraft 26.3 client running in the sandbox on the development machine:
+From the real Minecraft 26.3 client in the sandbox on the development machine — a demo
+launch of the signed Fabric profile through the nested compositor, with sound off, on
+2026-11-13 (`THREAT_MODEL.md`, §7 E25):
 
 ```
 $ tr '\0' ' ' < /proc/<jvm>/cmdline | tail -c 120
-/tmp -Duser.home=/game -Djdk.serialFilter=!* -XX:-CreateCoredumpOnCrash -XX:-EnableDynamicAgentLoading BastionBootstrap
+ssl.trustStoreType=jks -Djdk.serialFilter=!* -XX:-CreateCoredumpOnCrash -XX:-EnableDynamicAgentLoading BastionBootstrap
 
 $ tr '\0' ' ' < /proc/<jvm>/environ
 PATH=/usr/bin HOME=/game USER=player LOGNAME=player TMPDIR=/tmp XDG_RUNTIME_DIR=/run/user/1000
-LANG=en_US.UTF-8 DISPLAY=:0 XDG_SESSION_TYPE=x11 XAUTHORITY=/run/user/1000/Xauthority
-PULSE_SERVER=unix:/run/user/1000/pulse/native
+LANG=en_US.UTF-8 DISPLAY=/tmp/.X11-unix/X0 XDG_SESSION_TYPE=x11
 
 $ tr '\0' ' ' < /proc/<bwrap>/cmdline
-/usr/bin/bwrap --args 90 -- /bastion/init __sandbox-init 91
+/usr/bin/bwrap --args 113 -- /bastion/init __sandbox-init 114
 ```
 
-No token, no player name, no UUID, no home directory, no instance name, no real user name.
-The launcher's own log records the game arguments with the token shown as `<redacted>`.
+With sound on, `PULSE_SERVER` is added; with the session's own X11 display handed over
+(`allow_x11`, no gamescope) also `XAUTHORITY`; on Wayland `WAYLAND_DISPLAY` takes the place
+of `DISPLAY`. No token, no player name, no UUID, no home directory, no instance name, no
+real user name. The launcher's own log records the game arguments with the token shown as
+`<redacted>`.
 
 ## Where the guarantee ends
 
