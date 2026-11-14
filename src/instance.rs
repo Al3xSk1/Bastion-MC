@@ -5,10 +5,20 @@
 //!   instance.toml            launcher settings (typed, no arbitrary JVM arguments)
 //!   profile.json(.sig)       curated instances only: the signed manifest
 //!   mods/                    curated instances only: exactly the signed jars
-//!   saves/ logs/ config/ resourcepacks/     the only directories the game can write to
-//!   options.txt servers.dat  carried in before, and back out after, each session by the launcher —
-//!                            parsed and re-encoded, never copied (see `persist`)
+//!   saves/ logs/ config/     the only directories the game can write to
+//!   resourcepacks/ shaderpacks/   read-only for the game; see `profile::packs`
+//!   persist/                 options.txt, servers.dat: carried in before, and back out after,
+//!                            each session by the launcher — parsed and re-encoded, never
+//!                            copied (see `persist`)
 //! ```
+//!
+//! `persist/` is a directory of its own for one reason: once the game runs, the launcher
+//! confines itself and keeps write access to exactly that directory of the instance (see
+//! `confine`). Everything that decides how the *next* launch is protected — `instance.toml`
+//! (network mode, server allowlist), the manifest and its signature, `packs.lock.json` — lies
+//! outside it, so a launcher that was compromised through something the game sent cannot
+//! weaken the launch after this one. What it could still do is rewrite the settings files in
+//! `persist/`; those are parsed and re-encoded again before the game is given them.
 //!
 //! A *vanilla* instance runs an unmodified Mojang version and needs no signature: its whole
 //! content is covered by Mojang's hash chain. A *curated* instance exists only by virtue of
@@ -36,6 +46,14 @@ use crate::{
 pub const WRITABLE_DIRS: [&str; 3] = ["saves", "logs", "config"];
 pub const MANIFEST_FILE: &str = "profile.json";
 pub const SIGNATURE_FILE: &str = "profile.json.sig";
+/// Where the settings files the launcher carries (`sandbox.persist_files`) rest between
+/// sessions: the one part of an instance the confined launcher can still write.
+pub const PERSIST_DIR: &str = "persist";
+/// The launcher's own files in an instance directory: what the instance is and how the next
+/// launch is protected. None of them can be a "settings file": such files are carried to and
+/// from the game, and those of an older instance are *moved* into `persist/`
+/// ([`adopt_persisted`]) — which must never happen to one of these.
+pub const OWN_FILES: [&str; 4] = ["instance.toml", MANIFEST_FILE, SIGNATURE_FILE, crate::profile::packs::LOCK_FILE];
 
 #[derive(Debug)]
 pub enum Kind {
@@ -61,6 +79,62 @@ pub fn ensure_plain_dir(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => util::create_private_dir_all(path),
         Err(e) => Err(Error::io(format!("inspecting {}", path.display()), e)),
     }
+}
+
+/// Make sure the instance has its `persist/` directory, and move into it the settings files
+/// that launchers before this layout kept in the instance directory itself. Returns notes
+/// for the user (what was moved, what was left alone and why).
+///
+/// A file is moved only if it is a regular file and `persist/` has none of that name; it is
+/// moved as it is, because it is parsed and re-encoded anyway before the game gets it. If
+/// both places hold one, the one in `persist/` is the one in use — the other is left where
+/// it is and reported, never deleted and never silently preferred.
+pub fn adopt_persisted(dir: &Path, names: &[String]) -> Result<Vec<String>> {
+    let persist = dir.join(PERSIST_DIR);
+    ensure_plain_dir(&persist)?;
+    let mut notes = Vec::new();
+    for name in names {
+        // (Checked by the configuration already; a name is never joined onto a path unchecked,
+        // and the instance's own files are never moved, whatever was configured.)
+        crate::paths::validate_file_name(name)?;
+        if OWN_FILES.contains(&name.as_str()) {
+            return Err(Error::Policy(format!(
+                "{name} is the launcher's own file in an instance; it cannot be a settings file (sandbox.persist_files)"
+            )));
+        }
+        let (old, new) = (dir.join(name), persist.join(name));
+        match fs::symlink_metadata(&old) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(Error::io(format!("inspecting {}", old.display()), e)),
+            Ok(meta) if !meta.file_type().is_file() => {
+                notes.push(format!(
+                    "{name} in the instance directory is not a regular file; it is not used (settings now live in \
+                     {PERSIST_DIR}/)"
+                ));
+                continue;
+            }
+            Ok(_) => {}
+        }
+        if fs::symlink_metadata(&new).is_ok() {
+            notes.push(format!(
+                "{name} exists both in the instance directory and in {PERSIST_DIR}/; the one in {PERSIST_DIR}/ is \
+                 used, the other one is left untouched (delete it, or move it over the one in {PERSIST_DIR}/)"
+            ));
+            continue;
+        }
+        fs::rename(&old, &new).map_err(|e| Error::io(format!("moving {} to {}", old.display(), new.display()), e))?;
+        notes.push(format!("{name} moved into the instance's {PERSIST_DIR}/ directory, where settings files now live"));
+    }
+    Ok(notes)
+}
+
+/// The directory `name` is to be read from when nothing may be created or moved (a burner
+/// session): `persist/` if it is a real directory that holds the file, otherwise the
+/// instance directory itself, where it was kept before `persist/` existed.
+pub fn persisted_in(dir: &Path, name: &str) -> PathBuf {
+    let persist = dir.join(PERSIST_DIR);
+    let plain = fs::symlink_metadata(&persist).is_ok_and(|m| m.file_type().is_dir());
+    if plain && fs::symlink_metadata(persist.join(name)).is_ok() { persist } else { dir.to_path_buf() }
 }
 
 pub fn list(paths: &Paths) -> Result<Vec<String>> {
@@ -278,6 +352,69 @@ mod tests {
         // a stray signature without a manifest is suspicious, not "vanilla"
         fs::remove_file(dir.join(MANIFEST_FILE)).unwrap();
         assert!(matches!(load(&paths, "perf"), Err(Error::Signature(_))));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Settings files of an instance from before `persist/` existed are moved there once;
+    /// nothing is overwritten, nothing is followed, and a burner session finds the files
+    /// wherever they are without moving anything.
+    #[test]
+    fn settings_files_of_an_existing_instance_move_into_the_persist_directory() {
+        let (root, paths) = sandbox_paths("persist");
+        let dir = create(&paths, "old", Some("1.21.4")).unwrap();
+        let names = vec!["options.txt".to_string(), "servers.dat".to_string(), "hotbar.nbt".to_string()];
+        fs::write(dir.join("options.txt"), b"fov:70\n").unwrap();
+        fs::write(dir.join("servers.dat"), b"old-servers").unwrap();
+        assert!(!dir.join(PERSIST_DIR).exists());
+
+        // A burner session moves and creates nothing, and reads from where the file is.
+        assert_eq!(persisted_in(&dir, "options.txt"), dir);
+        assert!(!dir.join(PERSIST_DIR).exists());
+
+        let notes = adopt_persisted(&dir, &names).unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("moved into")), "{notes:?}");
+        let persist = dir.join(PERSIST_DIR);
+        assert_eq!(fs::read(persist.join("options.txt")).unwrap(), b"fov:70\n");
+        assert_eq!(fs::read(persist.join("servers.dat")).unwrap(), b"old-servers");
+        assert!(!dir.join("options.txt").exists() && !dir.join("servers.dat").exists());
+        assert_eq!(fs::metadata(&persist).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(persisted_in(&dir, "options.txt"), persist);
+        assert_eq!(persisted_in(&dir, "hotbar.nbt"), dir, "not there: the old place is where to look");
+        // What decides the next launch's protection is not in the directory that stays writable.
+        assert!(dir.join("instance.toml").exists() && !persist.join("instance.toml").exists());
+
+        // Again: nothing to do, nothing said.
+        assert!(adopt_persisted(&dir, &names).unwrap().is_empty());
+
+        // A file that appears in the old place later does not replace the one in use.
+        fs::write(dir.join("options.txt"), b"fov:110\n").unwrap();
+        let notes = adopt_persisted(&dir, &names).unwrap();
+        assert!(notes.len() == 1 && notes[0].contains("exists both"), "{notes:?}");
+        assert_eq!(fs::read(persist.join("options.txt")).unwrap(), b"fov:70\n");
+        assert_eq!(fs::read(dir.join("options.txt")).unwrap(), b"fov:110\n", "left untouched");
+        fs::remove_file(dir.join("options.txt")).unwrap();
+
+        // A link in the old place is not moved and not followed.
+        fs::write(root.join("elsewhere"), b"secret").unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), dir.join("hotbar.nbt")).unwrap();
+        let notes = adopt_persisted(&dir, &names).unwrap();
+        assert!(notes.len() == 1 && notes[0].contains("not a regular file"), "{notes:?}");
+        assert!(!persist.join("hotbar.nbt").exists() && dir.join("hotbar.nbt").is_symlink());
+
+        // The instance's own files are never moved, whatever a configuration names.
+        for own in OWN_FILES {
+            fs::write(dir.join(own), b"{}").unwrap();
+            assert!(matches!(adopt_persisted(&dir, &[own.to_string()]), Err(Error::Policy(_))), "{own}");
+            assert!(dir.join(own).exists() && !persist.join(own).exists(), "{own} was moved");
+        }
+
+        // `persist` itself being a link (or a file) is refused: the launcher would otherwise
+        // keep write access to wherever it points.
+        fs::remove_dir_all(&persist).unwrap();
+        std::os::unix::fs::symlink(&root, &persist).unwrap();
+        assert!(matches!(adopt_persisted(&dir, &names), Err(Error::Policy(_))));
+        assert_eq!(persisted_in(&dir, "elsewhere"), dir, "a linked persist/ is not read through either");
         fs::remove_dir_all(root).unwrap();
     }
 

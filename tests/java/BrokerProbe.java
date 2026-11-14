@@ -68,6 +68,15 @@ public final class BrokerProbe {
         System.out.println("join_cold=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
         try (Socket game = new Socket("127.0.0.1", gamePort)) {
             game.getOutputStream().write(1);
+            game.getOutputStream().flush();
+            // As in the real protocol: the client cannot ask for a join before the server has
+            // answered on the game connection (the server hash is made from what it sends).
+            // Without this the join could reach the broker before the relay — which accepts
+            // the connection on its own schedule — has seen the connection at all.
+            game.setSoTimeout(15000);
+            if (game.getInputStream().read() < 0) {
+                throw new IllegalStateException("the game server closed the connection");
+            }
             System.out.println("join_warm=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
             System.out.println("join_again=" + request("POST", "https://sessionserver.mojang.com/session/minecraft/join", null, join));
         }

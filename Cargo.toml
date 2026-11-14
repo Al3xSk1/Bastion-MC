@@ -57,6 +57,10 @@ getrandom = "0.4.3"
 subtle = "2.6"
 lexopt = "0.3.2"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The inflate/deflate implementation that `zip` already brings, with exactly the features it
+# selects there (no additional crate is compiled): skin images are decoded and encoded again
+# before they are uploaded (`auth::minecraft::sanitize_skin_png`).
+flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 thiserror = "2.0.21"
 # Wire protocol shared with front ends (serde types only, no logic).
 bastion-mc-proto = { path = "crates/proto" }

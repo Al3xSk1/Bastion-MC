@@ -23,6 +23,11 @@ pub const APP: &str = "bastion-mc";
 /// so a compromise of the user account cannot silently add a signing key.
 pub const SYSTEM_TRUSTED_KEYS: &str = "/etc/bastion-mc/trusted-keys.d";
 
+/// Root-owned list of `age` recipients. When this file exists, the age vault is encrypted
+/// to exactly the recipients in it — whatever the user's configuration names — and the
+/// kernel keyring is not accepted as a token store (see `auth::store`).
+pub const SYSTEM_AGE_RECIPIENTS: &str = "/etc/bastion-mc/age-recipients";
+
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config: PathBuf,

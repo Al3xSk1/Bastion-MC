@@ -117,7 +117,7 @@ disappears with its last descriptor.
 | Debug output | `Secret`'s `Debug` prints a length only; `Authorization` headers are marked sensitive |
 | Peeking at the launcher | non-dumpable + Yama: `/proc/<pid>/mem`, `process_vm_readv` and ptrace are refused for other same-UID processes, including the parent shell |
 | Lifetime | Microsoft token → dropped after the Xbox call; Xbox token → after XSTS; XSTS → after Minecraft login; Minecraft token → with the broker: held until the game exits, then wiped; without: wiped once the frame is written |
-| While the game runs | the launcher confines itself (Landlock on all threads): no program execution, no file access outside the instance and the cache, TCP only to the ports it relays to |
+| While the game runs | the launcher confines itself, on all threads and before it reads anything the game sends: Landlock (no program execution, no file access outside the instance's `persist/` directory and the cache, TCP only to the ports it relays to) and a system-call filter (no kernel keyring, where the refresh token rests by default) |
 
 ## What other processes see
 

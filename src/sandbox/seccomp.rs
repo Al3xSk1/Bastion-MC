@@ -109,8 +109,9 @@ const ALLOW_NUMERIC: &[(&str, i64)] = &[
 ];
 
 /// Never legitimate for the game; reaching one of these means hostile code is running.
+/// (The confined launcher's own filter, `confine::filter`, kills on the same list.)
 #[rustfmt::skip]
-const TRIPWIRE: &[(&str, i64)] = sys![
+pub(crate) const TRIPWIRE: &[(&str, i64)] = sys![
     SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_bpf, SYS_kexec_load,
     SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_delete_module, SYS_mount, SYS_umount2,
     SYS_pivot_root, SYS_chroot, SYS_open_tree, SYS_move_mount, SYS_fsopen, SYS_fsconfig, SYS_fsmount,
@@ -145,7 +146,7 @@ const AF_INET: u64 = libc::AF_INET as u64;
 const AF_INET6: u64 = libc::AF_INET6 as u64;
 
 /// Every CLONE_NEW* bit that `clone(2)` accepts.
-const CLONE_NAMESPACE_BITS: u64 = (libc::CLONE_NEWNS
+pub(crate) const CLONE_NAMESPACE_BITS: u64 = (libc::CLONE_NEWNS
     | libc::CLONE_NEWCGROUP
     | libc::CLONE_NEWUTS
     | libc::CLONE_NEWIPC
@@ -154,7 +155,7 @@ const CLONE_NAMESPACE_BITS: u64 = (libc::CLONE_NEWNS
     | libc::CLONE_NEWNET) as u64;
 
 /// Terminal ioctls that inject input or hijack a console.
-const FORBIDDEN_IOCTLS: &[u64] = &[
+pub(crate) const FORBIDDEN_IOCTLS: &[u64] = &[
     0x5412, // TIOCSTI: push characters into a terminal's input queue
     0x541C, // TIOCLINUX: virtual-console selection/paste
     0x541D, // TIOCCONS: redirect console output

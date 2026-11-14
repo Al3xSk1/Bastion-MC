@@ -17,11 +17,17 @@ A Minecraft launcher for Arch Linux that treats the game as hostile code.
   needs. Nothing in the game can change your skin, cape or name, or carry the token away.
   (Where the token does have to be in the game — open network mode — it still never
   touches a command line or the environment.)
-* **The launcher locks itself down too**: once the game runs it gives up file access
-  outside the instance, program execution and most of the network, on all its threads.
+* **The launcher locks itself down too**: before it reads anything the game sends, it
+  gives up — on all its threads — file access outside one settings directory of the
+  instance and its cache, program execution, most of the network, and the kernel keyring
+  where the sign-in token rests.
+* **What is shown as protected was looked at, not assumed**: the resource limits are read
+  back from the kernel, the game's Wayland socket is listed, the clipboard cut-off reports
+  from inside the compositor — and where a check fails the launcher says so, or refuses.
 * **For the day something goes wrong**: a canary that notices when the account's name,
   skin or cape changed behind your back, `bastion-mc scram` to remove every credential from
-  the machine in one step, and a built-in recovery runbook with verified links.
+  the machine in one step (and to say what it could not remove), and a built-in recovery
+  runbook with verified links.
 
 Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) first. It lists what is defended, how
 each claim is tested, and — in §5 — what is **not** defended.
@@ -37,11 +43,11 @@ AMD GPU, X11 session).
 
 | | |
 |---|---|
-| Sandbox, seccomp, Landlock, egress relay, credential broker, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs | 312 tests in the workspace (`cargo test --workspace`); about 25 of them start the real sandbox; 8 feed generated and mutated input to every parser of untrusted bytes |
-| Display isolation | Wayland security context: against a real headless sway (privileged globals withheld). Nested compositor: against real gamescope 3.17 on a private X display, including the clipboard cut-off in all four directions. Both with real Minecraft 26.3 rendering through them. **Not** on a real Wayland desktop session, and playability inside gamescope is not assessed |
+| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs | 375 tests in the workspace (`cargo test --workspace`); about 25 of them start the real sandbox, 4 confine a real multi-threaded process the way the launcher confines itself; 8 harnesses feed generated and mutated input to every parser of untrusted bytes |
+| Display isolation | Wayland security context: against a real headless sway (the game's socket is listed: 37 interfaces, none of the 16 known privileged ones). Nested compositor: against real gamescope 3.17 on a private X display, including the clipboard cut-off in all four directions and the control run without it. Both with real Minecraft 26.3 started through them. **Not** on a real Wayland desktop session, and playability inside gamescope is not assessed |
 | Graphical front end | 51 tests without a display (logic, widgets clicked and rendered in software, the whole application against a stand-in launcher); the window run on the X11 session; a real demo launch driven through its backend worker |
 | Arch packages (`makepkg`) | both build, their `check()` passes and both binaries pass the hardening check |
-| Real Minecraft 26.3 client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile | runs: hardware OpenGL, window, audio, HTTPS through the relay and the broker, mods loaded from the sealed mount; also as a `--burner` session |
+| Real Minecraft 26.3 client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile | runs: hardware OpenGL, window, audio, HTTPS through the relay and the broker, mods loaded from the sealed mount; also as a `--burner` session. Run again after the review fixes (launcher confined before it reads anything from the game; THREAT_MODEL §7 E16), without sound |
 | Microsoft → Xbox → Minecraft sign-in, and everything that needs a signed-in account (the broker against the real Mojang API, `skin`/`cape`, the canary on a real profile) | implemented and tested against scripted replies and a stand-in Mojang; **not yet run against the live services** (needs your client ID) |
 | NVIDIA, Java 8-era versions end to end, real `age` binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) | implemented, **not exercised** on the development machine |
 
@@ -53,10 +59,11 @@ pacman -S gamescope                     # X11 sessions: gives the game a display
 ```
 
 Kernel ≥ 6.12 with `landlock` in the LSM list and unprivileged user namespaces (the Arch
-defaults). Newer kernels add more: 7.0 lets the launcher confine itself, 7.2 adds UDP
-rules; `bastion-mc doctor` says what this machine can and cannot enforce. A systemd user
-session provides the resource limits. Building needs `cargo`, a C compiler (the one Rust
-links with) and a JDK (`javac`).
+defaults). Newer kernels add more: the launcher's own confinement needs Landlock ABI 8 for
+its file and network part and ABI 9 for all of it (on older kernels it is partial, and
+said to be), ABI 10 (Linux 7.2) adds UDP rules; `bastion-mc doctor` says what this machine
+can and cannot enforce. A systemd user session provides the resource limits. Building
+needs `cargo`, a C compiler (the one Rust links with) and a JDK (`javac`).
 
 ```
 cargo build --release          # or: cd packaging/arch && makepkg -si
@@ -106,18 +113,24 @@ does not do that:
 * On an **X11** session it runs the game inside **gamescope** (`pacman -S gamescope`), a
   nested compositor that itself runs in a sandbox. The game gets a display server of its
   own and nothing of your session's — no other windows, no keystrokes, and no clipboard in
-  either direction. Options such as size and full screen go in
+  either direction: gamescope would bridge the clipboard, so the launcher loads a cut-off
+  into it, and that cut-off reports from inside the compositor. Without its report the
+  launcher says that the clipboard is *not known* to be cut (`nested_compositor =
+  "require"` refuses instead). Options such as size and full screen go in
   `nested_compositor_args = ["-W", "1920", "-H", "1080", "-f"]`.
   Without gamescope the launch is refused, unless you set `allow_x11 = true` and accept
   the risk.
 * On a **Wayland** session it asks the compositor for a socket that is marked as sandboxed
-  (`wp_security_context_v1`), on which the compositor withholds screen capture, input
-  injection and clipboard-manager access. According to the protocol registry's support
-  table (wayland.app, read 2026-11-13) KWin (KDE Plasma), Sway, Hyprland, niri, COSMIC,
-  labwc and river implement it; Mutter (GNOME), Weston and Wayfire do not. Only sway was
-  tested here. Where a compositor lacks it, the launcher says so and uses the session
-  socket (`wayland_security_context = "require"` refuses instead) — on GNOME that means
-  the game is an ordinary Wayland client of your session.
+  (`wp_security_context_v1`), on which a compositor is expected to withhold screen capture,
+  input injection and clipboard-manager access. The protocol only says "should", so the
+  launcher connects to that socket itself and lists what is offered there; if a privileged
+  interface it knows is still on offer, it says so (`wayland_security_context = "require"`
+  refuses). According to the protocol registry's support table (wayland.app, read
+  2026-11-13) KWin (KDE Plasma), Sway, Hyprland, niri, COSMIC, labwc and river implement
+  it; Mutter (GNOME), Weston and Wayfire do not. Only sway was tested here. Where a
+  compositor lacks it, the launcher says so and uses the session socket
+  (`wayland_security_context = "require"` refuses instead) — on GNOME that means the game
+  is an ordinary Wayland client of your session.
 
 `bastion-mc doctor` shows which of the two this machine offers; the front end shows what a
 running game got, next to the Play button.
@@ -144,7 +157,7 @@ bastion-mc login --account alt                     # a second account, under a l
 bastion-mc account list
 bastion-mc account default alt                     # used when --account is not given
 bastion-mc skin show                               # skins and capes as Mojang reports them
-bastion-mc skin set ~/skins/new.png --slim         # text chunks, time stamps, EXIF are stripped first
+bastion-mc skin set ~/skins/new.png --slim         # decoded and encoded again: only the pixels are uploaded
 bastion-mc cape set Migrator                       # or: none
 ```
 
@@ -154,7 +167,9 @@ its own keys, if you configure `[auth.age.accounts.<label>]`).
 The launcher pins what an account looks like — name, skin, cape — and compares at every
 launch. If that changed and not through the commands above, the launch stops and tells you
 (`canary show`, `canary accept`): either you changed it on minecraft.net, or someone else
-is in the account.
+is in the account. A `skin set` or `cape set` pins the part it changed and nothing else.
+With `auth.canary = "warn"` the difference is shown by every command that signs in (also
+under `--quiet`) and the pin stays as it was.
 
 ### Resource packs and shaders
 
@@ -168,6 +183,12 @@ bastion-mc pack list main
 bastion-mc pack adopt main        # record packs you copied into the instance by hand
 ```
 
+A pack must be a zip archive that every reader takes for the same thing: no archive comment,
+no zip64, a directory that holds exactly the declared members, each name once, no links.
+Archives that are ambiguous in one of these ways are refused at import and again at launch
+— re-create the zip with an ordinary tool. (Why: `java.util.zip.ZipFile`, which the game
+reads packs with, lists members that a check based on the declared count never sees.)
+
 ### Content you do not trust
 
 ```sh
@@ -175,29 +196,57 @@ bastion-mc launch main --burner
 ```
 
 No network, no sign-in, no token; the game works on copies of the instance's worlds and
-settings, and everything it writes is deleted when it exits. For a downloaded map or pack
-you want to look at before it gets near your real saves. (The full game starts only for an
-account that passed the ownership check at its last sign-in here; otherwise demo mode.)
+settings, and everything it writes is deleted when it exits — the launcher says so when
+the deletion worked, and says what is left when it did not. The copy is bounded by the
+free space of the cache. For a downloaded map or pack you want to look at before it gets
+near your real saves. (The full game starts only for an account that passed the ownership
+check at its last sign-in here; otherwise demo mode.)
 
 ### Where the refresh token rests
 
 `token_store = "keyutils"` (default) keeps it in the kernel keyring: RAM only, gone at
-reboot, unreachable from the sandbox — and readable by other programs of yours in the same
-login session. `token_store = "age"` keeps it in a file encrypted by `age`; with a
-**hardware-backed identity** (`age-plugin-yubikey`, `age-plugin-tpm`,
-`age-plugin-fido2-hmac`) every decryption needs the device, and a copied vault file is
-useless. `bastion-mc doctor` says whether your identity file is one of those or a software
-key. List a second recipient (a backup key kept offline) in the recipients file: a TPM
-identity sealed to firmware state stops working after a firmware update, and
-`bastion-mc vault reseal` re-encrypts the vault to the current recipients.
+reboot, unreachable from the sandbox and (once the game runs) from the launcher itself —
+and readable by other programs of yours in the same login session.
+
+`token_store = "age"` keeps it in a file encrypted by `age`. What that is worth has two
+halves, and `bastion-mc doctor` reports on both:
+
+* **Who can open a vault file that exists** depends on the identity. With an identity kept
+  in a device (`age-plugin-yubikey`, `age-plugin-tpm`, `age-plugin-fido2-hmac`) decrypting
+  needs the device, so a *copy* of the vault file — a backup, a stolen disk — is useless.
+  It does not need more than the device: a program running as you can ask a connected
+  device to decrypt, and only the device's touch or PIN policy stands in the way.
+* **To whom the next vault file is encrypted** depends on the recipients file, and
+  encrypting needs no device. The launcher re-encrypts the token at every launch; if the
+  recipients file is one of your own files, a program running as you can add its own
+  recipient and read your token from then on. To close that, have root keep the list:
+  when `/etc/bastion-mc/age-recipients` exists (root-owned), the vault is encrypted to
+  exactly those recipients, the `recipients_file` settings are ignored, and the launcher
+  refuses to store tokens in the keyring instead.
+
+Neither half keeps away a program that stands between you and the launcher itself — another
+`bastion-mc` earlier in `$PATH`, a wrapper, a preloaded library: it has the token when you
+launch. That takes a separate UNIX account
+([`docs/MC_VAULT_ACCOUNT.md`](docs/MC_VAULT_ACCOUNT.md), which also has the commands for
+the root-owned list).
+
+List a second recipient (a backup key kept offline): a TPM identity sealed to firmware
+state stops working after a firmware update, and `bastion-mc vault reseal` re-encrypts the
+vault to the current recipients. Every recipient can decrypt the vault, so the backup
+key's secret half must not be on this machine. None of this was run against a real `age`
+binary or device here (see Status).
 
 ### Limits, proxy
 
 The sandbox runs in a systemd scope: memory ceiling (default: twice the heap plus 2 GiB),
-no swap, 4096 tasks; `cpu_quota_percent` adds a CPU ceiling. `launcher_proxy =
+no swap, 4096 tasks; `cpu_quota_percent` adds a CPU ceiling. Once the game runs the limits
+are read back from the kernel: if they are not in force, the launch says so and does not
+show them as on (`cgroup = "require"` stops it). `launcher_proxy =
 "socks5h://127.0.0.1:9050"` under `[network]` sends the launcher's own traffic (sign-in,
 downloads, what the broker forwards) through a SOCKS5 proxy such as Tor; the game's
-connections to multiplayer servers still come from your address.
+connections to multiplayer servers still come from your address. In this tree the same is
+true of the HTTPS connections that the relay only passes through (`*.minecraft.net`): they
+are resolved and dialled locally, not through the proxy (review finding B-M3).
 
 ### If you think the account is compromised
 
@@ -207,8 +256,12 @@ bastion-mc wiki scram       # what to do next, with the exact Microsoft pages
 bastion-mc export-proofs proofs.txt     # what the launcher recorded that shows the account is yours
 ```
 
-`scram` needs no network and revokes nothing at Microsoft — it says so — which is why the
-runbook is the second step. The front end has both behind **Emergency…**.
+`scram` first stops whatever could still store a sign-in (running launches, a sign-in
+that is waiting for you), then removes the credentials, and only then deletes what the
+games left behind. It reports nothing as done that was not confirmed: what it could not do
+is a line starting `COULD NOT`, and its exit status is then 1. It needs no network and
+revokes nothing at Microsoft — it says so — which is why the runbook is the second step.
+The front end has both behind **Emergency…**.
 
 ## Graphical front end
 
@@ -299,7 +352,10 @@ Inside an instance only `saves/`, `logs/` and `config/` are writable by the game
 `mods/`, `resourcepacks/` and `shaderpacks/` reach it as sealed read-only mounts of
 verified files (`packs.lock.json` records the packs). `options.txt` and `servers.dat` are
 carried into each session and back by the launcher, parsed and re-encoded both ways, never
-copied (`sandbox.persist_files`).
+copied (`sandbox.persist_files`). Between sessions they rest in the instance's `persist/`
+directory — the one part of the instance the launcher can still write while the game
+runs. (An instance from before this layout has them moved there at its next launch; to
+change a setting by hand, edit the file in `persist/`.)
 
 ## Tests
 
@@ -340,14 +396,15 @@ leave screenshots of every state in `target/gui-snapshots/`.
 | `src/sandbox/` | bubblewrap orchestration, in-sandbox init, Landlock, seccomp, netns helper, display/audio/GPU exposure; `wayland.rs` (security context), `nested.rs` (gamescope), `cgroup.rs` (limits) |
 | `src/egress/` | DNS responder, SNI parser, allowlisting relay, texture gateway, `broker.rs` (credential broker) |
 | `src/auth/` | OAuth (PKCE, device code), Xbox, Minecraft services (profile, skins, capes), token stores, account registry, canary, activity log |
-| `src/confine.rs`, `src/persist.rs` | the launcher's self-confinement; strict re-encoding of settings files |
-| `src/scram.rs`, `src/running.rs`, `src/proofs.rs` | emergency removal of credentials, markers of running launches, the ownership export |
+| `src/confine.rs`, `src/confine/filter.rs`, `src/persist.rs` | the launcher's self-confinement (Landlock, and its system-call filter); strict re-encoding of settings files |
+| `src/scram.rs`, `src/running.rs`, `src/proofs.rs` | emergency removal of credentials, markers of running commands and locks on their directories, the ownership export |
+| `src/tree.rs` | deleting and copying directory trees that the game has written (bounded, link-safe) |
 | `src/fuzzing.rs` | one harness per parser of untrusted bytes (used by `tests/robustness.rs` and `fuzz/`) |
 | `native/noclip.c` | the library preloaded into gamescope that cuts its clipboard bridge |
 | `docs/` | threat model, token path, the scram runbook, the dedicated-account guide |
 | `tests/support/` | scripts that fetch, verify and run the compositors the display tests need |
 | `src/mojang/` | version metadata, argument rendering, launch frame, verified download store |
-| `src/profile/` | signed manifest, Ed25519 trust store, strict `mods/` verification, authoring, `packs.rs` (resource and shader packs) |
+| `src/profile/` | signed manifest, Ed25519 trust store, strict `mods/` verification, authoring, `packs.rs` (resource and shader packs), `zipdir.rs` (the strict zip directory reader they are checked with) |
 | `src/secret.rs`, `src/hardening.rs` | locked self-wiping memory, zero-on-free allocator, process hardening |
 | `src/events.rs` | how the launcher reports progress: text for a terminal, JSON events for a front end |
 | `crates/proto/` | the event protocol shared by launcher and front ends (types only) |

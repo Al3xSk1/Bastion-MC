@@ -14,6 +14,7 @@ use crate::{
     auth::minecraft,
     egress::{broker, dns, sni},
     persist::{self, Kind},
+    profile::zipdir as zip_directory,
     sandbox::{display, wayland},
 };
 
@@ -26,6 +27,9 @@ pub fn persist(data: &[u8]) {
                 persist::sanitize(kind, &once).unwrap_or_else(|e| panic!("{kind:?}: own output refused: {e}"));
             assert_eq!(once, twice, "{kind:?}: sanitising is not idempotent");
             assert_eq!(report.dropped, 0, "{kind:?}: the sanitised form still contained something to drop");
+            if kind == Kind::Json {
+                assert!(once.iter().all(|b| (0x20..0x7f).contains(b)), "JSON came out with more than printable ASCII");
+            }
         }
     }
 }
@@ -116,9 +120,17 @@ pub fn profile(data: &[u8]) {
         }
     }
     if let Ok(clean) = minecraft::sanitize_skin_png(data) {
-        assert!(clean.len() <= data.len() && clean.len() <= minecraft::MAX_SKIN_BYTES);
+        // A file of the launcher's own making: bounded whatever the input was, and its own
+        // fixed point.
+        assert!(clean.len() <= minecraft::MAX_SKIN_BYTES);
         assert_eq!(minecraft::sanitize_skin_png(&clean).expect("own output"), clean);
     }
+}
+
+/// The strict zip directory reader behind `pack import`: what it accepts has unique, safe
+/// names, and another zip implementation that can read the same bytes lists the same ones.
+pub fn zipdir(data: &[u8]) {
+    zip_directory::fuzz(data);
 }
 
 /// A harness: arbitrary bytes in, a panic if a property does not hold.
@@ -133,4 +145,5 @@ pub const ALL: &[(&str, Harness)] = &[
     ("xauthority", xauthority),
     ("wayland", wayland),
     ("profile", profile),
+    ("zipdir", zipdir),
 ];

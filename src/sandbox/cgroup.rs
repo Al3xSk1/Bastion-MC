@@ -21,6 +21,16 @@
 //! * `CPUQuota` (optional) — the most CPU time the group may use, in percent of one CPU
 //!   (`400%` = four CPUs). Off by default for the game, which legitimately uses many cores
 //!   for chunk generation; set `sandbox.cpu_quota_percent` to bound a miner or a busy loop.
+//!
+//! **Asked for is not enforced.** `systemd-run` exiting with status 0 means that a scope was
+//! created — not that the kernel holds the limits: a user manager that was not delegated a
+//! controller accepts the property and enforces nothing. So the limits are **read back from
+//! the kernel** ([`verify`]): the process must be in the scope that was asked for, and that
+//! control group's `memory.max`, `memory.swap.max`, `pids.max` (and `cpu.max`) must hold the
+//! values. [`preflight`] does that with a probe scope before anything is started, and the
+//! launch does it again for the real sandbox once it runs. What this establishes is what
+//! the kernel's own files say; that the kernel acts on them is its business (and is
+//! exercised by `tests/sandbox.rs`: a thread bomb stops, a memory hog is killed).
 
 use std::{
     ffi::{OsStr, OsString},
@@ -111,36 +121,138 @@ pub fn locate() -> std::result::Result<PathBuf, String> {
     Ok(program)
 }
 
-/// Prove that a scope with limits can actually be created, by creating one around
-/// `/usr/bin/true`. Cheap (tens of milliseconds), and it turns every way this can fail —
-/// no user manager, controllers not delegated, policy — into one clear answer *before* the
-/// game is started.
-pub async fn preflight() -> std::result::Result<PathBuf, String> {
+/// Why a process's control group is not what [`Limits`] asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotVerified {
+    /// The process is not (yet) in the scope.
+    NotInScope(String),
+    /// It is in the scope, but the kernel does not hold a limit that was asked for.
+    NotEnforced(String),
+}
+
+impl std::fmt::Display for NotVerified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotVerified::NotInScope(why) | NotVerified::NotEnforced(why) => f.write_str(why),
+        }
+    }
+}
+
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// [`verify`] against a given hierarchy root and `/proc/<pid>/cgroup` text.
+fn verify_in(root: &Path, membership: &str, limits: &Limits) -> std::result::Result<(), NotVerified> {
+    let not_in = |why: String| Err(NotVerified::NotInScope(why));
+    let Some(group) = membership.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return not_in("this system does not use the unified control-group hierarchy (cgroup v2)".into());
+    };
+    // The kernel wrote this path; it is still only used if it is a plain absolute one.
+    let relative = Path::new(group.strip_prefix('/').unwrap_or(""));
+    if group.len() > 4096 || crate::paths::validate_relative(relative).is_err() {
+        return not_in("the kernel reported an unusable control-group path".into());
+    }
+    let scope = format!("{}.scope", limits.unit);
+    if relative.file_name().and_then(|name| name.to_str()) != Some(scope.as_str()) {
+        return not_in(format!(
+            "the process is not in the scope {scope} (it is in {})",
+            util::sanitize_line(group.as_bytes(), 200)
+        ));
+    }
+    let dir = root.join(relative);
+    let mut wanted = vec![
+        ("memory.max", limits.memory_max_bytes.to_string(), "memory"),
+        ("memory.swap.max", "0".to_string(), "memory"),
+        ("pids.max", limits.tasks_max.to_string(), "pids"),
+    ];
+    if let Some(percent) = limits.cpu_quota_percent {
+        // CPUQuota=N% is N ms of CPU time per 100 ms period.
+        wanted.push(("cpu.max", format!("{} 100000", u64::from(percent) * 1000), "cpu"));
+    }
+    for (knob, expected, controller) in wanted {
+        let found = match util::read_small_file(&dir.join(knob), 256) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+            Err(_) => {
+                return Err(NotVerified::NotEnforced(format!(
+                    "the scope has no {knob}: the {controller} controller is not available to this user's systemd \
+                     manager (not delegated), so that limit is not enforced"
+                )));
+            }
+        };
+        if found != expected {
+            return Err(NotVerified::NotEnforced(format!(
+                "the scope's {knob} is {:?}, not {expected:?}: the limit that was asked for is not the one in force",
+                util::sanitize_line(found.as_bytes(), 60)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read the limits back from the kernel: is `pid` in the scope `limits` names, and does that
+/// control group hold exactly these limits?
+pub fn verify(pid: u32, limits: &Limits) -> std::result::Result<(), NotVerified> {
+    let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .map_err(|e| NotVerified::NotInScope(format!("the control group of process {pid} cannot be read ({e})")))?;
+    verify_in(Path::new(CGROUP_ROOT), &membership, limits)
+}
+
+/// [`verify`] for a process that has only just been started: being moved into the scope and
+/// the limits being written take the user manager a moment. Waits up to `patience`.
+pub async fn verify_started(pid: u32, limits: &Limits, patience: Duration) -> std::result::Result<(), NotVerified> {
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        match verify(pid, limits) {
+            Ok(()) => return Ok(()),
+            Err(why) if tokio::time::Instant::now() >= deadline => return Err(why),
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+}
+
+/// What the probe scope runs: something that stays long enough to be looked at.
+const PROBE_PROGRAM: &str = "/usr/bin/sleep";
+
+/// Prove that a scope **with enforced limits** can be had, by creating one around a
+/// sleeping process and reading its limits back from the kernel ([`verify`]). `cpu_quota`:
+/// whether a CPU quota will be asked for (it needs one more controller). Takes a fraction
+/// of a second, and turns every way this can fail — no user manager, a controller that was
+/// not delegated, policy — into one answer *before* the game is started.
+pub async fn preflight(cpu_quota: bool) -> std::result::Result<PathBuf, String> {
     let program = locate()?;
+    util::require_root_owned(Path::new(PROBE_PROGRAM)).map_err(|e| e.to_string())?;
     // A fresh name every time: unit names are unique per user manager, and a probe must not
     // fail because another one (another launcher, an earlier attempt) used the same name.
-    let probe = Limits::new("probe", 64, 16).map_err(|e| e.to_string())?;
-    let mut command = tokio::process::Command::new(&program);
-    command
-        .args(probe.command(OsStr::new("/usr/bin/true"), &[]))
+    let probe = Limits::new("probe", 64, 16).map_err(|e| e.to_string())?.with_cpu_quota(cpu_quota.then_some(50));
+    let mut child = tokio::process::Command::new(&program)
+        .args(probe.command(OsStr::new(PROBE_PROGRAM), &["30".into()]))
         .env_clear()
         .envs(manager_env())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
-        .await
-        .map_err(|_| "systemd-run did not answer within 15 seconds".to_string())?
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
-    if output.status.success() {
-        Ok(program)
-    } else {
-        Err(format!(
-            "systemd-run could not create a scope with resource limits: {}",
-            util::sanitize_line(output.stderr.trim_ascii(), 300)
-        ))
-    }
+    let pid = child.id().ok_or("the probe ended before it could be examined")?;
+    let verified = tokio::select! {
+        verified = verify_started(pid, &probe, Duration::from_secs(15)) => verified.map_err(|why| why.to_string()),
+        // systemd-run gave up (it only ends this early when it could not create the scope).
+        _ = child.wait() => {
+            use tokio::io::AsyncReadExt;
+            let mut stderr = Vec::new();
+            if let Some(pipe) = child.stderr.as_mut() {
+                let _ = pipe.take(4096).read_to_end(&mut stderr).await;
+            }
+            Err(format!(
+                "systemd-run could not create a scope with resource limits: {}",
+                util::sanitize_line(stderr.trim_ascii(), 300)
+            ))
+        }
+    };
+    // The probe has served its purpose; the scope goes with it.
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    verified.map(|()| program)
 }
 
 #[cfg(test)]
@@ -194,6 +306,68 @@ mod tests {
         assert!(at < text.iter().position(|a| *a == "--").unwrap());
         let none = Limits::new("x", 1024, 64).unwrap().command(OsStr::new("/usr/bin/true"), &[]);
         assert!(!none.iter().any(|a| a.to_str().unwrap().starts_with("CPUQuota")));
+    }
+
+    /// A control-group hierarchy as the kernel would show it, in a directory of files.
+    fn hierarchy(knobs: &[(&str, &str)]) -> (PathBuf, String, Limits) {
+        let root =
+            std::env::temp_dir().join(format!("bastion-cg-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        let limits = Limits {
+            memory_max_bytes: 6 << 30,
+            tasks_max: 4096,
+            cpu_quota_percent: None,
+            unit: "bastion-mc-vanilla-0a1b2c3d".into(),
+        };
+        let group = "/user.slice/user-1000.slice/user@1000.service/app.slice/bastion-mc-vanilla-0a1b2c3d.scope";
+        std::fs::create_dir_all(root.join(&group[1..])).unwrap();
+        for (knob, value) in knobs {
+            std::fs::write(root.join(&group[1..]).join(knob), format!("{value}\n")).unwrap();
+        }
+        (root, format!("0::{group}\n"), limits)
+    }
+
+    #[test]
+    fn limits_count_only_when_the_kernel_holds_them() {
+        let all =
+            [("memory.max", "6442450944"), ("memory.swap.max", "0"), ("pids.max", "4096"), ("cpu.max", "max 100000")];
+        let (root, membership, limits) = hierarchy(&all);
+        let scope_dir = root.join(&membership.trim()[4..]);
+        assert_eq!(verify_in(&root, &membership, &limits), Ok(()));
+
+        // Asked for a CPU quota: the kernel has to hold that too.
+        let with_cpu = limits.clone().with_cpu_quota(Some(250));
+        let err = verify_in(&root, &membership, &with_cpu).unwrap_err();
+        assert!(matches!(&err, NotVerified::NotEnforced(why) if why.contains("cpu.max")), "{err:?}");
+        std::fs::write(scope_dir.join("cpu.max"), "250000 100000\n").unwrap();
+        assert_eq!(verify_in(&root, &membership, &with_cpu), Ok(()));
+
+        // A limit the manager accepted but did not apply.
+        std::fs::write(scope_dir.join("memory.max"), "max\n").unwrap();
+        let err = verify_in(&root, &membership, &limits).unwrap_err();
+        assert!(
+            matches!(&err, NotVerified::NotEnforced(why) if why.contains("memory.max") && why.contains("\"max\"")),
+            "{err:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+
+        // A controller that was not delegated: the file does not exist at all.
+        let (root, membership, limits) = hierarchy(&[("pids.max", "4096")]);
+        let err = verify_in(&root, &membership, &limits).unwrap_err();
+        assert!(matches!(&err, NotVerified::NotEnforced(why) if why.contains("not delegated")), "{err:?}");
+
+        // Not in the scope: some other group, the old hierarchy, a path that is not one.
+        for elsewhere in [
+            "0::/user.slice/user-1000.slice/session-2.scope\n",
+            "0::/user.slice/bastion-mc-vanilla-0a1b2c3d.scope/child\n",
+            "12:memory:/user.slice\n1:name=systemd:/x\n",
+            "0::/../../etc/bastion-mc-vanilla-0a1b2c3d.scope\n",
+            "0::\n",
+            "",
+        ] {
+            let err = verify_in(&root, elsewhere, &limits).unwrap_err();
+            assert!(matches!(err, NotVerified::NotInScope(_)), "{elsewhere:?}: {err:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

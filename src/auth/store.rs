@@ -3,15 +3,52 @@
 //! * `keyutils` (default): the kernel keyring, via the `keyring-core` ecosystem. RAM only —
 //!   never written to disk, gone at reboot (and after the persistent-keyring expiry, three
 //!   days by default, if you stay logged out).
-//! * `age`: a file encrypted by the external `age` tool. With an identity backed by a
-//!   hardware token (`age-plugin-yubikey`, `age-plugin-tpm`) every decryption needs the
-//!   device — the only option here that also resists other software running as you.
+//! * `age`: a file encrypted by the external `age` tool, to the recipients in a recipients
+//!   file, decrypted with an identity file. See below for what that is worth.
 //! * `none`: nothing is stored; sign in on every launch.
 //!
 //! What the kernel keyring does and does not give you (see docs/THREAT_MODEL.md): other
 //! *users* cannot read it, it never touches disk, and the sandboxed game cannot reach it
 //! (fresh session keyring + seccomp). Other *processes running as you in the same login
 //! session* can read it; no user-space launcher can change that.
+//!
+//! **What the age vault gives you, exactly.** Two different questions decide it, and they
+//! have different answers:
+//!
+//! * *Who can decrypt a vault file that exists?* Whoever holds the secret half of one of
+//!   the recipients it was encrypted to. With an identity kept in a device
+//!   (`age-plugin-yubikey`, `age-plugin-tpm`, `age-plugin-fido2-hmac`) that takes the
+//!   device: a copy of the file — a backup, a stolen disk, a file read by other software —
+//!   is useless without it. It does **not** take more than the device: a program running as
+//!   you can ask a connected device to decrypt, just as the launcher does. Whether that
+//!   needs a touch or a PIN is the device's policy, not something this launcher sees or
+//!   enforces, and a touch you give expecting the launcher can be spent on somebody else's
+//!   request. A software identity (a key in a file) can simply be read.
+//! * *To whom is the next vault file encrypted?* To whatever the recipients file says at
+//!   that moment — and encrypting needs no device and no touch. The launcher re-encrypts the
+//!   (rotated) refresh token at every launch. So if the recipients file is one of your own
+//!   files, a program running as you can add a recipient of its own to it, and from the
+//!   next launch on it reads your token offline, hardware key or not.
+//!
+//! The second point is closed only by taking the recipients out of the user's reach:
+//! when the root-owned file [`SYSTEM_AGE_RECIPIENTS`] exists, the vault is encrypted to
+//! exactly the recipients in it, `recipients_file` settings in the configuration are
+//! ignored, only a program called `age` (or `rage`) is run, and the keyring is refused as a
+//! store (otherwise the same program would simply switch the configuration to it). Without
+//! that file the vault protects the token at rest and against other *users*; against other
+//! software running as you it is no stronger than the files it is configured with.
+//!
+//! **What the root-owned file does not do.** It takes the *recipients* out of the reach of
+//! software running as you — the quiet, lasting attack: one line added once, and every
+//! token stored afterwards readable offline. It does not take the *launcher* out of that
+//! reach. A program that can put itself between you and the launcher (another binary earlier
+//! in `$PATH`, a wrapper, a library preloaded into it) sees the token in the moment you
+//! launch, whatever the vault is encrypted to; and it can still ask a connected device to
+//! decrypt the vault file that exists. Only a separate UNIX account for the launcher keeps
+//! such a program away (docs/MC_VAULT_ACCOUNT.md).
+//!
+//! None of this was exercised with a real `age` binary or a real device on the development
+//! machine: the plumbing is tested against a stand-in program.
 
 use std::{
     collections::HashMap,
@@ -26,7 +63,7 @@ use zeroize::Zeroize;
 use crate::{
     config::{AgeConfig, AuthConfig, TokenStore as Kind},
     error::{Context, Error, Result},
-    paths::{Paths, validate_id},
+    paths::{Paths, SYSTEM_AGE_RECIPIENTS, validate_id},
     secret::Secret,
     util,
 };
@@ -50,14 +87,80 @@ pub struct AgeVault {
     /// Accounts with keys of their own: label → (recipients, identity).
     per_account: HashMap<String, (PathBuf, PathBuf)>,
     dir: PathBuf,
+    /// The root-owned recipients file, when there is one: then every vault file is
+    /// encrypted to it, and the recipients files above are not used.
+    anchor: Option<PathBuf>,
+}
+
+/// The root-owned recipients file of this machine ([`SYSTEM_AGE_RECIPIENTS`]), if there is
+/// one. Something at that path that is not a plain root-owned file is an error — it is not
+/// passed over in favour of the user's own recipients.
+pub fn system_recipients() -> Result<Option<PathBuf>> {
+    anchor_at(Path::new(SYSTEM_AGE_RECIPIENTS), true)
+}
+
+/// [`system_recipients`] for a given path. `root_owned: false` (tests only) accepts a file
+/// of the user's own in its place.
+#[doc(hidden)]
+pub fn anchor_at(path: &Path, root_owned: bool) -> Result<Option<PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(format!("inspecting {}", path.display()), e)),
+        Ok(meta) => meta,
+    };
+    let unusable = |why: &str| {
+        Error::Policy(format!(
+            "{} exists but {why}. It is the list of recipients the age vault must be encrypted to; the launcher does \
+             not fall back to the configured recipients file while it is there. Fix it (owner root, mode 0644, a \
+             plain file in a root-owned directory) or remove it.",
+            path.display()
+        ))
+    };
+    // A plain file: a link could lead to somewhere that is not root's to keep unchanged.
+    if !meta.file_type().is_file() {
+        return Err(unusable("is not a regular file"));
+    }
+    if root_owned {
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(unusable("is not owned by root, or is writable by others"));
+        }
+        // Whoever can write the directory can replace the file, or take it away.
+        let dir = path.parent().ok_or_else(|| unusable("has no directory"))?;
+        let dir_meta = std::fs::metadata(dir).ctx(|| format!("inspecting {}", dir.display()))?;
+        if dir_meta.uid() != 0 || dir_meta.mode() & 0o022 != 0 {
+            return Err(unusable("lies in a directory that is not root's alone to write"));
+        }
+    }
+    Ok(Some(path.to_path_buf()))
 }
 
 impl TokenStore {
     pub fn open(cfg: &AuthConfig, paths: &Paths) -> Result<Self> {
-        Ok(match cfg.token_store {
-            Kind::Keyutils => TokenStore::Keyutils,
-            Kind::None => TokenStore::None,
-            Kind::Age => TokenStore::Age(AgeVault::new(&cfg.age, paths.vault(), true)?),
+        Self::open_anchored(cfg, paths, system_recipients()?, true)
+    }
+
+    /// [`TokenStore::open`] with the root-owned recipients file given (`None`: there is
+    /// none). `strict: false` (tests only) accepts an `age` program that is not a system
+    /// file.
+    #[doc(hidden)]
+    pub fn open_anchored(cfg: &AuthConfig, paths: &Paths, anchor: Option<PathBuf>, strict: bool) -> Result<Self> {
+        Ok(match (cfg.token_store, anchor) {
+            // With the recipients anchored by root, a configuration that stores the token
+            // somewhere else — where no recipients list applies — is not followed: changing
+            // one line of config.toml must not be a way around the anchor.
+            (Kind::Keyutils, Some(anchor)) => {
+                return Err(Error::Config(format!(
+                    "auth.token_store = \"keyutils\", but {} exists: on this machine a refresh token is stored in \
+                     the age vault, encrypted to the recipients in that file, or not at all. Set auth.token_store = \
+                     \"age\" (or \"none\"). A token that is still in the kernel keyring is removed by `bastion-mc \
+                     scram`.",
+                    anchor.display()
+                )));
+            }
+            (Kind::Keyutils, None) => TokenStore::Keyutils,
+            (Kind::None, _) => TokenStore::None,
+            (Kind::Age, anchor) => TokenStore::Age(AgeVault::anchored(&cfg.age, paths.vault(), strict, anchor)?),
         })
     }
 
@@ -139,14 +242,45 @@ fn keyutils_load(account: &str) -> Result<Option<Secret>> {
     }
 }
 
+/// Invalidate the key of `account` that this login session's keyrings lead to. `Ok(false)`:
+/// there is none (any more). For `scram`, which must know whether something was there
+/// without reading it, and which repeats this until nothing is found.
+pub fn keyutils_remove(account: &str) -> Result<bool> {
+    validate_id(account)?;
+    match keyutils_entry(account)?.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
 // ---------------------------------------------------------------- age vault
 
 impl AgeVault {
     /// `strict` requires the `age` binary to be a root-owned system file (always the case
     /// outside tests).
     pub fn new(cfg: &AgeConfig, dir: PathBuf, strict: bool) -> Result<Self> {
+        Self::anchored(cfg, dir, strict, None)
+    }
+
+    /// `anchor`: the root-owned recipients file, if this machine has one.
+    pub fn anchored(cfg: &AgeConfig, dir: PathBuf, strict: bool, anchor: Option<PathBuf>) -> Result<Self> {
         let missing = |what: &str| Error::Config(format!("auth.age.{what} is required for the age token store"));
         let program = if strict { util::require_root_owned(&cfg.program)? } else { cfg.program.clone() };
+        if let Some(anchor) = &anchor {
+            // The program decides what "encrypt to these recipients" means. With the
+            // recipients fixed by root, the configuration does not get to name some other
+            // root-owned program in its place.
+            let name = program.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if !matches!(name, "age" | "rage") {
+                return Err(Error::Config(format!(
+                    "auth.age.program = {:?}, but {} exists: with the recipients fixed by root, only a program \
+                     called `age` (or `rage`) is run to encrypt to them",
+                    cfg.program.display().to_string(),
+                    anchor.display()
+                )));
+            }
+        }
         Ok(AgeVault {
             program,
             recipients_file: cfg.recipients_file.clone().ok_or_else(|| missing("recipients_file"))?,
@@ -157,15 +291,18 @@ impl AgeVault {
                 .map(|(label, keys)| (label.clone(), (keys.recipients_file.clone(), keys.identity_file.clone())))
                 .collect(),
             dir,
+            anchor,
         })
     }
 
-    /// The recipients and identity files for `account`: its own, or the common ones.
+    /// The recipients and identity files for `account`: its own, or the common ones — and,
+    /// for the recipients, the root-owned file instead of either when there is one.
     fn keys(&self, account: &str) -> (&Path, &Path) {
-        match self.per_account.get(account) {
-            Some((recipients, identity)) => (recipients, identity),
-            None => (&self.recipients_file, &self.identity_file),
-        }
+        let (recipients, identity) = match self.per_account.get(account) {
+            Some((recipients, identity)) => (recipients.as_path(), identity.as_path()),
+            None => (self.recipients_file.as_path(), self.identity_file.as_path()),
+        };
+        (self.anchor.as_deref().unwrap_or(recipients), identity)
     }
 
     fn file(&self, account: &str) -> PathBuf {
@@ -260,28 +397,39 @@ impl AgeVault {
     }
 }
 
-/// What kind of key an age identity file holds, judged by its content.
+/// Plugins that, by their own documentation, keep the secret key in a device and never hand
+/// it out. A plugin identity of any other name may be exactly as much software as a key in a
+/// file (there are plugins for password managers and cloud key services); the launcher does
+/// not know, and does not say "hardware" for it. None of the three was available on the
+/// development machine: this list is what their documentation says, not something tested.
+pub const DEVICE_PLUGINS: [&str; 3] = ["yubikey", "tpm", "fido2-hmac"];
+
+/// What an age identity file holds, judged by its content. Every identity in the file
+/// counts: `age` tries all of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityKind {
-    /// A plugin identity (`AGE-PLUGIN-<NAME>-1…`): the key lives in a device.
-    Plugin(String),
-    /// An ordinary age or SSH private key in the file itself.
-    Software,
+    /// Only plugin identities (`AGE-PLUGIN-<NAME>-1…`). The plugins' names, lower case,
+    /// sorted, each once; a name that is not a plain plugin name is given as `unknown`.
+    Plugins(Vec<String>),
+    /// At least one ordinary age or SSH private key in the file itself — alone, or next to
+    /// identities of the named plugins. Such a key can be copied by anything that can read
+    /// the file; whether the vault can be opened with it depends on the recipients.
+    Software {
+        plugins: Vec<String>,
+    },
     /// Encrypted with a passphrase (`age -p`): a software key, but not usable as it lies.
     PassphraseProtected,
     Unreadable(String),
 }
 
-/// Look at an identity file without using it. Hardware-backed means: every decryption needs
-/// the device (and usually a touch or PIN); a software key can be copied by anything that
-/// can read the file.
+/// Look at an identity file without using it.
 pub fn identity_kind(path: &Path) -> IdentityKind {
     let bytes = match util::read_small_file(path, 64 * 1024) {
         Ok(bytes) => bytes,
         Err(e) => return IdentityKind::Unreadable(e.to_string()),
     };
     let text = String::from_utf8_lossy(&bytes);
-    let mut software = false;
+    let (mut software, mut plugins) = (false, std::collections::BTreeSet::new());
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         if let Some(rest) = line.strip_prefix("AGE-PLUGIN-") {
             // `AGE-PLUGIN-YUBIKEY-1Q…`, `AGE-PLUGIN-FIDO2-HMAC-1Q…`: the plugin's name ends at
@@ -290,16 +438,87 @@ pub fn identity_kind(path: &Path) -> IdentityKind {
             let plain = !name.is_empty()
                 && name.len() <= 32
                 && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-');
-            return IdentityKind::Plugin(if plain { name.to_ascii_lowercase() } else { "unknown".into() });
-        }
-        if line.starts_with("age-encryption.org/") || line.starts_with("-----BEGIN AGE ENCRYPTED FILE") {
+            plugins.insert(if plain { name.to_ascii_lowercase() } else { "unknown".into() });
+        } else if line.starts_with("age-encryption.org/") || line.starts_with("-----BEGIN AGE ENCRYPTED FILE") {
             return IdentityKind::PassphraseProtected;
-        }
-        if line.starts_with("AGE-SECRET-KEY-") || line.starts_with("-----BEGIN OPENSSH PRIVATE KEY") {
+        } else if line.starts_with("AGE-SECRET-KEY-") || line.starts_with("-----BEGIN OPENSSH PRIVATE KEY") {
             software = true;
         }
     }
-    if software { IdentityKind::Software } else { IdentityKind::Unreadable("no age identity found in the file".into()) }
+    let plugins: Vec<String> = plugins.into_iter().collect();
+    match (software, plugins.is_empty()) {
+        (true, _) => IdentityKind::Software { plugins },
+        (false, false) => IdentityKind::Plugins(plugins),
+        (false, true) => IdentityKind::Unreadable("no age identity found in the file".into()),
+    }
+}
+
+/// Whom a recipients file names, by kind. Every one of them can decrypt what is encrypted
+/// to the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recipients {
+    /// Plugin recipients (`age1<name>1…`), by plugin name: lower case, sorted, each once.
+    pub plugins: Vec<String>,
+    /// Native age recipients (`age1…`): keys whose secret half is a string in a file,
+    /// wherever that file is kept.
+    pub native: usize,
+    /// SSH public keys (`ssh-ed25519 …`, `ssh-rsa …`): likewise software keys.
+    pub ssh: usize,
+    /// Lines that are none of the above.
+    pub other: usize,
+}
+
+impl Recipients {
+    /// Recipients that are not known to be bound to a device.
+    pub fn not_device_bound(&self) -> usize {
+        self.native
+            + self.ssh
+            + self.other
+            + self.plugins.iter().filter(|name| !DEVICE_PLUGINS.contains(&name.as_str())).count()
+    }
+
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.plugins.is_empty() {
+            parts.push(format!("plugin recipient(s) for {}", self.plugins.join(", ")));
+        }
+        for (count, what) in
+            [(self.native, "native age key(s)"), (self.ssh, "SSH key(s)"), (self.other, "line(s) of another kind")]
+        {
+            if count > 0 {
+                parts.push(format!("{count} {what}"));
+            }
+        }
+        if parts.is_empty() { "no recipients".into() } else { parts.join(", ") }
+    }
+}
+
+/// Classify the lines of a recipients file. Nothing is checked beyond their shape: whether a
+/// line is a *valid* recipient is for `age` to say.
+pub fn recipient_kinds(path: &Path) -> Result<Recipients> {
+    let bytes = util::read_small_file(path, 64 * 1024)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let (mut found, mut plugins) = (Recipients::default(), std::collections::BTreeSet::new());
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        // Bech32: the data part never contains `1`, so the last `1` ends the prefix. A
+        // native recipient's prefix is `age`; a plugin's is `age1<name>`.
+        let prefix = line.rfind('1').map(|at| &line[..at]).unwrap_or("");
+        let plugin = prefix.strip_prefix("age1").filter(|name| {
+            (1..=32).contains(&name.len())
+                && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+        if prefix == "age" {
+            found.native += 1;
+        } else if let Some(name) = plugin {
+            plugins.insert(name.to_string());
+        } else if line.starts_with("ssh-") || line.starts_with("ecdsa-") || line.starts_with("sk-") {
+            found.ssh += 1;
+        } else {
+            found.other += 1;
+        }
+    }
+    found.plugins = plugins.into_iter().collect();
+    Ok(found)
 }
 
 impl TokenStore {
@@ -307,6 +526,15 @@ impl TokenStore {
     pub fn age_identity(&self, account: &str) -> Option<&Path> {
         match self {
             TokenStore::Age(vault) => Some(vault.keys(account).1),
+            _ => None,
+        }
+    }
+
+    /// The recipients file `account`'s vault is encrypted to, when the store is an age
+    /// vault: the root-owned one if this machine has it, else the configured one.
+    pub fn age_recipients(&self, account: &str) -> Option<&Path> {
+        match self {
+            TokenStore::Age(vault) => Some(vault.keys(account).0),
             _ => None,
         }
     }
@@ -388,17 +616,166 @@ mod tests {
             std::fs::write(&path, text).unwrap();
             identity_kind(&path)
         };
+        let plugins = |names: &[&str]| IdentityKind::Plugins(names.iter().map(|n| n.to_string()).collect());
+        let software =
+            |names: &[&str]| IdentityKind::Software { plugins: names.iter().map(|n| n.to_string()).collect() };
         assert_eq!(
             kind("#       Serial: 1234, Slot: 1\n#   PIN policy: once\nAGE-PLUGIN-YUBIKEY-1QQPQQQQQQQQQ\n"),
-            IdentityKind::Plugin("yubikey".into())
+            plugins(&["yubikey"])
         );
-        assert_eq!(kind("AGE-PLUGIN-TPM-1QYQSZQGPQYQSZQGP\n"), IdentityKind::Plugin("tpm".into()));
-        assert_eq!(kind("AGE-PLUGIN-FIDO2-HMAC-1QQPQZ\n"), IdentityKind::Plugin("fido2-hmac".into()));
-        assert_eq!(kind("# created: 2026-01-01\nAGE-SECRET-KEY-1QQQQQQQQQQQQQQQQ\n"), IdentityKind::Software);
-        assert_eq!(kind("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"), IdentityKind::Software);
+        assert_eq!(kind("AGE-PLUGIN-TPM-1QYQSZQGPQYQSZQGP\n"), plugins(&["tpm"]));
+        assert_eq!(kind("AGE-PLUGIN-FIDO2-HMAC-1QQPQZ\n"), plugins(&["fido2-hmac"]));
+        assert_eq!(kind("# created: 2026-01-01\nAGE-SECRET-KEY-1QQQQQQQQQQQQQQQQ\n"), software(&[]));
+        assert_eq!(kind("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"), software(&[]));
         assert_eq!(kind("age-encryption.org/v1\n-> scrypt abc 18\n"), IdentityKind::PassphraseProtected);
+        // Every identity in the file counts, in whatever order: a software key next to a
+        // device identity is a software key that opens whatever is encrypted to it.
+        assert_eq!(kind("AGE-PLUGIN-YUBIKEY-1QQPQ\nAGE-SECRET-KEY-1QQQQ\n"), software(&["yubikey"]));
+        assert_eq!(kind("AGE-SECRET-KEY-1QQQQ\nAGE-PLUGIN-YUBIKEY-1QQPQ\n"), software(&["yubikey"]));
+        assert_eq!(
+            kind("AGE-PLUGIN-YUBIKEY-1QQPQ\nAGE-PLUGIN-TPM-1QYQS\nAGE-PLUGIN-YUBIKEY-1QQPZ\n"),
+            plugins(&["tpm", "yubikey"])
+        );
+        // A plugin is not a device by being a plugin: only the names on the list are said to be.
+        assert_eq!(kind("AGE-PLUGIN-SOMEVAULT-1QQPQ\n"), plugins(&["somevault"]));
+        assert!(!DEVICE_PLUGINS.contains(&"somevault") && DEVICE_PLUGINS.contains(&"yubikey"));
+        assert_eq!(kind("AGE-PLUGIN-\u{1b}[2J-1QQPQ\n"), plugins(&["unknown"]), "an odd name is not echoed");
         assert!(matches!(kind("# only a comment\n"), IdentityKind::Unreadable(_)));
         assert!(matches!(identity_kind(&dir.join("missing")), IdentityKind::Unreadable(_)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recipients_are_counted_by_kind() {
+        let dir =
+            std::env::temp_dir().join(format!("bastion-rcp-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recipients");
+        std::fs::write(
+            &path,
+            "# my keys\nage1yubikey1qwt50d05nh5vutpdzmlg5wn80xq5negm4uj9ghv0snvdd3yysf5yw3rhl3t\n\
+             age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\n\
+             ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ backup\n\
+             age1tpm1qg86fn5esp30u9h6jy6zvu9gcsvnac09vn8jzjxt8s3qtlcv5h2x287wm36\n\
+             age1somevault1qqqq\n\nnot a recipient\n",
+        )
+        .unwrap();
+        let found = recipient_kinds(&path).unwrap();
+        assert_eq!(found.plugins, ["somevault", "tpm", "yubikey"]);
+        assert_eq!((found.native, found.ssh, found.other), (1, 1, 1));
+        assert_eq!(found.not_device_bound(), 4, "the native key, the SSH key, the odd line, the unknown plugin");
+        assert!(found.describe().contains("1 native age key(s)") && found.describe().contains("yubikey"));
+        std::fs::write(&path, "age1yubikey1qwt50d05nh5\n").unwrap();
+        assert_eq!(recipient_kinds(&path).unwrap().not_device_bound(), 0);
+        assert!(recipient_kinds(&dir.join("missing")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The root-owned recipients file: what stands at its path is used or is an error —
+    /// never ignored — and with it in force the configuration cannot move the token to
+    /// other recipients, to another program, or into the keyring.
+    #[test]
+    fn a_root_owned_recipients_file_overrides_the_configuration() {
+        let dir =
+            std::env::temp_dir().join(format!("bastion-anc-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The stand-in for age: prints which recipients file it was told to encrypt to.
+        let age = dir.join("bin/age");
+        std::fs::write(
+            &age,
+            "#!/usr/bin/python3 -I\nimport sys\nargs = sys.argv[1:]\nsys.stdin.buffer.read()\n\
+             sys.stdout.write('sealed-to:' + args[2] if args[0] == '--encrypt' else 'opened-with:' + args[2])\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mine, anchor) = (dir.join("my-recipients"), dir.join("root-recipients"));
+        std::fs::write(&mine, "age1attackeraddedthis\n").unwrap();
+        std::fs::write(&anchor, "age1yubikey1qqqq\n").unwrap();
+        let paths = Paths {
+            config: dir.join("config"),
+            data: dir.join("data"),
+            cache: dir.join("cache"),
+            state: dir.join("state"),
+            runtime: None,
+        };
+        let mut cfg = AuthConfig {
+            token_store: Kind::Age,
+            age: AgeConfig {
+                program: age.clone(),
+                recipients_file: Some(mine.clone()),
+                identity_file: Some(dir.join("identity")),
+                accounts: [(
+                    "work".to_string(),
+                    crate::config::AgeAccountKeys { recipients_file: mine.clone(), identity_file: dir.join("id2") },
+                )]
+                .into(),
+            },
+            ..AuthConfig::default()
+        };
+        let token = Secret::from_slice(b"refresh").unwrap();
+        let sealed_to = |store: &TokenStore, account: &str| {
+            store.save(account, &token).unwrap();
+            String::from_utf8(std::fs::read(paths.vault().join(format!("{account}.age"))).unwrap()).unwrap()
+        };
+
+        // No anchor: the configured files are what is used (and what a program running as
+        // the user can change).
+        let plain = TokenStore::open_anchored(&cfg, &paths, None, false).unwrap();
+        assert_eq!(sealed_to(&plain, "default"), format!("sealed-to:{}", mine.display()));
+        assert_eq!(plain.age_recipients("default"), Some(mine.as_path()));
+
+        // With it: every account's vault is encrypted to the anchor, whatever is configured.
+        let anchored = TokenStore::open_anchored(&cfg, &paths, Some(anchor.clone()), false).unwrap();
+        for account in ["default", "work"] {
+            assert_eq!(sealed_to(&anchored, account), format!("sealed-to:{}", anchor.display()), "{account}");
+            assert_eq!(anchored.age_recipients(account), Some(anchor.as_path()));
+        }
+        // Decryption still uses the account's own identity.
+        assert_eq!(anchored.age_identity("work"), Some(dir.join("id2").as_path()));
+        // Re-sealing moves an existing vault file over to the anchor's recipients.
+        sealed_to(&plain, "default");
+        assert!(anchored.reseal("default").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(paths.vault().join("default.age")).unwrap(),
+            format!("sealed-to:{}", anchor.display())
+        );
+
+        // The configuration cannot leave the vault while the anchor exists…
+        cfg.token_store = Kind::Keyutils;
+        let refused = TokenStore::open_anchored(&cfg, &paths, Some(anchor.clone()), false).err().unwrap().to_string();
+        assert!(refused.contains("keyutils") && refused.contains("or not at all"), "{refused}");
+        assert!(matches!(TokenStore::open_anchored(&cfg, &paths, None, false).unwrap(), TokenStore::Keyutils));
+        cfg.token_store = Kind::None;
+        assert!(matches!(
+            TokenStore::open_anchored(&cfg, &paths, Some(anchor.clone()), false).unwrap(),
+            TokenStore::None
+        ));
+        // …and cannot name another program to do the "encrypting".
+        cfg.token_store = Kind::Age;
+        cfg.age.program = dir.join("bin/not-age");
+        std::fs::copy(&age, &cfg.age.program).unwrap();
+        let refused = TokenStore::open_anchored(&cfg, &paths, Some(anchor.clone()), false).err().unwrap().to_string();
+        assert!(refused.contains("only a program called `age`"), "{refused}");
+        assert!(
+            TokenStore::open_anchored(&cfg, &paths, None, false).is_ok(),
+            "without the anchor that is the user's choice"
+        );
+
+        // What may stand at the anchor's path. (A file of the user's own is not root's: the
+        // real check refuses it instead of falling back to the configured recipients.)
+        assert_eq!(anchor_at(&dir.join("absent"), true).unwrap(), None);
+        assert_eq!(anchor_at(&anchor, false).unwrap(), Some(anchor.clone()));
+        let not_roots = anchor_at(&anchor, true).err().unwrap().to_string();
+        assert!(not_roots.contains("not owned by root") && not_roots.contains("does not fall back"), "{not_roots}");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&anchor, &link).unwrap();
+        assert!(anchor_at(&link, false).is_err(), "a link is not a plain file");
+        assert!(anchor_at(&dir.join("bin"), false).is_err(), "nor is a directory");
+        // On a machine without the file (the development machine has none) there is no anchor.
+        if !Path::new(SYSTEM_AGE_RECIPIENTS).exists() {
+            assert_eq!(system_recipients().unwrap(), None);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

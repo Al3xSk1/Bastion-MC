@@ -222,6 +222,15 @@ impl Reporter {
         self.emit(Event::Status { text: text.as_ref().to_string() });
     }
 
+    /// A note the user must not miss: like [`Reporter::status`], but on a terminal it is
+    /// printed even when everything else is silenced (`launch --quiet`).
+    pub fn warn(&self, text: impl AsRef<str>) {
+        match &self.inner.mode {
+            Mode::Human { quiet: true } => eprintln!("{}", text.as_ref()),
+            _ => self.status(text),
+        }
+    }
+
     pub fn phase(&self, phase: Phase) {
         self.emit(Event::Phase { phase });
     }

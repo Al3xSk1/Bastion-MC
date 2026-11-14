@@ -49,6 +49,11 @@ pub struct Desktop {
     /// The game's own Wayland socket. The compositor accepts connections on it for as long
     /// as this is kept.
     pub wayland_context: Option<wayland::SecurityContext>,
+    /// With a security context: what the launcher saw when it listed the game's socket.
+    /// `Ok`: none of the known privileged interfaces is offered there (the text says what
+    /// is). `Err`: one is, or the socket could not be listed — the context is in place, but
+    /// it was not established that it withholds anything.
+    pub wayland_isolation: Option<std::result::Result<String, String>>,
     /// The game's display does not exist yet: it is the inner display of a nested
     /// compositor, to be started (from this) just before the game.
     pub nested: Option<nested::Plan>,
@@ -166,10 +171,45 @@ fn add_wayland(d: &mut Desktop, compositor: PathBuf, cfg: &SandboxConfig, paths:
             let dir =
                 home.join(crate::paths::APP).join(format!("wl-{}", util::hex_encode(&util::random_bytes::<6>()?)));
             match wayland::secure(&compositor, &dir, instance)? {
-                wayland::Setup::Secured(context) => {
+                wayland::Setup::Secured(context, offered) => {
+                    // The compositor took the context. Whether the socket is then the lesser
+                    // one is what the launcher saw when it connected to it — not assumed.
+                    let problem = match &offered {
+                        Ok(offered) if offered.privileged.is_empty() => None,
+                        Ok(offered) => Some(format!(
+                            "the compositor accepted the security context but still offers the game's socket: {}",
+                            offered.privileged.join(", ")
+                        )),
+                        Err(why) => {
+                            Some(format!("what the compositor offers on the game's socket could not be listed ({why})"))
+                        }
+                    };
                     let socket = context.socket.clone();
+                    let how = match (problem, offered) {
+                        (Some(problem), _) if mode == IsolationMode::Require => {
+                            // (Dropping the context removes the socket again.)
+                            return Err(Error::Sandbox(format!(
+                                "sandbox.wayland_security_context = \"require\", but {problem}"
+                            )));
+                        }
+                        (Some(problem), _) => {
+                            d.wayland_isolation = Some(Err(problem.clone()));
+                            format!(
+                                "WARNING: a socket of its own was declared to the compositor as a sandbox, but {problem}; \
+                                 the game is NOT kept from those interfaces"
+                            )
+                        }
+                        (None, Ok(offered)) => {
+                            d.wayland_isolation = Some(Ok(offered.describe()));
+                            format!(
+                                "a socket of its own, declared to the compositor as a sandbox (security context): {}",
+                                offered.describe()
+                            )
+                        }
+                        (None, Err(_)) => unreachable!("an unlisted socket is a problem"),
+                    };
                     d.wayland_context = Some(context);
-                    (socket, "a socket of its own, declared to the compositor as a sandbox (security context)".into())
+                    (socket, how)
                 }
                 wayland::Setup::Unsupported if mode == IsolationMode::Require => {
                     return Err(Error::Sandbox(
@@ -275,6 +315,9 @@ fn use_x11(d: &mut Desktop, cfg: &SandboxConfig, paths: &Paths, number: u32, soc
                         layers: cfg.nested_compositor_layers.clone(),
                         limits: None,
                         seccomp: SeccompPolicy { mode: cfg.seccomp, tripwire: cfg.tripwire, extra_allow: Vec::new() },
+                        // "require" asks for the whole of what the nested compositor is for.
+                        require_clipboard_cut: mode == IsolationMode::Require,
+                        preload_clipboard_cut: true,
                     });
                     d.notes.push(format!(
                         "display: X11 :{number} through a nested compositor (gamescope, in a sandbox of its own): \
@@ -536,6 +579,77 @@ mod tests {
         for cut in 0..good.len() {
             let _ = filter_xauthority(&good[..cut], 0, "h");
         }
+    }
+
+    /// What `add_wayland` makes of a compositor that takes the security context and then
+    /// offers the game's socket `sandboxed`.
+    fn wayland_with(
+        dir: &Path,
+        mode: IsolationMode,
+        sandboxed: &[&'static str],
+    ) -> (Desktop, Result<()>, std::thread::JoinHandle<wayland::tests::Seen>) {
+        const TRUSTED: &[&str] =
+            &["wl_compositor", "wl_shm", wayland::MANAGER, "xdg_wm_base", "zwlr_screencopy_manager_v1"];
+        let paths = Paths {
+            config: dir.join("config"),
+            data: dir.join("data"),
+            cache: dir.join("cache"),
+            state: dir.join("state"),
+            runtime: Some(dir.join("run")),
+        };
+        util::create_private_dir_all(&dir.join("run")).unwrap();
+        let cfg = SandboxConfig { wayland_security_context: mode, ..SandboxConfig::default() };
+        let (compositor, handle) = wayland::tests::compositor_offering(dir, TRUSTED, false, Some(sandboxed.to_vec()));
+        let mut desktop = Desktop::default();
+        let result = add_wayland(&mut desktop, compositor, &cfg, &paths, "vanilla");
+        (desktop, result, handle)
+    }
+
+    /// A compositor that accepts the security context and still offers the game screen
+    /// capture: the launcher looked, so "auto" says it (and does not record the socket as
+    /// isolating anything), and "require" refuses — neither takes the setup for the result.
+    #[test]
+    fn a_security_context_that_withholds_nothing_is_reported_by_auto_and_refused_by_require() {
+        let dir = wayland::tests::scratch("display");
+        let unfiltered: &[&'static str] = &["wl_compositor", "wl_shm", "xdg_wm_base", "zwlr_screencopy_manager_v1"];
+
+        let (desktop, result, handle) = wayland_with(&dir, IsolationMode::Auto, unfiltered);
+        result.unwrap();
+        let seen = desktop.wayland_isolation.clone().expect("a security context was set up");
+        let problem = seen.expect_err("screen capture is on offer: not established as isolating");
+        assert!(problem.contains("zwlr_screencopy_manager_v1"), "{problem}");
+        assert!(
+            desktop.wayland_context.is_some(),
+            "the context is still used: it is no worse than the session's socket"
+        );
+        let note = desktop.notes.iter().find(|n| n.starts_with("display: Wayland")).expect("a display note");
+        assert!(note.contains("WARNING") && note.contains("NOT kept from"), "{note}");
+        drop((desktop, handle));
+
+        let (desktop, result, handle) = wayland_with(&dir, IsolationMode::Require, unfiltered);
+        let refusal = result.unwrap_err().to_string();
+        assert!(
+            refusal.contains("wayland_security_context = \"require\"")
+                && refusal.contains("zwlr_screencopy_manager_v1"),
+            "{refusal}"
+        );
+        assert!(desktop.mounts.is_empty() && desktop.wayland_context.is_none(), "nothing is handed to the game");
+        let left: Vec<_> = std::fs::read_dir(dir.join("run").join(crate::paths::APP))
+            .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "the refused socket's name is gone again: {left:?}");
+        drop(handle);
+
+        // The same compositor filtering as it should: recorded as seen, in both modes.
+        for mode in [IsolationMode::Auto, IsolationMode::Require] {
+            let (desktop, result, handle) = wayland_with(&dir, mode, &["wl_compositor", "wl_shm", "xdg_wm_base"]);
+            result.unwrap();
+            let seen = desktop.wayland_isolation.clone().expect("set up").expect("nothing privileged on offer");
+            assert!(seen.contains("3 interface(s) offered") && seen.contains("none of the"), "{seen}");
+            assert!(desktop.sockets.iter().any(|s| s.ends_with("wayland-0")));
+            drop((desktop, handle));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

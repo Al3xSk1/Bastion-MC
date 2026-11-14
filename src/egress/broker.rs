@@ -21,7 +21,18 @@
 //! Requests are rebuilt, not passed on: method, path and an allowlist of headers are copied,
 //! everything else (cookies, the game's `Authorization`, unknown headers) is dropped.
 //! Responses are checked for the real token before they go back; none of Mojang's endpoints
-//! echo it, and if one ever did, the reply is withheld.
+//! echo it, and if one ever did, the reply is withheld. The check reads the reply as it
+//! arrived, so a reply to a request that carried the token must arrive unencoded (the
+//! launcher asks for exactly that): one that comes back with a `Content-Encoding` cannot be
+//! checked and is withheld too.
+//!
+//! **Memory.** The broker holds request bodies while it decides and whole replies while it
+//! checks them, in the launcher's memory — which is not charged to the game's resource
+//! scope. A game that opens many connections, asks for large objects and never reads the
+//! answers must not be able to turn that into gigabytes: all bodies the broker holds, over
+//! all connections, come out of one budget ([`BUFFER_BUDGET`]). A request that finds no room
+//! waits briefly and is then answered `503`; a reply keeps its share until the game has
+//! taken it or its connection has ended. The only one this can starve is the game itself.
 //!
 //! What this does **not** close: code inside the JVM can still ask for *a* server join while
 //! a game connection is open (one per connection), and whoever holds that join can complete
@@ -36,10 +47,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Limited};
 use hyper::{
     HeaderMap, Method, Request, Response,
-    body::Incoming,
+    body::{Body, Frame, Incoming, SizeHint},
     header::{self, HeaderName},
     server::conn::http1,
     service::service_fn,
@@ -86,6 +97,22 @@ const CONNECTION_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const MAX_REQUEST_BODY: usize = 2 << 20;
 const MAX_RESPONSE_BODY: u64 = 8 << 20;
 const MAX_NAMES: usize = 64;
+/// Most bytes of request and reply bodies the broker holds at one time, over all of the
+/// game's connections together. Room for a handful of the largest replies at once; what the
+/// game really asks for (profiles, key lists, block lists) is a few kilobytes each.
+///
+/// What is counted is body bytes. On top of that come, per connection, hyper's own buffers
+/// (bounded at 64 KiB each way) and whatever slack the allocator leaves in a buffer that
+/// grew — so the launcher's real use for this is bounded by about twice this figure plus
+/// that, not by the figure exactly.
+pub const BUFFER_BUDGET: usize = 64 << 20;
+/// How long a request waits for room in the budget before it is refused.
+const BUDGET_WAIT: Duration = Duration::from_secs(10);
+/// What one permit of the budget's semaphore stands for.
+const BUDGET_UNIT: usize = 4096;
+/// A reply is handed to the HTTP layer in pieces of this size, so that the part the game has
+/// not taken yet stays in the body — where it is counted — and not in that layer's buffers.
+const REPLY_FRAME: usize = 16 * 1024;
 
 /// Copied from the game's request to the launcher's. Nothing else is.
 const REQUEST_HEADERS: [HeaderName; 6] = [
@@ -394,6 +421,87 @@ pub struct Broker {
     enabled: Vec<Capability>,
     endpoints: Vec<Endpoint>,
     http: HttpClient,
+    buffers: Budget,
+}
+
+/// The one budget all buffered bodies come out of (see the module documentation).
+struct Budget {
+    permits: Arc<tokio::sync::Semaphore>,
+    bytes: usize,
+    wait: Duration,
+}
+
+/// A share of the [`Budget`], returned to it when dropped.
+struct Room(tokio::sync::OwnedSemaphorePermit);
+
+fn budget_units(bytes: usize) -> usize {
+    bytes.div_ceil(BUDGET_UNIT)
+}
+
+impl Budget {
+    fn new(bytes: usize, wait: Duration) -> Self {
+        Budget { permits: Arc::new(tokio::sync::Semaphore::new(budget_units(bytes))), bytes, wait }
+    }
+
+    /// Room for `bytes`, waiting for it if need be — but not for long. `None`: there is none.
+    async fn reserve(&self, bytes: usize) -> Option<Room> {
+        let units = u32::try_from(budget_units(bytes)).ok()?;
+        match timeout(self.wait, self.permits.clone().acquire_many_owned(units)).await {
+            Ok(Ok(permit)) => Some(Room(permit)),
+            _ => None,
+        }
+    }
+
+    fn in_use(&self) -> usize {
+        (budget_units(self.bytes) - self.permits.available_permits()) * BUDGET_UNIT
+    }
+}
+
+impl Room {
+    /// Give back what turned out not to be needed.
+    fn shrink_to(&mut self, bytes: usize) {
+        let excess = self.0.num_permits().saturating_sub(budget_units(bytes));
+        drop(self.0.split(excess));
+    }
+}
+
+/// The body of a reply to the game: the bytes, and — for a reply that came from upstream —
+/// the room they occupy in the budget, which is given back when this body is dropped (the
+/// game has read all of it, or its connection is gone). Handed out in small frames: the
+/// HTTP layer asks for the next one only when the previous ones are on their way.
+pub struct ReplyBody {
+    bytes: Bytes,
+    _room: Option<Room>,
+}
+
+impl ReplyBody {
+    fn local(bytes: Bytes) -> Self {
+        ReplyBody { bytes, _room: None }
+    }
+}
+
+impl Body for ReplyBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<Frame<Bytes>, Infallible>>> {
+        if self.bytes.is_empty() {
+            return std::task::Poll::Ready(None);
+        }
+        let take = self.bytes.len().min(REPLY_FRAME);
+        std::task::Poll::Ready(Some(Ok(Frame::data(self.bytes.split_to(take)))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.bytes.len() as u64)
+    }
 }
 
 /// What the game is given instead of a token: recognisable, unique per launch, worthless.
@@ -444,7 +552,22 @@ impl Broker {
             enabled,
             endpoints,
             http: http.clone().with_domains(&DOMAINS),
+            buffers: Budget::new(BUFFER_BUDGET, BUDGET_WAIT),
         })
+    }
+
+    /// Another budget for buffered bodies, and another wait for room in it. For the tests,
+    /// which cannot hold 64 MiB of replies or wait ten seconds to see a refusal; never less
+    /// than one request and one reply of the largest size.
+    #[doc(hidden)]
+    pub fn with_buffer_budget(mut self, bytes: usize, wait: Duration) -> Self {
+        self.buffers = Budget::new(bytes.max(MAX_REQUEST_BODY + MAX_RESPONSE_BODY as usize), wait);
+        self
+    }
+
+    /// Bytes of request and reply bodies held (or reserved for a reply on its way) right now.
+    pub fn buffered_bytes(&self) -> usize {
+        self.buffers.in_use()
     }
 
     /// Is HTTPS to this name terminated by the broker (rather than passed through)?
@@ -641,14 +764,14 @@ pub struct Context<'a> {
     pub stats: &'a Stats,
 }
 
-fn local_reply(status: u16, message: &str) -> Response<Full<Bytes>> {
+fn local_reply(status: u16, message: &str) -> Response<ReplyBody> {
     let body =
         serde_json::json!({ "error": "bastion-mc", "errorMessage": format!("bastion-mc: {message}") }).to_string();
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
-        .body(Full::new(Bytes::from(body)))
+        .body(ReplyBody::local(Bytes::from(body)))
         .expect("static response")
 }
 
@@ -710,7 +833,7 @@ impl Broker {
         upstream: &tokio::sync::Mutex<Option<Connection>>,
         host: &str,
         request: Request<Incoming>,
-    ) -> Response<Full<Bytes>> {
+    ) -> Response<ReplyBody> {
         let (parts, body) = request.into_parts();
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
@@ -745,6 +868,23 @@ impl Broker {
         if let Verdict::Refuse { status, reason, security } = &verdict {
             return deny(*status, reason, *security);
         }
+        // The body is held in memory from here until the request has been sent on: out of
+        // the budget, like everything the broker holds for the game. Its declared size is
+        // what is reserved; a body of undeclared size (chunked) may turn out to be the
+        // largest allowed.
+        let no_room = "the launcher is already holding as much of this game's traffic with Mojang as it will: \
+                       replies the game has not read yet are in the way";
+        let declared = body.size_hint().upper().unwrap_or(MAX_REQUEST_BODY as u64);
+        if declared > MAX_REQUEST_BODY as u64 {
+            return deny(413, "the request body is too large or was cut short", false);
+        }
+        let request_room = match declared {
+            0 => None,
+            bytes => match self.buffers.reserve(bytes as usize).await {
+                Some(room) => Some(room),
+                None => return deny(503, no_room, false),
+            },
+        };
         let body = match Limited::new(body, MAX_REQUEST_BODY).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => return deny(413, "the request body is too large or was cut short", false),
@@ -785,7 +925,12 @@ impl Broker {
             None => path.clone(),
         };
         let body = (!body.is_empty() || method != Method::GET).then_some(body);
-        let (head, payload) = match self.forward(upstream, host, method.clone(), &target, &headers, body).await {
+        // Room for the reply before it is asked for: how large it is is only known once it
+        // is here, so the largest possible one is reserved and the rest given back.
+        let Some(mut reply_room) = self.buffers.reserve(MAX_RESPONSE_BODY as usize).await else {
+            return deny(503, no_room, false);
+        };
+        let (head, mut payload) = match self.forward(upstream, host, method.clone(), &target, &headers, body).await {
             Ok(reply) => reply,
             Err(e) => {
                 ctx.stats.broker_refused.fetch_add(1, Ordering::Relaxed);
@@ -793,6 +938,24 @@ impl Broker {
                 return local_reply(502, "the request could not be relayed to Mojang");
             }
         };
+        drop(request_room);
+        payload.shrink_to_fit();
+        reply_room.shrink_to(payload.len());
+        // A reply to a request that carried the token is checked for it below — which only
+        // means something for a reply that arrived as it is. The launcher asked for exactly
+        // that (`Accept-Encoding: identity`); an answer that is encoded all the same cannot
+        // be checked, and is not passed on.
+        if credentialed {
+            let encoding = head.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes().trim_ascii());
+            if encoding.is_some_and(|e| !e.is_empty() && !e.eq_ignore_ascii_case(b"identity")) {
+                return deny(
+                    502,
+                    "the reply to a request that carried your credential came back encoded; it cannot be checked \
+                     for the access token and was withheld",
+                    true,
+                );
+            }
+        }
         // No endpoint on the list echoes the token. If one ever does, it stays here.
         if let Some(credential) = &self.credential {
             let token = credential.token.expose();
@@ -816,7 +979,9 @@ impl Broker {
                 response = response.header(name, value);
             }
         }
-        response.body(Full::new(Bytes::from(payload))).unwrap_or_else(|_| local_reply(502, "malformed upstream reply"))
+        response
+            .body(ReplyBody { bytes: Bytes::from(payload), _room: Some(reply_room) })
+            .unwrap_or_else(|_| local_reply(502, "malformed upstream reply"))
     }
 
     /// One request to the real server, on a connection kept open between requests of the
@@ -1002,6 +1167,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The budget for buffered bodies: room is counted in whole units, the unused part of a
+    /// reservation goes back, a request for more than is free waits and is then refused, and
+    /// dropping a share returns it.
+    #[tokio::test]
+    async fn buffered_bodies_come_out_of_one_budget() {
+        const MIB: usize = 1 << 20;
+        let budget = Budget::new(10 * MIB, Duration::from_millis(50));
+        assert_eq!(budget.in_use(), 0);
+        let mut reply = budget.reserve(MAX_RESPONSE_BODY as usize).await.expect("room for one reply");
+        assert_eq!(budget.in_use(), 8 * MIB);
+        reply.shrink_to(5000);
+        assert_eq!(budget.in_use(), 2 * BUDGET_UNIT, "5000 bytes occupy two units; the rest was given back");
+        let second = budget.reserve(MAX_RESPONSE_BODY as usize).await.expect("room again");
+        let started = Instant::now();
+        assert!(budget.reserve(4 * MIB).await.is_none(), "8 MiB + 8 KiB are in use: 4 MiB more do not fit");
+        assert!(started.elapsed() >= Duration::from_millis(50), "refused only after the wait");
+        drop(second);
+        let mut empty = budget.reserve(MIB).await.expect("room once a share was dropped");
+        empty.shrink_to(0);
+        drop(reply);
+        assert_eq!(budget.in_use(), 0, "an empty reply occupies nothing");
+        drop(empty);
+        // More than the whole budget can never be had, and is not waited for for ever.
+        assert!(budget.reserve(11 * MIB).await.is_none());
+
+        // A reply is handed over in small frames, all of it, and says how long it is.
+        let mut body = ReplyBody { bytes: Bytes::from(vec![7u8; 3 * REPLY_FRAME + 5]), _room: budget.reserve(1).await };
+        assert_eq!(body.size_hint().exact(), Some((3 * REPLY_FRAME + 5) as u64));
+        let mut frames = Vec::new();
+        while let Some(frame) = body.frame().await {
+            frames.push(frame.unwrap().into_data().unwrap().len());
+        }
+        assert_eq!(frames, [REPLY_FRAME, REPLY_FRAME, REPLY_FRAME, 5]);
+        assert!(body.is_end_stream());
+        assert_eq!(budget.in_use(), BUDGET_UNIT, "its room is held for as long as the body exists");
+        drop(body);
+        assert_eq!(budget.in_use(), 0);
     }
 
     #[test]

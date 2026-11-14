@@ -101,10 +101,13 @@ fn display_isolation(r: &mut Report, cfg: &Config, paths: &Paths) {
             "sandbox.wayland_security_context = \"off\": the game would get the session's own socket",
         ),
         (Some(socket), mode) => match sandbox::wayland::globals(socket) {
+            // That the compositor *implements* the protocol is all this line establishes. What
+            // it then offers on the game's socket was looked at above ("desktop"): the launcher
+            // sets a context up and lists that socket, here as at every launch.
             Ok(globals) if globals.iter().any(|g| g.interface == sandbox::wayland::MANAGER) => r.ok(
                 "Wayland security context",
-                "supported: the compositor withholds privileged interfaces (screen capture, input injection, …) \
-                 from the game's socket",
+                "the compositor implements the protocol; what it offers on the game's socket is in the \"desktop\" \
+                 line above (listed by connecting to that socket)",
             ),
             Ok(_) if mode == IsolationMode::Require => r.fail(
                 "Wayland security context",
@@ -136,6 +139,164 @@ fn display_isolation(r: &mut Report, cfg: &Config, paths: &Paths) {
         (Err(why), IsolationMode::Require) => r.fail("nested compositor", why),
         (Err(why), _) if x11_session => r.warn("nested compositor", format!("not available: {why}")),
         (Err(why), _) => r.info("nested compositor", format!("not available ({why}); not needed on Wayland")),
+    }
+}
+
+/// Where the refresh token rests, and — for the age vault — what that is and is not worth.
+/// The statements follow `auth::store`: who can decrypt an existing vault file is one
+/// question (the identity), to whom the next one is encrypted is another (the recipients).
+fn age_store(r: &mut Report, cfg: &Config) {
+    use crate::{
+        auth::store::{self, DEVICE_PLUGINS, IdentityKind},
+        paths::SYSTEM_AGE_RECIPIENTS,
+    };
+    let anchor = store::system_recipients();
+    match (cfg.auth.token_store, &anchor) {
+        (_, Err(e)) => r.fail("refresh token store", e.to_string()),
+        (StoreKind::Keyutils, Ok(Some(_))) => r.fail(
+            "refresh token store",
+            format!(
+                "auth.token_store = \"keyutils\", but {SYSTEM_AGE_RECIPIENTS} exists: sign-in and launch are refused \
+                 until auth.token_store is \"age\" (or \"none\")"
+            ),
+        ),
+        (StoreKind::Keyutils, Ok(None)) => r.ok(
+            "refresh token store",
+            "kernel keyring: RAM only; readable by other programs in your login session, not by the sandbox",
+        ),
+        (StoreKind::None, Ok(_)) => r.ok("refresh token store", "none (sign in on every launch)"),
+        (StoreKind::Age, Ok(_)) => {}
+    }
+    let (StoreKind::Age, Ok(anchor)) = (cfg.auth.token_store, anchor) else { return };
+
+    match store::check_age_program(&cfg.auth.age.program) {
+        Ok(p) => r.ok("refresh token store", format!("age vault via {}", p.display())),
+        Err(e) => r.fail("refresh token store", e.to_string()),
+    }
+
+    // To whom the vault is encrypted (at the next launch, and at every one after it).
+    let mut recipient_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    match &anchor {
+        Some(anchor) => {
+            r.ok(
+                "vault recipients",
+                format!(
+                    "{} (root-owned): the vault is encrypted to exactly the recipients in it; the recipients files \
+                     named in config.toml are not used, and only root can change the list",
+                    anchor.display()
+                ),
+            );
+            recipient_files.push(("vault recipients".into(), anchor.clone()));
+        }
+        None => {
+            if let Some(common) = &cfg.auth.age.recipients_file {
+                recipient_files.push(("vault recipients".into(), common.clone()));
+            }
+            for (label, keys) in &cfg.auth.age.accounts {
+                // (An account that names the common file is covered by the line for that file.)
+                if Some(&keys.recipients_file) != cfg.auth.age.recipients_file.as_ref() {
+                    recipient_files
+                        .push((format!("vault recipients of account {label}"), keys.recipients_file.clone()));
+                }
+            }
+            r.warn(
+                "vault recipients",
+                format!(
+                    "the recipients file is one of your own files, and so is the configuration that names it: a \
+                     program running as you can add a recipient, and the token stored at the next launch is then \
+                     encrypted to that recipient too — encrypting needs no device and no touch. A hardware key does \
+                     not prevent this. Only a root-owned {SYSTEM_AGE_RECIPIENTS} does: when it exists, it is used \
+                     instead and the configuration cannot change the recipients"
+                ),
+            );
+        }
+    }
+    for (what, path) in &recipient_files {
+        match store::recipient_kinds(path) {
+            Ok(found) if found.plugins.is_empty() && found.not_device_bound() == 0 => {
+                r.fail(what, format!("{} names no recipient", path.display()))
+            }
+            Ok(found) if found.not_device_bound() == 0 => r.ok(
+                what,
+                format!(
+                    "{}: {} — all of a kind whose key is kept in a device (by the plugins' documentation)",
+                    path.display(),
+                    found.describe()
+                ),
+            ),
+            Ok(found) => r.warn(
+                what,
+                format!(
+                    "{}: {}. Every recipient can decrypt the vault. Not known to be bound to a device: {} of them — \
+                     the vault is tied to hardware only if the secret half of each such key is not on this machine \
+                     (a backup key kept offline is the intended case)",
+                    path.display(),
+                    found.describe(),
+                    found.not_device_bound()
+                ),
+            ),
+            Err(e) => r.fail(what, format!("{}: {e}", path.display())),
+        }
+    }
+
+    // Who can decrypt a vault file that exists.
+    let mut identities: Vec<(String, &std::path::Path)> = Vec::new();
+    if let Some(common) = &cfg.auth.age.identity_file {
+        identities.push(("vault key".into(), common));
+    }
+    for (label, keys) in &cfg.auth.age.accounts {
+        identities.push((format!("vault key of account {label}"), &keys.identity_file));
+    }
+    let named = |plugins: &[String]| plugins.iter().map(|p| format!("age-plugin-{p}")).collect::<Vec<_>>().join(", ");
+    for (what, path) in identities {
+        match store::identity_kind(path) {
+            IdentityKind::Plugins(plugins) if plugins.iter().all(|p| DEVICE_PLUGINS.contains(&p.as_str())) => r.ok(
+                &what,
+                format!(
+                    "a device identity ({}): decrypting needs the device, so a copy of the vault file — a backup, \
+                     a stolen disk, a file read by other software — is useless without it. What this does NOT do: \
+                     stop a program running as you from asking the connected device to decrypt (a touch or PIN \
+                     policy on the device is all that stands in the way, and this launcher cannot see or enforce \
+                     it), or decide to whom the vault is encrypted (see the recipients above). Not verified here: \
+                     the launcher reads the identity file, it cannot test the device",
+                    named(&plugins)
+                ),
+            ),
+            IdentityKind::Plugins(plugins) => r.warn(
+                &what,
+                format!(
+                    "a plugin identity ({}): whether that plugin keeps the key in a device is not known to this \
+                     launcher (it knows {}); treat it as a software key until you know better",
+                    named(&plugins),
+                    DEVICE_PLUGINS.map(|p| format!("age-plugin-{p}")).join(", ")
+                ),
+            ),
+            IdentityKind::Software { plugins } if plugins.is_empty() => r.warn(
+                &what,
+                format!(
+                    "a software key in {}: it protects backups and other users, but any program running as \
+                     you can read the key and decrypt the vault. Use an age plugin identity (YubiKey, TPM, \
+                     FIDO2) to bind the vault to hardware",
+                    path.display()
+                ),
+            ),
+            IdentityKind::Software { plugins } => r.warn(
+                &what,
+                format!(
+                    "{} holds a software key next to the plugin identity ({}): if the vault is encrypted to that \
+                     key as well, any program running as you can read it and decrypt the vault without the device. \
+                     Keep only the device identity in this file",
+                    path.display(),
+                    named(&plugins)
+                ),
+            ),
+            IdentityKind::PassphraseProtected => r.warn(
+                &what,
+                "a passphrase-protected identity: age will ask for the passphrase on the terminal at every \
+                 launch; a front end cannot answer that",
+            ),
+            IdentityKind::Unreadable(why) => r.fail(&what, format!("{}: {why}", path.display())),
+        }
     }
 }
 
@@ -174,7 +335,8 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
     if unsafe { libc::syscall(0x4000_0000 | 39) } > 0 {
         r.info(
             "x32 ABI",
-            "enabled in this kernel — syscall denylists would be bypassable; the allowlist filter is not",
+            "enabled in this kernel — a plain syscall denylist would be bypassable through it. The game's filter \
+             is an allowlist (those numbers are not on it); the launcher's own filter refuses the x32 table as a whole",
         );
     }
     match read("/proc/sys/kernel/yama/ptrace_scope").as_deref() {
@@ -232,18 +394,24 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
              it disabled (`secretmem.enable=0`) or does not provide it",
         ),
     }
-    match (cfg.launcher.confine, crate::confine::supported()) {
+    match (cfg.launcher.confine, crate::confine::support()) {
         (crate::config::ConfineMode::Off, _) => r.warn(
             "self-confinement",
             "launcher.confine = \"off\": the launcher keeps all of your access while the game runs",
         ),
-        (_, Ok(())) => r.ok(
+        (_, crate::confine::Support::Whole) => r.ok(
             "self-confinement",
-            "once the game runs, the launcher drops file access outside the instance, program execution and most \
-             of the network (Landlock on all threads)",
+            "once the game runs, the launcher drops, on all its threads: file access outside the instance's \
+             persist/ directory and its cache, program execution, most of the network (Landlock), and the kernel \
+             keyring (system-call filter)",
         ),
-        (crate::config::ConfineMode::Require, Err(why)) => r.fail("self-confinement", why),
-        (_, Err(why)) => r.warn("self-confinement", format!("not available: {why}")),
+        // "require" means the whole confinement: a launch would be refused.
+        (crate::config::ConfineMode::Require, crate::confine::Support::Partly(gaps)) => {
+            r.fail("self-confinement", format!("launcher.confine = \"require\", but {}", gaps.join("; ")))
+        }
+        (_, crate::confine::Support::Partly(gaps)) => {
+            r.warn("self-confinement", format!("only partly possible on this kernel: {}", gaps.join("; ")))
+        }
     }
     let swaps: Vec<String> = read("/proc/swaps")
         .unwrap_or_default()
@@ -309,10 +477,15 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
         crate::config::CgroupMode::Off => {
             r.warn("resource limits", "sandbox.cgroup = \"off\": the game is not limited in memory or process count")
         }
-        mode => match sandbox::cgroup::preflight().await {
+        mode => match sandbox::cgroup::preflight(cfg.sandbox.cpu_quota_percent.is_some()).await {
             Ok(program) => r.ok(
                 "resource limits",
-                format!("transient systemd scope via {} (memory ceiling, no swap, task limit)", program.display()),
+                format!(
+                    "transient systemd scope via {}: a probe scope was created and its limits were read back from \
+                     the kernel (memory ceiling, no swap, task limit{})",
+                    program.display(),
+                    if cfg.sandbox.cpu_quota_percent.is_some() { ", CPU quota" } else { "" }
+                ),
             ),
             Err(why) if mode == crate::config::CgroupMode::Require => r.fail("resource limits", why),
             Err(why) => r.warn("resource limits", format!("not available: {why}")),
@@ -366,53 +539,7 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
         Some(_) => r.ok("OAuth client", "auth.client_id is set (your own Azure application)"),
         None => r.info("OAuth client", "auth.client_id not set — required for signing in; there is no built-in ID"),
     }
-    match cfg.auth.token_store {
-        StoreKind::Keyutils => r.ok(
-            "refresh token store",
-            "kernel keyring: RAM only; readable by other programs in your login session, not by the sandbox",
-        ),
-        StoreKind::Age => {
-            match crate::auth::store::check_age_program(&cfg.auth.age.program) {
-                Ok(p) => r.ok("refresh token store", format!("age vault via {}", p.display())),
-                Err(e) => r.fail("refresh token store", e.to_string()),
-            }
-            use crate::auth::store::{IdentityKind, identity_kind};
-            let mut identities: Vec<(String, &std::path::Path)> = Vec::new();
-            if let Some(common) = &cfg.auth.age.identity_file {
-                identities.push(("vault key".into(), common));
-            }
-            for (label, keys) in &cfg.auth.age.accounts {
-                identities.push((format!("vault key of account {label}"), &keys.identity_file));
-            }
-            for (what, path) in identities {
-                match identity_kind(path) {
-                    IdentityKind::Plugin(name) => r.ok(
-                        &what,
-                        format!(
-                            "hardware-backed (age-plugin-{name}): every decryption needs the device, so the stored \
-                             token cannot be copied and used elsewhere"
-                        ),
-                    ),
-                    IdentityKind::Software => r.warn(
-                        &what,
-                        format!(
-                            "a software key in {}: it protects backups and other users, but any program running as \
-                             you can read the key and decrypt the vault. Use an age plugin identity (YubiKey, TPM, \
-                             FIDO2) to bind the vault to hardware",
-                            path.display()
-                        ),
-                    ),
-                    IdentityKind::PassphraseProtected => r.warn(
-                        &what,
-                        "a passphrase-protected identity: age will ask for the passphrase on the terminal at every \
-                         launch; a front end cannot answer that",
-                    ),
-                    IdentityKind::Unreadable(why) => r.fail(&what, format!("{}: {why}", path.display())),
-                }
-            }
-        }
-        StoreKind::None => r.ok("refresh token store", "none (sign in on every launch)"),
-    }
+    age_store(&mut r, cfg);
 
     println!("\n{} failure(s), {} warning(s)", r.failures, r.warnings);
     if r.failures > 0 { 1 } else { 0 }

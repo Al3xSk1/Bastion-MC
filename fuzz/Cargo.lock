@@ -97,6 +97,7 @@ dependencies = [
  "bastion-mc-proto",
  "bytes",
  "ed25519-dalek",
+ "flate2",
  "getrandom 0.4.3",
  "http-body-util",
  "hyper",

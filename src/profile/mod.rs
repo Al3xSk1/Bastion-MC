@@ -8,3 +8,4 @@ pub mod manifest;
 pub mod mods;
 pub mod packs;
 pub mod signing;
+pub mod zipdir;

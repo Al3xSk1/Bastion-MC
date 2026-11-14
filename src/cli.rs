@@ -361,6 +361,9 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
                 Ok(true)
             })?;
             validate_id(&account)?;
+            // A sign-in ends by storing a token, possibly minutes from now: `scram` must be
+            // able to find and stop it.
+            let _marker = crate::running::Marker::for_command(&paths, "login")?;
             block_on(reporter, &stop, login(&paths, &cfg, flow, &account, reporter))?;
             reporter.emit(Event::Account(account_summary(&paths, &cfg, &account)));
             reporter.emit(account_summaries(&paths, &cfg));
@@ -589,6 +592,8 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             if !matches!(store, TokenStore::Age(_)) {
                 return Err(Error::Config("auth.token_store is not \"age\": there is no vault to re-seal".into()));
             }
+            // Re-sealing writes vault files: stoppable by `scram`.
+            let _marker = crate::running::Marker::for_command(&paths, "vault")?;
             let accounts = match only {
                 Some(account) => {
                     validate_id(&account)?;
@@ -696,8 +701,9 @@ async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, repor
     // A sign-in pins the profile the first time. A profile that differs from an existing
     // pin is reported, not accepted: signing in again is exactly what a worried user does.
     match launch::canary_verdict(paths, cfg, account, &session.profile)? {
-        Ok(note) => reporter.status(note),
-        Err(refusal) => reporter.status(format!("WARNING: {refusal}")),
+        Ok(note) if note.notable => reporter.warn(&note.text),
+        Ok(note) => reporter.status(&note.text),
+        Err(refusal) => reporter.warn(format!("WARNING: {refusal}")),
     }
     // Display-only; see `auth::identity`.
     let _ = identity::remember(
@@ -819,20 +825,21 @@ fn profile_admin(
     let upload = match (command, sub, &operand) {
         ("skin", "set", Some(file)) => {
             let raw = util::read_small_file(Path::new(file), 4 * minecraft::MAX_SKIN_BYTES as u64)?;
+            // Decoded and encoded again: what is uploaded is the image's pixels in a file of
+            // the launcher's own making, whatever else the original held.
             let clean = minecraft::sanitize_skin_png(&raw)?;
-            if clean.len() != raw.len() {
-                reporter.status(format!(
-                    "skin: {} bytes of metadata removed from the file before upload ({} → {} bytes)",
-                    raw.len() - clean.len(),
-                    raw.len(),
-                    clean.len()
-                ));
-            }
+            reporter.status(format!(
+                "skin: the image was decoded and written out again; only its pixels are uploaded ({} → {} bytes)",
+                raw.len(),
+                clean.len()
+            ));
             Some(clean)
         }
         _ => None,
     };
 
+    // Opening a session stores the rotated refresh token: stoppable by `scram`.
+    let _marker = crate::running::Marker::for_command(paths, command)?;
     block_on(reporter, stop, async {
         let http = launch::http_client(&cfg)?;
         let session = open_session(paths, &cfg, &http, &account).await?;
@@ -853,9 +860,15 @@ fn profile_admin(
             print_profile(&session.profile);
             return Ok(());
         }
-        // A change made elsewhere must be looked at before more changes are stacked on it
-        // (and before this launcher re-pins the profile as its own doing).
-        launch::canary_verdict(paths, &cfg, &account, &session.profile)??;
+        // A change made elsewhere must be looked at before more changes are stacked on it:
+        // an enforcing canary stops here. One that only warns says so — every time, in every
+        // command — and what it has to say is never dropped.
+        let note = launch::canary_verdict(paths, &cfg, &account, &session.profile)??;
+        if note.notable {
+            reporter.warn(&note.text)
+        } else {
+            reporter.status(&note.text)
+        }
         match (command, sub) {
             ("skin", "show") => {
                 print_profile(&session.profile);
@@ -909,11 +922,24 @@ fn profile_admin(
             }
             _ => unreachable!("subcommands were checked above"),
         }
-        // What Mojang now says the profile is — not what was asked for — is shown and pinned:
-        // this change was made here, by the user.
+        // What Mojang now says the profile is — not what was asked for — is shown. Pinned is
+        // the part this command changed, and only that: the rest of the profile was not
+        // changed here, and if it differs from the pin (somebody else's doing, a moment ago
+        // or before a warning that was not acted on), it stays a difference.
         let after = minecraft::profile(&http, token).await?;
         if cfg.auth.canary != crate::config::CanaryMode::Off {
-            canary::accept(paths, &account, &after)?;
+            let (aspect, what) =
+                if command == "cape" { (canary::Aspect::Cape, "cape") } else { (canary::Aspect::Skin, "skin") };
+            match canary::accept_change(paths, &account, &after, aspect) {
+                Ok(unpinned) if unpinned.is_empty() => {}
+                Ok(unpinned) => reporter.warn(format!(
+                    "canary: WARNING: the new {what} is pinned, but the profile also differs from what is pinned in \
+                     ways this command did not make: {}. That is NOT pinned. If it was you, run `bastion-mc canary \
+                     accept --account {account}`; if not, `bastion-mc wiki scram`.",
+                    unpinned.join("; ")
+                )),
+                Err(e) => reporter.warn(format!("canary: WARNING: the new {what} was not pinned: {e}")),
+            }
         }
         print_profile(&after);
         Ok(())

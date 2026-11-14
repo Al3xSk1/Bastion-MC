@@ -12,9 +12,14 @@ use std::{
 };
 
 use bastion_mc::{
-    auth::{activity, canary, identity, minecraft::Profile, registry, store::TokenStore},
+    auth::{
+        activity, canary, identity,
+        minecraft::Profile,
+        registry,
+        store::{self, TokenStore},
+    },
     paths::Paths,
-    scram,
+    running, scram,
     secret::Secret,
 };
 
@@ -162,5 +167,330 @@ fn the_runbook_and_the_proofs_are_available_without_a_network() {
     // Never over an existing file.
     let out = launcher(&root).arg("export-proofs").arg(&file).output().unwrap();
     assert!(!out.status.success());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------- other processes
+
+const ROLE: &str = "BASTION_SCRAM_ROLE";
+const ROOT: &str = "BASTION_SCRAM_ROOT";
+const ACCOUNT: &str = "BASTION_SCRAM_ACCOUNT";
+
+fn paths_in(root: &std::path::Path) -> Paths {
+    Paths {
+        config: root.join("config/bastion-mc"),
+        data: root.join("data/bastion-mc"),
+        cache: root.join("cache/bastion-mc"),
+        state: root.join("state/bastion-mc"),
+        runtime: None,
+    }
+}
+
+fn join_new_session_keyring() {
+    const KEYCTL_JOIN_SESSION_KEYRING: libc::c_long = 1;
+    // SAFETY: plain syscall; a null name asks for a new anonymous session keyring.
+    let id = unsafe { libc::syscall(libc::SYS_keyctl, KEYCTL_JOIN_SESSION_KEYRING, std::ptr::null::<libc::c_char>()) };
+    assert!(id > 0, "joining a new session keyring: {}", std::io::Error::last_os_error());
+}
+
+fn wait_for_a_line() {
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}
+
+/// Not a test of its own: the body of the processes the tests below start. Each stands for
+/// a launcher command — or a login session — other than the one that runs scram.
+#[test]
+fn other_process() {
+    let Ok(role) = std::env::var(ROLE) else { return };
+    let paths = paths_in(std::path::Path::new(&std::env::var_os(ROOT).unwrap()));
+    let account = std::env::var(ACCOUNT).unwrap_or_default();
+    match role.as_str() {
+        // A launch in progress: marker, and a game root it holds, as `launch` does.
+        "launch" => {
+            let _marker = running::Marker::create(&paths, "vanilla").unwrap();
+            let root = paths.scratch().join("vanilla-00112233aabbccdd");
+            std::fs::create_dir_all(root.join("saves/world")).unwrap();
+            std::fs::write(root.join("saves/world/level.dat"), b"world").unwrap();
+            let _lock = running::lock_dir(&root).unwrap();
+            println!("\nready");
+            std::thread::sleep(std::time::Duration::from_secs(120));
+        }
+        // A sign-in waiting for the user: it would store a token when it completes.
+        "login" => {
+            let _marker = running::Marker::for_command(&paths, "login").unwrap();
+            println!("\nready");
+            wait_for_a_line();
+            TokenStore::Keyutils.save(&account, &Secret::from_slice(b"STORED-AFTER-SCRAM").unwrap()).unwrap();
+            println!("stored");
+        }
+        // An earlier login session that signed in and is still open.
+        "session-a" => {
+            join_new_session_keyring();
+            TokenStore::Keyutils.save(&account, &Secret::from_slice(b"TOKEN-OF-SESSION-A").unwrap()).unwrap();
+            println!("\nready");
+            wait_for_a_line();
+            let still =
+                TokenStore::Keyutils.load(&account).unwrap().is_some_and(|t| t.expose() == b"TOKEN-OF-SESSION-A");
+            println!("still_readable={still}");
+            // Clean up what this test created.
+            while store::keyutils_remove(&account).unwrap() {}
+        }
+        // A process with a second thread, whose id it leaves in a file for the test.
+        "threaded" => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _thread = std::thread::spawn(move || {
+                // SAFETY: gettid takes no arguments and cannot fail.
+                tx.send(unsafe { libc::syscall(libc::SYS_gettid) }).unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(120));
+            });
+            let tid = rx.recv().unwrap();
+            let root = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+            std::fs::write(root.join("thread-id"), tid.to_string()).unwrap();
+            println!("\nready");
+            wait_for_a_line();
+        }
+        // A second login session: signs in again, then runs scram.
+        "session-b" => {
+            join_new_session_keyring();
+            TokenStore::Keyutils.save(&account, &Secret::from_slice(b"TOKEN-OF-SESSION-B").unwrap()).unwrap();
+            let report = scram::run_for(&paths, [account.clone()].into()).unwrap();
+            println!("\nincomplete={}", report.incomplete);
+            for line in report.lines {
+                println!("line={line}");
+            }
+            let own = TokenStore::Keyutils.load(&account).unwrap().is_some();
+            println!("own_token_left={own}");
+        }
+        other => panic!("unknown role {other}"),
+    }
+}
+
+fn other(role: &str, root: &std::path::Path, account: &str) -> std::process::Child {
+    use std::io::BufRead;
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "other_process", "--nocapture", "--test-threads=1"])
+        .env(ROLE, role)
+        .env(ROOT, root)
+        .env(ACCOUNT, account)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if role != "session-b" {
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while line.trim() != "ready" {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "{role} ended before it was ready");
+        }
+        child.stdout = Some(out.into_inner());
+    }
+    child
+}
+
+fn signal_of(child: &mut std::process::Child) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(&child.wait().unwrap())
+}
+
+/// Scram stops what could store a credential first, removes the credentials next, and only
+/// then deletes what the games left behind — and says each of these when it is confirmed.
+#[test]
+fn writers_are_stopped_first_credentials_go_next_and_game_directories_last() {
+    let (root, paths) = paths("order");
+    let account = format!("scram-order-{}", std::process::id());
+    let mut launch = other("launch", &root, &account);
+    let mut login = other("login", &root, &account);
+    assert_eq!(running::list(&paths).len(), 2, "both commands are marked");
+    std::fs::create_dir_all(paths.vault()).unwrap();
+    std::fs::write(paths.vault().join("default.age"), b"age-encryption.org/v1 ...").unwrap();
+    // What a crashed launch left behind earlier, including a directory without any permission bits.
+    let stale = paths.scratch().join("vanilla-ffeeddccbbaa9988");
+    std::fs::create_dir_all(stale.join("locked/inner")).unwrap();
+    std::fs::write(stale.join("locked/inner/file"), b"x").unwrap();
+    std::fs::set_permissions(stale.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let report = scram::run_for(&paths, [account.clone()].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(!report.incomplete, "{text}");
+    assert_eq!(signal_of(&mut launch), Some(libc::SIGKILL), "the launch was killed");
+    assert_eq!(signal_of(&mut login), Some(libc::SIGKILL), "the pending sign-in was killed");
+    // The sign-in never got to store its token.
+    assert!(TokenStore::Keyutils.load(&account).unwrap().is_none(), "a token was stored after scram");
+    assert!(running::list(&paths).is_empty());
+
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no {needle:?} in:\n{text}"));
+    let killed_launch = at("killed the launcher of instance vanilla");
+    let killed_login = at("killed `bastion-mc login`");
+    assert!(text.contains("before it could store a sign-in"));
+    let vault = at("deleted the vault file \"default.age\"");
+    let swept = at("deleted 2 leftover game director(ies)");
+    assert!(killed_launch < vault && killed_login < vault, "writers are stopped before credentials are removed");
+    assert!(vault < swept, "game directories are deleted last:\n{text}");
+    assert!(!stale.exists() && !paths.scratch().join("vanilla-00112233aabbccdd").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A launch whose marker is gone — deleted by another program, or by a launcher that was
+/// compromised and can write the cache — is not found by its marker. It still holds its game
+/// directory locked, and scram says that a launch is running that it did not stop, instead
+/// of "no launch was in progress" and a clean exit.
+#[test]
+fn a_launch_without_a_marker_is_reported_by_the_directory_it_holds() {
+    let (root, paths) = paths("unmarked");
+    let account = format!("scram-unmarked-{}", std::process::id());
+    let mut launch = other("launch", &root, &account);
+    // The marker disappears; the process and its lock do not.
+    let markers = paths.cache.join("running");
+    for entry in std::fs::read_dir(&markers).unwrap().flatten() {
+        std::fs::remove_file(entry.path()).unwrap();
+    }
+    assert!(running::list(&paths).is_empty());
+
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(
+        text.contains("COULD NOT stop a launch that left no marker: the directory vanilla-00112233aabbccdd"),
+        "{text}"
+    );
+    assert!(
+        paths.scratch().join("vanilla-00112233aabbccdd/saves/world/level.dat").exists(),
+        "its files are not deleted"
+    );
+    launch.kill().unwrap();
+    let _ = launch.wait();
+    // Once that process is gone, a second scram is complete and removes what it left.
+    let report = scram::run_for(&paths, [format!("scram-unmarked-{}", std::process::id())].into()).unwrap();
+    assert!(!report.incomplete, "{}", report.lines.join("\n"));
+    assert!(!paths.scratch().join("vanilla-00112233aabbccdd").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A command that cannot be stopped is reported as that, once — and not, when scram looks a
+/// second time, as one that "started while this was running": it was there all along.
+#[test]
+fn a_command_that_cannot_be_stopped_is_reported_as_that_and_as_nothing_else() {
+    let (root, paths) = paths("unstoppable");
+    let account = format!("scram-unstoppable-{}", std::process::id());
+    let mut process = other("threaded", &root, &account);
+    let tid: u32 = std::fs::read_to_string(root.join("thread-id")).unwrap().parse().unwrap();
+    // A marker that names the thread, with the thread's own start time and name. It passes
+    // as a live command, and stopping it fails before any signal is sent: a pidfd is only
+    // had for a process, not for one of its threads. (How a real command fails to stop —
+    // stuck in the kernel for longer than scram waits — cannot be arranged in a test.)
+    let stat = std::fs::read_to_string(format!("/proc/{tid}/stat")).unwrap();
+    let close = stat.rfind(')').unwrap();
+    let comm = &stat[stat.find('(').unwrap() + 1..close];
+    let start = stat[close + 1..].split_ascii_whitespace().nth(19).unwrap();
+    let markers = paths.cache.join("running");
+    std::fs::create_dir_all(&markers).unwrap();
+    std::fs::write(markers.join(tid.to_string()), format!("{start}\ncommand:login\n{comm}\n")).unwrap();
+    assert_eq!(running::list(&paths).len(), 1, "the marker passes as a live command");
+
+    let report = scram::run_for(&paths, [account].into()).unwrap();
+    let text = report.lines.join("\n");
+    process.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    assert!(process.wait().unwrap().success(), "the process was never signalled");
+    assert!(report.incomplete, "{text}");
+    let about: Vec<&String> = report.lines.iter().filter(|l| l.contains(&format!("(pid {tid})"))).collect();
+    assert_eq!(about.len(), 1, "one line about it:\n{text}");
+    assert!(about[0].starts_with(&format!("COULD NOT stop `bastion-mc login` (pid {tid})")), "{text}");
+    assert!(!text.contains("started while this was running"), "it did not:\n{text}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// When the markers of running commands cannot be read, scram does not know that nothing is
+/// running — and says that, instead of "no launch was in progress".
+#[test]
+fn markers_that_cannot_be_read_are_not_taken_for_nothing_running() {
+    let (root, paths) = paths("unlisted");
+    let markers = paths.cache.join("running");
+    std::fs::create_dir_all(&markers).unwrap();
+    std::fs::set_permissions(&markers, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = scram::run_for(&paths, [format!("scram-unlisted-{}", std::process::id())].into()).unwrap();
+    std::fs::set_permissions(&markers, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(text.contains("COULD NOT find out which launcher commands are running"), "{text}");
+    assert!(!text.contains("no launch was in progress"), "that is not known:\n{text}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A game directory that cannot be deleted does not stand between the user and the removal
+/// of the credentials — and it is not passed over in silence either.
+#[test]
+fn what_cannot_be_deleted_is_reported_after_the_credentials_are_gone() {
+    let (root, paths) = paths("stuck");
+    std::fs::create_dir_all(paths.vault()).unwrap();
+    std::fs::write(paths.vault().join("default.age"), b"age-encryption.org/v1 ...").unwrap();
+    let stale = paths.scratch().join("vanilla-0f0f0f0f0f0f0f0f");
+    std::fs::create_dir_all(stale.join("saves")).unwrap();
+    // Not removable: the directory that holds it does not allow it.
+    std::fs::set_permissions(paths.scratch(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let report = scram::run_for(&paths, [format!("scram-stuck-{}", std::process::id())].into()).unwrap();
+    std::fs::set_permissions(paths.scratch(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = report.lines.join("\n");
+    assert!(report.incomplete, "{text}");
+    assert!(!paths.vault().join("default.age").exists(), "the credential is gone regardless");
+    let deleted = text.find("deleted the vault file").expect("vault line");
+    let could_not = text.find("COULD NOT delete a leftover game directory").unwrap_or_else(|| panic!("{text}"));
+    assert!(deleted < could_not);
+    assert!(text.contains("vanilla-0f0f0f0f0f0f0f0f"), "{text}");
+    assert!(!text.contains("deleted 1 leftover"), "nothing is reported as deleted that was not: {text}");
+    // Every line about something left undone starts the same way: front ends rely on it.
+    for line in report.lines.iter().filter(|l| l.contains("COULD NOT")) {
+        assert!(line.starts_with("COULD NOT "), "{line}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Two login sessions of the same user. The second signs in again (which displaces the
+/// first session's key in the persistent keyring) and runs scram: the first session's key
+/// is still there, still readable in that session — and scram, which cannot reach it, must
+/// say so instead of reporting success.
+#[test]
+fn a_token_that_only_another_login_session_holds_is_reported_not_passed_over() {
+    // (A name of this test's own: the keyring that is asked is the user's real one.)
+    if TokenStore::Keyutils.load(&format!("scram-probe-{}", std::process::id())).is_err() {
+        if std::env::var_os("BASTION_ALLOW_NO_KEYRING").is_some() {
+            eprintln!("skipped: kernel keyring unavailable in this environment");
+            return;
+        }
+        panic!("kernel keyring unavailable");
+    }
+    let (root, _paths) = paths("sessions");
+    let account = format!("scram-sessions-{}", std::process::id());
+    let mut first = other("session-a", &root, &account);
+    let second = other("session-b", &root, &account).wait_with_output().unwrap();
+    let second_out = String::from_utf8_lossy(&second.stdout).into_owned();
+    assert!(second.status.success(), "{second_out}\n{}", String::from_utf8_lossy(&second.stderr));
+
+    // Let the first session look, then clean up after itself.
+    first.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    let first = first.wait_with_output().unwrap();
+    let first_out = String::from_utf8_lossy(&first.stdout).into_owned();
+    assert!(first.status.success(), "{first_out}\n{}", String::from_utf8_lossy(&first.stderr));
+
+    assert!(
+        second_out.contains("own_token_left=false"),
+        "scram removed what its own session could reach:\n{second_out}"
+    );
+    if first_out.contains("still_readable=true") {
+        // The situation the finding describes exists on this kernel: then it must be reported.
+        assert!(second_out.contains("incomplete=true"), "{second_out}");
+        assert!(
+            second_out.contains(&format!(
+                "line=COULD NOT remove the refresh token of account {account}: the kernel still lists a key"
+            )),
+            "{second_out}"
+        );
+    } else {
+        // (A kernel where the second session's key replaced the first everywhere.)
+        eprintln!("note: the first session's token did not survive; nothing to report:\n{first_out}");
+        assert!(second_out.contains("incomplete=false"), "{second_out}");
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

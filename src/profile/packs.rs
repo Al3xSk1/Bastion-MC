@@ -13,13 +13,30 @@
 //!   game cannot write).
 //! * At every launch the two directories must contain exactly the recorded files with the
 //!   recorded hashes — the same rule as for `mods/` — and the game is given the verified
-//!   descriptors, not paths.
+//!   descriptors, not paths. The archive check is repeated on those descriptors, so a pack
+//!   recorded under an older, laxer check does not ride along unexamined.
+//!
+//! **What "checked" means.** The archive's directory is read by [`super::zipdir`], which
+//! accepts one unambiguous shape of zip archive and refuses everything a second reader
+//! could take for something else (see there). On the names it yields: nothing outside the
+//! archive, no links or special files, and the marker of the pack's kind at the top. The
+//! check is about the *directory* — what a program that opens the pack as a zip file sees.
+//! Nothing is decompressed, and what the members contain is not looked at: a pack is still
+//! data that the game's parsers read, inside the sandbox.
+//!
+//! **One set of bytes.** The source of an import may be a place the game can write (a pack
+//! it downloaded into a world's folder). It is therefore read exactly once: the bytes go
+//! into a copy in the instance and into the hash in the same pass, and everything after
+//! that — the check, the record — is about the copy, through the descriptor it was written
+//! with. A source that changes while it is read yields a copy that is checked as it is.
 //!
 //! The lock file is not signed: it protects against the *game* changing packs, not against
-//! other programs running as the user (nothing stored in the user's own files can).
+//! other programs running as the user (nothing stored in the user's own files can). Such a
+//! program could also rewrite the copy between its check and its recording; the hash taken
+//! again after the check only catches a change that is still there.
 
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -28,18 +45,23 @@ use serde::{Deserialize, Serialize};
 use super::{
     manifest::ModEntry,
     mods::{self, VerifiedMod},
+    zipdir,
 };
 use crate::{
     error::{Context, Error, Result},
     paths::validate_file_name,
-    util::{self, HashAlg},
+    util::{self, Expected, HashAlg},
 };
 
 pub const LOCK_FILE: &str = "packs.lock.json";
 const MAX_LOCK_BYTES: u64 = 1 << 20;
 /// Largest pack accepted. (Big "HD" packs reach a few hundred MiB.)
 const MAX_PACK_BYTES: u64 = 2 << 30;
-const MAX_ENTRIES: usize = 200_000;
+/// What the archive's directory may be: as many members as a classic zip archive can
+/// declare (zip64 is refused, see `zipdir`), in a directory that is read in one piece.
+/// (Large packs have some ten thousand members and a directory of a megabyte or two.)
+const ARCHIVE_LIMITS: zipdir::Limits =
+    zipdir::Limits { max_entries: 65_534, max_directory_bytes: 32 << 20, max_name_bytes: 512 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackKind {
@@ -116,42 +138,21 @@ impl Lock {
 }
 
 /// Is `file` a zip archive that looks like a pack of this kind? Only the directory of the
-/// archive is read; nothing is decompressed.
+/// archive is read (by position, through this descriptor); nothing is decompressed.
 fn check_archive(file: &std::fs::File, kind: PackKind) -> Result<()> {
-    let mut reader = file.try_clone().ctx(|| "duplicating the pack descriptor")?;
-    reader.seek(SeekFrom::Start(0)).ctx(|| "rewinding the pack")?;
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).map_err(|_| Error::Format("not a zip archive (too short)".into()))?;
-    if magic != *b"PK\x03\x04" {
-        // A pack that starts with something else is a polyglot at best.
-        return Err(Error::Format("not a zip archive (it does not start with a zip entry)".into()));
+    let length = file.metadata().ctx(|| "examining the pack")?.len();
+    if length > MAX_PACK_BYTES {
+        return Err(Error::Policy(format!(
+            "the pack is {} MiB; the limit is {} MiB",
+            length >> 20,
+            MAX_PACK_BYTES >> 20
+        )));
     }
-    reader.seek(SeekFrom::Start(0)).ctx(|| "rewinding the pack")?;
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| Error::Format(format!("not a valid zip archive: {e}")))?;
-    if archive.len() > MAX_ENTRIES {
-        return Err(Error::Format(format!("the archive has {} entries; that is not a pack", archive.len())));
-    }
-    let mut marker = false;
-    for i in 0..archive.len() {
-        let entry = archive.by_index_raw(i).map_err(|e| Error::Format(format!("archive entry {i}: {e}")))?;
-        let name = entry.name().map_err(|e| Error::Format(format!("archive entry {i}: {e}")))?.into_owned();
-        let unsafe_name = name.starts_with('/')
-            || name.contains('\\')
-            || name.contains('\0')
-            || name.split('/').any(|part| part == "..")
-            || name.len() > 512;
-        if unsafe_name || entry.is_symlink() {
-            return Err(Error::Policy(format!(
-                "the archive contains an entry that points outside itself or is a link ({}); refusing it",
-                util::sanitize_line(name.as_bytes(), 80)
-            )));
-        }
-        marker |= match kind {
-            PackKind::Resource => name == "pack.mcmeta",
-            PackKind::Shader => name.starts_with("shaders/"),
-        };
-    }
+    let entries = zipdir::read(file, length, &ARCHIVE_LIMITS)?;
+    let marker = entries.iter().any(|entry| match kind {
+        PackKind::Resource => entry.name == "pack.mcmeta",
+        PackKind::Shader => entry.name.starts_with("shaders/"),
+    });
     if !marker {
         return Err(Error::Format(match kind {
             PackKind::Resource => "no pack.mcmeta at the top of the archive: not a resource pack (packs zipped \
@@ -164,9 +165,7 @@ fn check_archive(file: &std::fs::File, kind: PackKind) -> Result<()> {
 }
 
 fn hash(file: &std::fs::File) -> Result<(String, u64)> {
-    let mut reader = file.try_clone().ctx(|| "duplicating the pack descriptor")?;
-    reader.seek(SeekFrom::Start(0)).ctx(|| "rewinding the pack")?;
-    let (digest, size) = util::hash_reader(HashAlg::Sha256, reader).ctx(|| "hashing the pack")?;
+    let (digest, size) = util::hash_file(HashAlg::Sha256, file).ctx(|| "hashing the pack")?;
     Ok((util::hex_encode(&digest), size))
 }
 
@@ -189,6 +188,7 @@ pub fn import(instance_dir: &Path, kind: PackKind, source: &Path, name: Option<&
         return Err(Error::Usage("packs are .zip files (a pack in a folder: zip its contents first)".into()));
     }
     let file = util::open_regular_nofollow(source).ctx(|| format!("opening {}", source.display()))?;
+    // (Said early when it is already true; the copy below is bounded whatever this says.)
     let length = file.metadata().ctx(|| "examining the pack")?.len();
     if length > MAX_PACK_BYTES {
         return Err(Error::Policy(format!(
@@ -197,41 +197,60 @@ pub fn import(instance_dir: &Path, kind: PackKind, source: &Path, name: Option<&
             MAX_PACK_BYTES >> 20
         )));
     }
-    check_archive(&file, kind)?;
-    let (sha256, size) = hash(&file)?;
+    import_from(instance_dir, kind, file, &name)
+}
 
+/// The part of [`import`] that handles the pack's bytes. `source` can be read once, from
+/// front to back, and that is all this function is able to do with it: what it checks and
+/// records afterwards is its own copy.
+fn import_from(instance_dir: &Path, kind: PackKind, mut source: impl Read, name: &str) -> Result<ModEntry> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let dir = instance_dir.join(kind.dir());
     crate::instance::ensure_plain_dir(&dir)?;
-    // Write the bytes that were hashed (same descriptor), then make them the pack.
     let staged = dir.join(format!(".import-{}", util::hex_encode(&util::random_bytes::<6>()?)));
-    let result = (|| -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut reader = file.try_clone().ctx(|| "duplicating the pack descriptor")?;
-        reader.seek(SeekFrom::Start(0)).ctx(|| "rewinding the pack")?;
-        let mut out = std::fs::OpenOptions::new()
+    let result = (|| -> Result<ModEntry> {
+        let mut copy = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&staged)
             .ctx(|| format!("creating {}", staged.display()))?;
-        let copied = std::io::copy(&mut reader.take(MAX_PACK_BYTES + 1), &mut out).ctx(|| "copying the pack")?;
-        out.sync_all().ctx(|| "writing the pack")?;
-        if copied != size {
-            return Err(Error::Integrity("the pack changed while it was being imported".into()));
+        // The one pass over the source: every block goes into the copy and into the hash.
+        let mut hasher = util::Hasher::new(HashAlg::Sha256);
+        let mut size = 0u64;
+        let mut block = vec![0u8; 128 * 1024];
+        loop {
+            let n = match source.read(&mut block) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(Error::io("reading the pack", e)),
+            };
+            size += n as u64;
+            if size > MAX_PACK_BYTES {
+                return Err(Error::Policy(format!("the pack is larger than {} MiB", MAX_PACK_BYTES >> 20)));
+            }
+            hasher.update(&block[..n]);
+            copy.write_all(&block[..n]).ctx(|| "copying the pack")?;
         }
-        let (copied_hash, _) = hash(&std::fs::File::open(&staged).ctx(|| "re-reading the copy")?)?;
-        if copied_hash != sha256 {
-            return Err(Error::Integrity("the pack changed while it was being imported".into()));
+        copy.sync_all().ctx(|| "writing the pack")?;
+        let sha256 = util::hex_encode(&hasher.finish());
+
+        // From here on: the copy, through the descriptor it was written with.
+        check_archive(&copy, kind)?;
+        if hash(&copy)? != (sha256.clone(), size) {
+            return Err(Error::Integrity("the copy of the pack changed while it was being checked".into()));
         }
-        std::fs::rename(&staged, dir.join(&name)).ctx(|| format!("placing {name}"))
+        std::fs::rename(&staged, dir.join(name)).ctx(|| format!("placing {name}"))?;
+        Ok(ModEntry { file: name.to_string(), sha256, size, source: None })
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
     }
-    result?;
+    let entry = result?;
 
-    let entry = ModEntry { file: name.clone(), sha256, size, source: None };
     let mut lock = Lock::load(instance_dir)?.unwrap_or_default();
     let entries = lock.entries_mut(kind);
     entries.retain(|e| e.file != name);
@@ -266,8 +285,16 @@ pub fn adopt(instance_dir: &Path) -> Result<Lock> {
         let dir = instance_dir.join(kind.dir());
         let entries = mods::scan_dir(&dir, ".zip", "recording the packs")?;
         for entry in &entries {
+            // What is recorded must be what was checked: the archive check and the recorded
+            // hash are both taken from this one descriptor (a file that was exchanged since
+            // the directory was scanned fails the second).
             let file = util::open_regular_nofollow(&dir.join(&entry.file)).ctx(|| format!("opening {}", entry.file))?;
             check_archive(&file, kind).map_err(|e| Error::Policy(format!("{}: {e}", entry.file)))?;
+            Expected::sha256(&entry.sha256)?.verify_file(
+                &file,
+                Some(entry.size),
+                &format!("{} {}", kind.noun(), entry.file),
+            )?;
         }
         *lock.entries_mut(kind) = entries;
     }
@@ -296,6 +323,17 @@ pub fn verify(instance_dir: &Path) -> Result<Vec<Verified>> {
                 )),
                 other => other,
             })?;
+        // The same archive check as at import, on the descriptor the game will be given.
+        for pack in &files {
+            check_archive(&pack.file, kind).map_err(|e| {
+                Error::Policy(format!(
+                    "{} {:?} is recorded in the pack list but does not pass the archive check: {e}. Remove it \
+                     (`bastion-mc pack remove`), or re-create the zip and import it again.",
+                    kind.noun(),
+                    pack.file_name
+                ))
+            })?;
+        }
         out.push(Verified { kind, files });
     }
     Ok(out)
@@ -363,6 +401,90 @@ mod tests {
         remove(&inst, PackKind::Resource, "My_Pack.zip").unwrap();
         assert!(!inst.join("resourcepacks/My_Pack.zip").exists());
         assert!(verify(&inst).unwrap().iter().all(|v| v.files.is_empty()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The source of an import is read once. A source that hands out something else when it
+    /// is read a second time — the game swapping the file between a check and a copy — has
+    /// no second time: what was checked, what is recorded and what lies in the instance are
+    /// the same bytes.
+    #[test]
+    fn an_import_reads_its_source_once_and_records_what_it_checked() {
+        /// Yields `first` once; any read after its end is the mistake this test is about.
+        struct Once {
+            first: std::io::Cursor<Vec<u8>>,
+            done: bool,
+        }
+        impl Read for Once {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.done, "the source was read again after it had been read to its end");
+                let n = self.first.read(buf)?;
+                self.done = n == 0;
+                Ok(n)
+            }
+        }
+        let root = scratch("once");
+        let inst = root.join("inst");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::set_permissions(&inst, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let good = zipdir::tests::zip_of(&[("pack.mcmeta", b"{}"), ("assets/a.txt", b"a")]);
+        let source = Once { first: std::io::Cursor::new(good.clone()), done: false };
+        let entry = import_from(&inst, PackKind::Resource, source, "swapped.zip").unwrap();
+        assert_eq!(entry.sha256, util::hex_encode(&util::hash_bytes(HashAlg::Sha256, &good)));
+        assert_eq!(entry.size, good.len() as u64);
+        assert_eq!(std::fs::read(inst.join("resourcepacks/swapped.zip")).unwrap(), good, "the copy is what was read");
+        assert_eq!(verify(&inst).unwrap()[0].files.len(), 1);
+
+        // What is refused leaves neither a file nor a record.
+        let hostile = zipdir::tests::zip_of(&[("pack.mcmeta", b"{}"), ("../../.bashrc", b"x")]);
+        let source = Once { first: std::io::Cursor::new(hostile), done: false };
+        assert!(import_from(&inst, PackKind::Resource, source, "hostile.zip").is_err());
+        let left: Vec<String> = std::fs::read_dir(inst.join("resourcepacks"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left, ["swapped.zip"]);
+        assert_eq!(Lock::load(&inst).unwrap().unwrap().resourcepacks.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Archives that mean different things to different readers do not become packs — at
+    /// import, when adopting, or at a launch if one is already recorded.
+    #[test]
+    fn archives_with_an_ambiguous_directory_are_refused_everywhere() {
+        let root = scratch("ambiguous");
+        let inst = root.join("inst");
+        std::fs::create_dir_all(inst.join("resourcepacks")).unwrap();
+        for dir in [inst.clone(), inst.join("resourcepacks")] {
+            std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        }
+        // Declares one member (`pack.mcmeta`); its directory holds three.
+        let mut hidden = zipdir::tests::zip_of(&[("pack.mcmeta", b"{}"), ("../../.bashrc", b"x"), ("b", b"y")]);
+        let end = hidden.len() - 22;
+        hidden[end + 8..end + 12].copy_from_slice(&[1, 0, 1, 0]);
+        let file = root.join("hidden.zip");
+        std::fs::write(&file, &hidden).unwrap();
+        let err = import(&inst, PackKind::Resource, &file, None).unwrap_err().to_string();
+        assert!(err.contains("beyond the 1 members"), "{err}");
+        assert!(std::fs::read_dir(inst.join("resourcepacks")).unwrap().next().is_none(), "nothing was left behind");
+
+        // Copied in by hand: not adopted.
+        std::fs::write(inst.join("resourcepacks/hidden.zip"), &hidden).unwrap();
+        assert!(adopt(&inst).unwrap_err().to_string().contains("beyond the 1 members"));
+        // Already recorded (by a launcher whose check was laxer): not handed to the game.
+        let lock = Lock {
+            resourcepacks: vec![ModEntry {
+                file: "hidden.zip".into(),
+                sha256: util::hex_encode(&util::hash_bytes(HashAlg::Sha256, &hidden)),
+                size: hidden.len() as u64,
+                source: None,
+            }],
+            shaderpacks: Vec::new(),
+        };
+        lock.save(&inst).unwrap();
+        let err = verify(&inst).err().unwrap().to_string();
+        assert!(err.contains("does not pass the archive check") && err.contains("pack remove"), "{err}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

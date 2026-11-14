@@ -26,6 +26,7 @@ pub mod running;
 pub mod sandbox;
 pub mod scram;
 pub mod secret;
+pub mod tree;
 pub mod util;
 pub mod verity;
 

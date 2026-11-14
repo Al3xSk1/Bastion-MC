@@ -180,6 +180,11 @@ async fn the_game_talks_to_a_display_server_of_its_own() {
         Err(e) => panic!("{e}\n--- compositor output ---\n{}", log.lock().unwrap().join("\n")),
     };
     println!("inner display :{}", session.display);
+    assert_eq!(
+        session.clipboard,
+        nested::ClipboardCut::Active,
+        "the cut-off library reported from inside this compositor that the bridge calls land in it"
+    );
     assert_ne!(session.display.to_string(), host_number, "a display of its own, not the session's");
     assert!(dir.join(format!("X{}", session.display)).exists());
     // The inner display's socket lives in the compositor's private directory. (Whether the
@@ -408,10 +413,71 @@ async fn no_selection_crosses_the_nested_compositor() {
     let mut desktop = display::plan(&cfg, &paths, "nested-test").expect("display plan");
     let plan = desktop.nested.take().expect("nested plan");
     let session = nested::start(plan, Path::new(LAUNCHER), Arc::new(|_| {})).await.expect("start");
+    assert_eq!(session.clipboard, nested::ClipboardCut::Active);
+    let crossed = selections_that_cross(&session, &cfg, &paths, &["CLIPBOARD", "PRIMARY"]).await;
+    session.stop().await;
+    let _ = std::fs::remove_dir_all(paths.cache.parent().unwrap());
+    assert!(crossed.is_empty(), "selections crossed the nested compositor: {crossed:?}");
+}
+
+/// The launcher must know whether the cut-off is in the compositor it started, not assume
+/// it. Started without the library (which is what a preload that the dynamic linker skips
+/// amounts to), the same compositor says nothing — and then the launcher does not claim a
+/// cut clipboard, "require" refuses to go on, and the claim would indeed have been false:
+/// the session's clipboard reaches the game.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compositor_without_the_cut_off_is_noticed_and_not_called_cut() {
+    if !enabled() {
+        return;
+    }
+    let _serial = SERIAL.lock().await;
+    let cfg = config();
+    let paths = paths("nocut");
+    let plan_without = |require: bool| {
+        let mut desktop = display::plan(&cfg, &paths, "nested-test").expect("display plan");
+        let mut plan = desktop.nested.take().expect("nested plan");
+        assert!(plan.require_clipboard_cut, "nested_compositor = \"require\" asks for the cut as well");
+        plan.preload_clipboard_cut = false;
+        plan.require_clipboard_cut = require;
+        plan
+    };
+
+    // "require": the launch stops, and the compositor with it.
+    let refused = match nested::start(plan_without(true), Path::new(LAUNCHER), Arc::new(|_| {})).await {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a compositor without the cut-off was accepted under \"require\""),
+    };
+    assert!(refused.contains("not established") && refused.contains("was not loaded"), "{refused}");
+
+    // "auto": it runs, and the session knows what it does not know.
+    let session = nested::start(plan_without(false), Path::new(LAUNCHER), Arc::new(|_| {})).await.expect("start");
+    match &session.clipboard {
+        nested::ClipboardCut::Unconfirmed(why) => assert!(why.contains("was not loaded"), "{why}"),
+        nested::ClipboardCut::Active => panic!("reported as cut without the library"),
+    }
+    if std::env::var_os("BASTION_NESTED_CLIPBOARD_TEST").is_some() {
+        let crossed = selections_that_cross(&session, &cfg, &paths, &["CLIPBOARD"]).await;
+        println!("without the cut-off, crossed: {crossed:?}");
+        assert!(
+            crossed.iter().any(|c| c.contains("session → game")),
+            "the control run: without the library gamescope bridges the clipboard ({crossed:?})"
+        );
+    }
+    session.stop().await;
+    let _ = std::fs::remove_dir_all(paths.cache.parent().unwrap());
+}
+
+/// Which of `selections` cross the compositor of `session`, and in which direction.
+async fn selections_that_cross(
+    session: &nested::Session,
+    cfg: &SandboxConfig,
+    paths: &Paths,
+    selections: &[&str],
+) -> Vec<String> {
     let python = ["python3", "-I", "-c", SELECTION];
     let mut crossed = Vec::new();
 
-    for selection in ["CLIPBOARD", "PRIMARY"] {
+    for selection in selections.iter().copied() {
         // 1. Session → game: something is copied in the session while the game runs.
         let secret = format!("copied-in-the-session-{selection}-{}", std::process::id());
         let mut owner = std::process::Command::new("/usr/bin/python3")
@@ -428,7 +494,7 @@ async fn no_selection_crosses_the_nested_compositor() {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let mut argv = python.to_vec();
         argv.extend(["read", selection, "6"]);
-        let seen = client(&session, &cfg, &paths, "/usr/bin/python3", &argv).await;
+        let seen = client(session, cfg, paths, "/usr/bin/python3", &argv).await;
         let _ = owner.kill();
         let _ = owner.wait();
         assert!(seen.ok, "{}\n{}", seen.stdout, seen.stderr);
@@ -445,7 +511,7 @@ async fn no_selection_crosses_the_nested_compositor() {
         let planted = format!("planted-by-the-game-{selection}-{}", std::process::id());
         let mut argv = python.to_vec();
         argv.extend(["own", selection, &planted, "8"]);
-        let (inside, outside) = tokio::join!(client(&session, &cfg, &paths, "/usr/bin/python3", &argv), async {
+        let (inside, outside) = tokio::join!(client(session, cfg, paths, "/usr/bin/python3", &argv), async {
             tokio::time::sleep(Duration::from_secs(2)).await;
             tokio::process::Command::new("/usr/bin/python3")
                 .args(["-I", "-c", SELECTION, "read", selection, "4"])
@@ -462,8 +528,5 @@ async fn no_selection_crosses_the_nested_compositor() {
             crossed.push(format!("{selection}: game → session"));
         }
     }
-
-    session.stop().await;
-    let _ = std::fs::remove_dir_all(paths.cache.parent().unwrap());
-    assert!(crossed.is_empty(), "selections crossed the nested compositor: {crossed:?}");
+    crossed
 }

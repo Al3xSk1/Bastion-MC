@@ -355,23 +355,99 @@ fn crc32(parts: &[&[u8]]) -> u32 {
     !crc
 }
 
-/// Check that `raw` is a Minecraft skin — a 64×64 or 64×32 PNG, 8 bits per channel, not
-/// interlaced, every chunk checksum correct — and rebuild it from only the chunks an image
-/// needs (`IHDR`, `PLTE`, `tRNS`, `IDAT`, `IEND`).
-///
-/// What is uploaded is the rebuilt file, so nothing else that was in the original leaves
-/// the machine: no text chunks (editors record software names, comments, sometimes file
-/// paths), no timestamps, no EXIF, no colour profiles, no private chunks, no bytes after
-/// the end marker. The pixel data itself is passed through as it is, not decoded.
-pub fn sanitize_skin_png(raw: &[u8]) -> Result<Vec<u8>> {
-    let bad = |why: &str| Error::Format(format!("not a usable skin file: {why}"));
+fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = (data.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&[kind, data]).to_be_bytes());
+    out
+}
+
+const SKIN_WIDTH: usize = 64;
+
+/// A skin as an image: 64 pixels wide, 64 or 32 high, four bytes (R, G, B, A) per pixel.
+struct SkinImage {
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+fn not_a_skin(why: &str) -> Error {
+    Error::Format(format!("not a usable skin file: {why}"))
+}
+
+/// Inflate a zlib stream that must produce exactly `expected` bytes and must end where
+/// `data` ends. Never produces more than `expected + 1` bytes, whatever the stream claims.
+fn inflate_exact(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+    // One byte more than the image has room for: a stream that would go on is seen as such.
+    let mut out = vec![0u8; expected + 1];
+    let mut inflater = flate2::Decompress::new(true);
+    let status = inflater
+        .decompress(data, &mut out, flate2::FlushDecompress::Finish)
+        .map_err(|_| not_a_skin("the pixel data is not a valid compressed stream"))?;
+    let (read, written) = (inflater.total_in(), inflater.total_out());
+    if status != flate2::Status::StreamEnd || written != expected as u64 {
+        return Err(not_a_skin("the pixel data is not exactly the size of the image"));
+    }
+    if read != data.len() as u64 {
+        return Err(not_a_skin("there is data behind the end of the pixel data"));
+    }
+    out.truncate(expected);
+    Ok(out)
+}
+
+/// Undo PNG's per-row filters in place. `rows` holds, per row, one filter byte and then
+/// `stride` bytes; `bpp` is the number of bytes per pixel.
+fn unfilter(rows: &mut [u8], stride: usize, bpp: usize) -> Result<()> {
+    let mut previous = vec![0u8; stride];
+    for row in rows.chunks_exact_mut(stride + 1) {
+        let (filter, line) = row.split_first_mut().expect("a row has a filter byte");
+        for x in 0..stride {
+            let left = if x >= bpp { line[x - bpp] } else { 0 };
+            let (up, up_left) = (previous[x], if x >= bpp { previous[x - bpp] } else { 0 });
+            let predicted = match *filter {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                4 => {
+                    // Paeth: whichever of the three neighbours is closest to left + up - up_left.
+                    let (a, b, c) = (i16::from(left), i16::from(up), i16::from(up_left));
+                    let p = a + b - c;
+                    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                    if pa <= pb && pa <= pc {
+                        left
+                    } else if pb <= pc {
+                        up
+                    } else {
+                        up_left
+                    }
+                }
+                _ => return Err(not_a_skin("the pixel data uses a row filter that does not exist")),
+            };
+            line[x] = line[x].wrapping_add(predicted);
+        }
+        previous.copy_from_slice(line);
+    }
+    Ok(())
+}
+
+/// Read `raw` as a skin: a PNG of 64×64 or 64×32 pixels, 8 bits per channel, RGB, RGBA or
+/// indexed colour, not interlaced, every chunk checksum correct, the chunks in the order
+/// and number the format allows — and decode it to its pixels. Nothing of the file but the
+/// pixels is in the result.
+fn decode_skin_png(raw: &[u8]) -> Result<SkinImage> {
+    let bad = not_a_skin;
     if raw.len() > 4 * MAX_SKIN_BYTES {
         return Err(bad("far too large for a 64×64 image"));
     }
     let mut rest = raw.strip_prefix(&PNG_SIGNATURE).ok_or_else(|| bad("not a PNG file"))?;
-    let mut out = PNG_SIGNATURE.to_vec();
-    let (mut seen_header, mut seen_data, mut seen_end, mut palette) = (false, false, false, false);
-    let mut indexed = false;
+    // (height, colour type), the palette, the transparency chunk, the compressed pixels.
+    let mut header: Option<(usize, u8)> = None;
+    let mut palette: Option<&[u8]> = None;
+    let mut transparency: Option<&[u8]> = None;
+    let mut compressed: Vec<u8> = Vec::new();
+    // Pixel data: not yet seen, being read (its chunks follow each other), or complete.
+    let (mut data_started, mut data_closed, mut seen_end) = (false, false, false);
     while !rest.is_empty() {
         if seen_end {
             return Err(bad("data after the end of the image"));
@@ -388,57 +464,70 @@ pub fn sanitize_skin_png(raw: &[u8]) -> Result<Vec<u8>> {
         if crc != crc32(&[kind, data]) {
             return Err(bad("chunk checksum mismatch (damaged file)"));
         }
-        let chunk = &rest[..12 + length];
         rest = &rest[12 + length..];
-        if !seen_header && kind != b"IHDR" {
+        if header.is_none() && kind != b"IHDR" {
             return Err(bad("does not start with an image header"));
+        }
+        if data_started && kind != b"IDAT" {
+            data_closed = true;
         }
         match kind {
             b"IHDR" => {
-                if seen_header || length != 13 {
+                if header.is_some() || length != 13 {
                     return Err(bad("malformed image header"));
                 }
-                seen_header = true;
                 let width = u32::from_be_bytes(data[0..4].try_into().expect("four bytes"));
                 let height = u32::from_be_bytes(data[4..8].try_into().expect("four bytes"));
                 let (depth, colour, compression, filter, interlace) = (data[8], data[9], data[10], data[11], data[12]);
-                if width != 64 || !(height == 64 || height == 32) {
+                if width as usize != SKIN_WIDTH || !(height == 64 || height == 32) {
                     return Err(bad(&format!("skins are 64×64 (or 64×32) pixels, this is {width}×{height}")));
                 }
                 if depth != 8 || !matches!(colour, 2 | 3 | 6) || compression != 0 || filter != 0 || interlace != 0 {
                     return Err(bad("must be 8-bit RGB, RGBA or indexed colour, not interlaced"));
                 }
-                indexed = colour == 3;
-                out.extend_from_slice(chunk);
+                header = Some((height as usize, colour));
             }
             b"PLTE" => {
-                if palette || seen_data || length == 0 || !length.is_multiple_of(3) || length > 768 {
+                if palette.is_some()
+                    || transparency.is_some()
+                    || data_started
+                    || length == 0
+                    || !length.is_multiple_of(3)
+                    || length > 768
+                {
                     return Err(bad("malformed palette"));
                 }
-                palette = true;
-                out.extend_from_slice(chunk);
+                palette = Some(data);
             }
             b"tRNS" => {
-                if seen_data || length > 256 {
+                // Once, in front of the pixels, and only in the form the colour type defines:
+                // one alpha value per palette entry, or one RGB colour (as three 16-bit
+                // numbers) that stands for "transparent". RGBA has alpha of its own.
+                let fits = match header.expect("the header comes first").1 {
+                    3 => palette.is_some_and(|p| (1..=p.len() / 3).contains(&length)),
+                    2 => length == 6,
+                    _ => false,
+                };
+                if transparency.is_some() || data_started || !fits {
                     return Err(bad("malformed transparency chunk"));
                 }
-                out.extend_from_slice(chunk);
+                transparency = Some(data);
             }
             b"IDAT" => {
-                if indexed && !palette {
-                    return Err(bad("indexed image without a palette"));
+                if data_closed {
+                    return Err(bad("pixel data in separate places"));
                 }
-                seen_data = true;
-                out.extend_from_slice(chunk);
+                data_started = true;
+                compressed.extend_from_slice(data);
             }
             b"IEND" => {
-                if length != 0 || !seen_data {
+                if length != 0 || !data_started {
                     return Err(bad("malformed end of image"));
                 }
                 seen_end = true;
-                out.extend_from_slice(chunk);
             }
-            // Everything else is optional by definition (or the image is not a plain PNG).
+            // Everything else is optional by definition (or the image is not a plain PNG),
+            // and none of it is kept.
             other if other[0] & 0x20 != 0 => {}
             _ => return Err(bad("contains a critical chunk this launcher does not know")),
         }
@@ -446,8 +535,90 @@ pub fn sanitize_skin_png(raw: &[u8]) -> Result<Vec<u8>> {
     if !seen_end {
         return Err(bad("the image is incomplete"));
     }
+    let (height, colour) = header.expect("an end without a header was refused");
+    let bpp = match colour {
+        2 => 3,
+        3 => 1,
+        _ => 4,
+    };
+    if colour == 3 && palette.is_none() {
+        return Err(bad("indexed image without a palette"));
+    }
+    let stride = SKIN_WIDTH * bpp;
+    let mut rows = inflate_exact(&compressed, height * (stride + 1))?;
+    unfilter(&mut rows, stride, bpp)?;
+
+    let mut rgba = Vec::with_capacity(height * SKIN_WIDTH * 4);
+    for row in rows.chunks_exact(stride + 1) {
+        for pixel in row[1..].chunks_exact(bpp) {
+            match colour {
+                6 => rgba.extend_from_slice(pixel),
+                2 => {
+                    // The one colour a transparency chunk names (its samples are 16 bits wide;
+                    // for 8-bit images the high byte is zero).
+                    let transparent = transparency
+                        .is_some_and(|t| t[0] == 0 && t[2] == 0 && t[4] == 0 && [t[1], t[3], t[5]] == *pixel);
+                    rgba.extend_from_slice(pixel);
+                    rgba.push(if transparent { 0 } else { 255 });
+                }
+                _ => {
+                    let (palette, index) = (palette.expect("checked above"), usize::from(pixel[0]));
+                    let entry = palette
+                        .get(index * 3..index * 3 + 3)
+                        .ok_or_else(|| bad("a pixel refers to a colour that is not in the palette"))?;
+                    rgba.extend_from_slice(entry);
+                    rgba.push(transparency.and_then(|t| t.get(index).copied()).unwrap_or(255));
+                }
+            }
+        }
+    }
+    Ok(SkinImage { height, rgba })
+}
+
+/// Write `image` as a PNG in one fixed form: 8-bit RGBA, not interlaced, no row filters,
+/// one block of pixel data, no optional chunks. The same pixels always give the same file.
+fn encode_skin_png(image: &SkinImage) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let stride = SKIN_WIDTH * 4;
+    let mut rows = Vec::with_capacity(image.height * (stride + 1));
+    for row in image.rgba.chunks_exact(stride) {
+        rows.push(0); // filter type "none"
+        rows.extend_from_slice(row);
+    }
+    let mut deflater = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(9));
+    let compressed = deflater
+        .write_all(&rows)
+        .and_then(|()| deflater.finish())
+        .map_err(|e| Error::Other(format!("encoding the skin: {e}")))?;
+    let mut header = (SKIN_WIDTH as u32).to_be_bytes().to_vec();
+    header.extend_from_slice(&(image.height as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut out = PNG_SIGNATURE.to_vec();
+    out.extend(chunk(b"IHDR", &header));
+    out.extend(chunk(b"IDAT", &compressed));
+    out.extend(chunk(b"IEND", b""));
+    Ok(out)
+}
+
+/// Check that `raw` is a Minecraft skin and return the same image as a new file.
+///
+/// The image is **decoded to its pixels and encoded again** ([`decode_skin_png`],
+/// [`encode_skin_png`]). What is uploaded is that new file, so what leaves the machine is
+/// the image and nothing else that was in the original: its height (64 or 32) and, for
+/// every pixel, its four colour values. Not the text chunks (editors record software names,
+/// comments, sometimes file paths), timestamps, EXIF or colour profiles; not private
+/// chunks; not a palette, with whatever its unused entries held; not the way the original
+/// was filtered and compressed; not bytes behind the pixel data or behind the end marker.
+///
+/// What does leave with the pixels, because it is part of them: the colour values of
+/// pixels that are fully transparent. They are invisible in an image viewer, but the game
+/// shows some of them (it ignores transparency on the skin's base layer), so changing them
+/// would change the skin.
+pub fn sanitize_skin_png(raw: &[u8]) -> Result<Vec<u8>> {
+    let out = encode_skin_png(&decode_skin_png(raw)?)?;
+    // (Cannot happen: 64×64 RGBA is 16 KiB before compression.)
     if out.len() > MAX_SKIN_BYTES {
-        return Err(bad("larger than the 24 KiB Mojang accepts"));
+        return Err(not_a_skin("larger than the 24 KiB Mojang accepts"));
     }
     Ok(out)
 }
@@ -516,14 +687,6 @@ mod tests {
         assert!(parse_profile(two.as_bytes()).is_err());
     }
 
-    pub(crate) fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
-        let mut c = (data.len() as u32).to_be_bytes().to_vec();
-        c.extend_from_slice(kind);
-        c.extend_from_slice(data);
-        c.extend_from_slice(&crc32(&[kind, data]).to_be_bytes());
-        c
-    }
-
     fn header(width: u32, height: u32, colour: u8) -> Vec<u8> {
         let mut d = width.to_be_bytes().to_vec();
         d.extend_from_slice(&height.to_be_bytes());
@@ -539,6 +702,63 @@ mod tests {
         f
     }
 
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Filter `pixels` (rows of `stride` bytes) the way an encoder would, with the given
+    /// filter type per row (cycled), and compress them: the content of an IDAT chunk.
+    fn pixel_data(pixels: &[u8], stride: usize, bpp: usize, filters: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut previous = vec![0u8; stride];
+        for (y, row) in pixels.chunks_exact(stride).enumerate() {
+            let filter = filters[y % filters.len()];
+            out.push(filter);
+            for x in 0..stride {
+                let left = if x >= bpp { row[x - bpp] } else { 0 };
+                let (up, up_left) = (previous[x], if x >= bpp { previous[x - bpp] } else { 0 });
+                let predicted = match filter {
+                    0 => 0,
+                    1 => left,
+                    2 => up,
+                    3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                    _ => {
+                        let p = i16::from(left) + i16::from(up) - i16::from(up_left);
+                        let d = |v: u8| (p - i16::from(v)).abs();
+                        if d(left) <= d(up) && d(left) <= d(up_left) {
+                            left
+                        } else if d(up) <= d(up_left) {
+                            up
+                        } else {
+                            up_left
+                        }
+                    }
+                };
+                out.push(row[x].wrapping_sub(predicted));
+            }
+            previous.copy_from_slice(row);
+        }
+        deflate(&out)
+    }
+
+    /// Pixels with some structure and some noise, `bpp` bytes each.
+    fn pixels(height: usize, bpp: usize) -> Vec<u8> {
+        (0..height * 64 * bpp).map(|i| ((i * 31 + i / 7) % 251) as u8).collect()
+    }
+
+    /// An ordinary RGBA skin as an editor writes it.
+    fn rgba_skin(height: usize, extra: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let image = pixels(height, 4);
+        let mut chunks = vec![header(64, height as u32, 6)];
+        chunks.extend_from_slice(extra);
+        chunks.push(chunk(b"IDAT", &pixel_data(&image, 256, 4, &[0, 1, 2, 3, 4])));
+        chunks.push(chunk(b"IEND", b""));
+        (png(&chunks), image)
+    }
+
     #[test]
     fn crc32_matches_the_png_specification() {
         assert_eq!(crc32(&[b"IEND"]), 0xae42_6082);
@@ -546,28 +766,161 @@ mod tests {
     }
 
     #[test]
-    fn a_skin_is_rebuilt_without_its_metadata() {
+    fn a_skin_is_decoded_and_encoded_again_and_only_its_pixels_remain() {
         let text = chunk(b"tEXt", b"Software\0/home/alex/secret-project/editor");
         let time = chunk(b"tIME", &[7, 234, 11, 13, 12, 0, 0]);
-        let private = chunk(b"prVt", b"anything");
-        let data = chunk(b"IDAT", b"compressed-pixels");
-        let original = png(&[header(64, 64, 6), text, time, data.clone(), private, data.clone(), chunk(b"IEND", b"")]);
+        let private = chunk(b"prVt", b"anything at all");
+        let (original, image) = rgba_skin(64, &[text, time, private]);
         let clean = sanitize_skin_png(&original).unwrap();
-        assert_eq!(clean, png(&[header(64, 64, 6), data.clone(), data, chunk(b"IEND", b"")]));
+        // The same picture…
+        let decoded = decode_skin_png(&clean).unwrap();
+        assert_eq!((decoded.height, &decoded.rgba), (64, &image));
+        // …in the launcher's one form: header, one block of pixel data, end. Nothing else.
+        let mut kinds = Vec::new();
+        let mut rest = &clean[8..];
+        while !rest.is_empty() {
+            let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            kinds.push(String::from_utf8_lossy(&rest[4..8]).into_owned());
+            rest = &rest[12 + length..];
+        }
+        assert_eq!(kinds, ["IHDR", "IDAT", "IEND"]);
         assert!(!clean.windows(4).any(|w| w == b"alex"), "the text chunk is gone");
-        assert_eq!(sanitize_skin_png(&clean).unwrap(), clean, "idempotent");
-        // The legacy 64×32 layout and indexed colour are accepted.
-        let pal = chunk(b"PLTE", &[0; 6]);
-        let legacy =
-            png(&[header(64, 32, 3), pal, chunk(b"tRNS", &[0, 255]), chunk(b"IDAT", b"x"), chunk(b"IEND", b"")]);
-        assert_eq!(sanitize_skin_png(&legacy).unwrap(), legacy);
+        assert_eq!(sanitize_skin_png(&clean).unwrap(), clean, "its own output is a fixed point");
+        // However the original was filtered, split or compressed: same pixels, same file.
+        let split = pixel_data(&image, 256, 4, &[4, 4, 0]);
+        let (a, b) = split.split_at(split.len() / 3);
+        let other = png(&[header(64, 64, 6), chunk(b"IDAT", a), chunk(b"IDAT", b), chunk(b"IEND", b"")]);
+        assert_eq!(sanitize_skin_png(&other).unwrap(), clean);
+
+        // The legacy 64×32 layout.
+        let (legacy, image) = rgba_skin(32, &[]);
+        let decoded = decode_skin_png(&sanitize_skin_png(&legacy).unwrap()).unwrap();
+        assert_eq!((decoded.height, decoded.rgba), (32, image));
+    }
+
+    #[test]
+    fn rgb_and_indexed_skins_become_the_same_rgba_image() {
+        // RGB, with one colour declared transparent.
+        let rgb = pixels(64, 3);
+        let key = [rgb[0], rgb[1], rgb[2]];
+        let trns = chunk(b"tRNS", &[0, key[0], 0, key[1], 0, key[2]]);
+        let file =
+            png(&[header(64, 64, 2), trns, chunk(b"IDAT", &pixel_data(&rgb, 192, 3, &[1, 4])), chunk(b"IEND", b"")]);
+        let decoded = decode_skin_png(&sanitize_skin_png(&file).unwrap()).unwrap();
+        for (out, src) in decoded.rgba.as_chunks::<4>().0.iter().zip(rgb.as_chunks::<3>().0) {
+            assert_eq!(&out[..3], src);
+            assert_eq!(out[3], if *src == key { 0 } else { 255 });
+        }
+        assert_eq!(decoded.rgba[3], 0, "the first pixel has the transparent colour");
+
+        // Indexed: four colours in use, the first one half transparent. The palette has room
+        // for more entries than are used — and what those hold is not in the result.
+        let mut palette = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        palette.extend_from_slice(b"HIDDEN-IN-AN-UNUSED-PALETTE-ENTRY");
+        let indices: Vec<u8> = (0..64 * 64).map(|i| (i % 4) as u8).collect();
+        let file = png(&[
+            header(64, 64, 3),
+            chunk(b"PLTE", &palette),
+            chunk(b"tRNS", &[128]),
+            chunk(b"IDAT", &pixel_data(&indices, 64, 1, &[0, 2])),
+            chunk(b"IEND", b""),
+        ]);
+        let clean = sanitize_skin_png(&file).unwrap();
+        let decoded = decode_skin_png(&clean).unwrap();
+        assert_eq!(&decoded.rgba[..16], [10, 20, 30, 128, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255]);
+        let pixels_out = decode_skin_png(&clean).unwrap().rgba;
+        assert!(!pixels_out.windows(6).any(|w| w == b"HIDDEN"), "an unused palette entry is not a pixel");
+        assert!(!clean.windows(4).any(|w| w == b"PLTE" || w == b"tRNS"));
+        // An index beyond the palette is not a colour.
+        let mut beyond = indices.clone();
+        beyond[100] = 200;
+        let file = png(&[
+            header(64, 64, 3),
+            chunk(b"PLTE", &palette[..12]),
+            chunk(b"IDAT", &pixel_data(&beyond, 64, 1, &[0])),
+            chunk(b"IEND", b""),
+        ]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("not in the palette"));
+    }
+
+    /// The ways a file that passes for an image could carry something else out. Each of
+    /// these went through the earlier sanitiser unchanged (it kept `tRNS`, `PLTE` and `IDAT`
+    /// chunks as they were).
+    #[test]
+    fn nothing_but_the_pixels_can_ride_along() {
+        let (plain, image) = rgba_skin(64, &[]);
+        let clean = sanitize_skin_png(&plain).unwrap();
+        let secret = b"-----BEGIN OPENSSH PRIVATE KEY-----";
+        let carries = |file: &[u8]| file.windows(secret.len()).any(|w| w == secret);
+        let data = pixel_data(&image, 256, 4, &[0]);
+        let end = chunk(b"IEND", b"");
+
+        // Ninety "transparency" chunks of arbitrary bytes in an RGBA image.
+        let mut chunks = vec![header(64, 64, 6)];
+        for _ in 0..90 {
+            let mut bytes = secret.to_vec();
+            bytes.resize(256, 0x41);
+            chunks.push(chunk(b"tRNS", &bytes));
+        }
+        chunks.extend([chunk(b"IDAT", &data), end.clone()]);
+        assert!(sanitize_skin_png(&png(&chunks)).unwrap_err().to_string().contains("transparency"));
+        // A "suggested palette" in an RGBA image: legal, and not a pixel. It is gone.
+        let mut bytes = secret.to_vec();
+        bytes.resize(36, 0);
+        let file = png(&[header(64, 64, 6), chunk(b"PLTE", &bytes), chunk(b"IDAT", &data), end.clone()]);
+        assert!(carries(&file));
+        assert_eq!(sanitize_skin_png(&file).unwrap(), clean);
+        // Bytes behind the compressed pixels, inside the pixel-data chunk…
+        let file = png(&[header(64, 64, 6), chunk(b"IDAT", &[data.as_slice(), secret].concat()), end.clone()]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("behind the end of the pixel data"));
+        // …or in a pixel-data chunk of their own.
+        let file = png(&[header(64, 64, 6), chunk(b"IDAT", &data), chunk(b"IDAT", secret), end.clone()]);
+        assert!(sanitize_skin_png(&file).is_err());
+        // A zip archive (or anything else) where the pixels should be.
+        let file = png(&[header(64, 64, 6), chunk(b"IDAT", b"PK\x03\x04 not an image at all"), end.clone()]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("not a valid compressed stream"));
+        // More pixel rows than the image has, fewer, and a row filter that does not exist.
+        let taller = pixel_data(&pixels(65, 4), 256, 4, &[0]);
+        let shorter = pixel_data(&pixels(63, 4), 256, 4, &[0]);
+        for wrong in [taller, shorter] {
+            let file = png(&[header(64, 64, 6), chunk(b"IDAT", &wrong), end.clone()]);
+            assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("exactly the size of the image"));
+        }
+        let mut rows = vec![0u8; 64 * 257];
+        rows[257 * 3] = 5;
+        let file = png(&[header(64, 64, 6), chunk(b"IDAT", &deflate(&rows)), end.clone()]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("row filter"));
+        // A stream that claims to inflate to far more than an image: stopped at the image's size.
+        let bomb = deflate(&vec![0u8; 8 << 20]);
+        assert!(bomb.len() < 4 * MAX_SKIN_BYTES - 200, "small enough to be read at all: {}", bomb.len());
+        let file = png(&[header(64, 64, 6), chunk(b"IDAT", &bomb), end.clone()]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("exactly the size of the image"));
+        // Pixel data in two places with something in between.
+        let (a, b) = data.split_at(data.len() / 2);
+        let file =
+            png(&[header(64, 64, 6), chunk(b"IDAT", a), chunk(b"tEXt", b"Comment\0x"), chunk(b"IDAT", b), end.clone()]);
+        assert!(sanitize_skin_png(&file).unwrap_err().to_string().contains("separate places"));
+        // Two palettes, a palette behind the transparency, transparency for the wrong type.
+        let indices = vec![0u8; 64 * 64];
+        let idat = chunk(b"IDAT", &pixel_data(&indices, 64, 1, &[0]));
+        let (pal, trns) = (chunk(b"PLTE", &[1, 2, 3]), chunk(b"tRNS", &[9]));
+        for chunks in [
+            vec![header(64, 64, 3), pal.clone(), pal.clone(), idat.clone(), end.clone()],
+            vec![header(64, 64, 3), trns.clone(), pal.clone(), idat.clone(), end.clone()],
+            vec![header(64, 64, 3), pal.clone(), trns.clone(), trns.clone(), idat.clone(), end.clone()],
+            vec![header(64, 64, 3), pal.clone(), chunk(b"tRNS", &[9, 9]), idat.clone(), end.clone()],
+            vec![header(64, 64, 3), pal.clone(), idat.clone(), trns.clone(), end.clone()],
+            vec![header(64, 64, 2), chunk(b"tRNS", &[0, 1, 0, 2]), idat.clone(), end.clone()],
+        ] {
+            assert!(sanitize_skin_png(&png(&chunks)).is_err());
+        }
     }
 
     #[test]
     fn files_that_are_not_skins_are_refused() {
-        let data = chunk(b"IDAT", b"x");
+        let (good, image) = rgba_skin(64, &[]);
+        let data = chunk(b"IDAT", &pixel_data(&image, 256, 4, &[0]));
         let end = chunk(b"IEND", b"");
-        let good = png(&[header(64, 64, 6), data.clone(), end.clone()]);
         assert!(sanitize_skin_png(&good).is_ok());
         let mut flipped = good.clone();
         flipped[20] ^= 1; // inside IHDR: the checksum no longer matches
@@ -590,9 +943,10 @@ mod tests {
             ("no end", png(&[header(64, 64, 6), data.clone()])),
             ("unknown critical chunk", png(&[header(64, 64, 6), chunk(b"CgBI", b""), data.clone(), end.clone()])),
             ("indexed without palette", png(&[header(64, 64, 3), data.clone(), end.clone()])),
+            ("pixels of another colour type", png(&[header(64, 64, 2), data.clone(), end.clone()])),
             ("bad checksum", flipped),
             ("trailing data", trailing),
-            ("too large", png(&[header(64, 64, 6), chunk(b"IDAT", &vec![0; MAX_SKIN_BYTES]), end.clone()])),
+            ("too large", png(&[header(64, 64, 6), chunk(b"IDAT", &vec![0; 4 * MAX_SKIN_BYTES]), end.clone()])),
             ("truncated", good[..good.len() - 5].to_vec()),
             ("length beyond the file", {
                 let mut f = png(&[header(64, 64, 6)]);
@@ -620,7 +974,7 @@ mod tests {
         set_active_cape(&api, &token, Some("5af2037279e04e1f80f86bd8e3135995")).await.unwrap();
         set_active_cape(&api, &token, None).await.unwrap();
         reset_skin(&api, &token).await.unwrap();
-        let png = png(&[header(64, 64, 6), chunk(b"IDAT", b"x"), chunk(b"IEND", b"")]);
+        let png = sanitize_skin_png(&rgba_skin(64, &[]).0).unwrap();
         upload_skin(&api, &token, &png, Variant::Slim).await.unwrap();
         let reqs = api.requests();
         assert_eq!(reqs[0].0, ACTIVE_CAPE_URL);

@@ -151,6 +151,21 @@ pub fn hash_reader<R: Read>(alg: HashAlg, mut reader: R) -> io::Result<(Vec<u8>,
     Ok((h.finish(), total))
 }
 
+/// Hash an open file from its first byte to its last, by position: the descriptor's own
+/// read offset is neither used nor moved. Returns the digest and the number of bytes.
+pub fn hash_file(alg: HashAlg, file: &File) -> io::Result<(Vec<u8>, u64)> {
+    use std::os::unix::fs::FileExt;
+    struct At<'a>(&'a File, u64);
+    impl Read for At<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.0.read_at(buf, self.1)?;
+            self.1 += n as u64;
+            Ok(n)
+        }
+    }
+    hash_reader(alg, At(file, 0))
+}
+
 /// A digest we expect a file to have. Hex is validated and normalised once, here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expected {

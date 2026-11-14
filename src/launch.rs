@@ -9,13 +9,18 @@
 //!  6. decide network, display, audio, GPU exposure
 //!  7. authenticate (as late as possible, so tokens live as briefly as possible)
 //!  8. start the sandbox; write the launch frame to its stdin socket; wipe frame and tokens
-//!  9. relay (filtered network) and log (sanitised) until the game exits
-//! 10. carry the allowlisted settings files back (parsed and re-encoded, never copied);
-//!     delete the scratch game root
+//!  9. look at what was started instead of assuming it: read the resource limits back from
+//!     the kernel; then the launcher confines itself — and only after that reports which
+//!     protections this launch really has
+//! 10. relay (filtered network) and log (sanitised) until the game exits. Nothing the game
+//!     sends — a DNS question, a TLS hello, a line of output, or what it makes its display
+//!     server print — is read before step 9 is done
+//! 11. carry the allowlisted settings files back (parsed and re-encoded, never copied);
+//!     delete the scratch game root, and say so only if that worked
 
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::Write,
     net::Shutdown,
     os::unix::fs::OpenOptionsExt,
@@ -56,9 +61,21 @@ use crate::{
 };
 
 const MAX_LOG_LINE: usize = 4096;
-/// The game controls how much it prints; the log must not be a way to fill the disk.
-const MAX_LOG_BYTES: u64 = 256 << 20;
+/// The game controls how much it prints; the log must not be a way to fill the disk. Each
+/// kind of line has a share of its own (256 MiB in all), because a single budget is the
+/// game's to spend: one that prints until the file is full would keep everything said
+/// afterwards — the relay's refusals, the broker's `[SECURITY]` lines, the tripwire report —
+/// out of the file. What a share guarantees is that *other* kinds of line cannot use it up.
+/// The relay's and the display server's shares are still driven by what the game does (a
+/// flood of refused lookups fills the first); only the launcher's own share is out of its
+/// reach, and that is where the summary of refusals and the tripwire report go.
+const LOG_SHARES: [u64; 4] = [8 << 20, 24 << 20, 24 << 20, 200 << 20];
 const SIGSYS_EXIT: i32 = 128 + libc::SIGSYS;
+/// How long deleting the game root at exit may take. A game can leave a tree that takes
+/// minutes to delete; what is left is removed by a later launch (and that is said).
+const SCRATCH_REMOVAL_TIME: Duration = Duration::from_secs(30);
+/// Most files and directories a burner session copies.
+const BURNER_MAX_ENTRIES: u64 = 1_000_000;
 /// Ceilings for the nested compositor's own scope. gamescope and Xwayland together use a
 /// few hundred MiB and a few dozen threads; what a game renders lives in GPU memory.
 const NESTED_MEMORY_MAX_MB: u64 = 2048;
@@ -177,10 +194,42 @@ fn prune_logs(dir: &std::path::Path, keep: usize) {
     }
 }
 
+/// Whose line it is, for the log's size limit (see [`LOG_SHARES`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Share {
+    /// What the launcher itself has to say. Nothing the game does adds to it.
+    Launcher = 0,
+    /// The relay and the credential broker: one line per connection, lookup or request.
+    Egress = 1,
+    /// Output of the nested compositor (shown as the launcher's, written by a program that
+    /// the game talks to).
+    Display = 2,
+    Game = 3,
+}
+
+impl Share {
+    fn of(source: Source) -> Self {
+        match source {
+            Source::Launcher => Share::Launcher,
+            Source::Egress => Share::Egress,
+            Source::Game => Share::Game,
+        }
+    }
+    fn what(self) -> &'static str {
+        match self {
+            Share::Launcher => "launcher",
+            Share::Egress => "relay",
+            Share::Display => "display server",
+            Share::Game => "game",
+        }
+    }
+}
+
 struct Log {
-    /// The file and the number of bytes written to it so far.
-    file: Mutex<(File, u64)>,
-    /// Everything recorded is also shown live (terminal or front end).
+    /// The file, and per share the bytes written so far (`None` once its limit was reached).
+    file: Mutex<(File, [Option<u64>; 4])>,
+    limits: [u64; 4],
+    /// Everything recorded with [`Log::line`] is also shown live (terminal or front end).
     reporter: Reporter,
 }
 
@@ -198,26 +247,54 @@ impl Log {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
             .ctx(|| format!("opening {}", path.display()))?;
-        Ok((Arc::new(Log { file: Mutex::new((file, 0)), reporter: reporter.clone() }), path))
+        Ok((Arc::new(Log::over(file, LOG_SHARES, reporter)), path))
     }
 
-    /// `text` must already be sanitised if it came from the sandbox.
-    fn line(&self, source: Source, text: &str) {
+    fn over(file: File, limits: [u64; 4], reporter: &Reporter) -> Self {
+        Log { file: Mutex::new((file, [Some(0); 4])), limits, reporter: reporter.clone() }
+    }
+
+    /// Write to the file only. `text` must already be sanitised if it came from the sandbox.
+    fn record_as(&self, share: Share, source: Source, text: &str) {
         let tag = source.tag();
-        if let Ok(mut guard) = self.file.lock() {
-            let (file, written) = &mut *guard;
-            let size = (tag.len() + text.len() + 4) as u64;
-            if *written <= MAX_LOG_BYTES {
-                if *written + size > MAX_LOG_BYTES {
-                    let _ = writeln!(file, "[launcher] log size limit reached; further output is not recorded");
-                    *written = MAX_LOG_BYTES + 1;
-                } else {
-                    let _ = writeln!(file, "[{tag}] {text}");
-                    *written += size;
-                }
+        let Ok(mut guard) = self.file.lock() else { return };
+        let (file, written) = &mut *guard;
+        let size = (tag.len() + text.len() + 4) as u64;
+        let (slot, limit) = (&mut written[share as usize], self.limits[share as usize]);
+        match *slot {
+            Some(so_far) if so_far + size <= limit => {
+                let _ = writeln!(file, "[{tag}] {text}");
+                *slot = Some(so_far + size);
             }
+            // Said once per share, and not counted against anybody: four short lines at most.
+            Some(_) => {
+                let _ = writeln!(
+                    file,
+                    "[launcher] log size limit for {} output reached; further {} output is not recorded",
+                    share.what(),
+                    share.what()
+                );
+                *slot = None;
+            }
+            None => {}
         }
+    }
+
+    fn record(&self, source: Source, text: &str) {
+        self.record_as(Share::of(source), source, text);
+    }
+
+    /// Record and show live. `text` must already be sanitised if it came from the sandbox.
+    fn line(&self, source: Source, text: &str) {
+        self.record(source, text);
         self.reporter.log(source, text);
+    }
+
+    /// A line of the nested compositor: the launcher's by name, but with a share of its own,
+    /// because how much that program prints is not the launcher's doing.
+    fn display_line(&self, text: &str) {
+        self.record_as(Share::Display, Source::Launcher, text);
+        self.reporter.log(Source::Launcher, text);
     }
 }
 
@@ -244,50 +321,23 @@ async fn relay_output(stream: impl AsyncRead + Unpin, source: Source, log: Arc<L
 
 // ---------------------------------------------------------------- per-launch scratch
 
-/// Copy the regular files and directories under `src` to `dst`. Anything else — symbolic
-/// links, sockets, devices — is skipped: the source is a directory the game could write to.
-fn copy_tree(src: &std::path::Path, dst: &std::path::Path, files: &mut u64, bytes: &mut u64) -> Result<()> {
-    const MAX_DEPTH: usize = 64;
-    fn walk(
-        src: &std::path::Path,
-        dst: &std::path::Path,
-        depth: usize,
-        files: &mut u64,
-        bytes: &mut u64,
-    ) -> Result<()> {
-        if depth > MAX_DEPTH {
-            return Err(Error::Other(format!("{} is nested too deeply to copy", src.display())));
-        }
-        util::create_private_dir_all(dst)?;
-        for entry in std::fs::read_dir(src).ctx(|| format!("reading {}", src.display()))? {
-            let entry = entry.ctx(|| format!("reading {}", src.display()))?;
-            let kind = entry.file_type().ctx(|| format!("examining {}", entry.path().display()))?;
-            let (from, to) = (entry.path(), dst.join(entry.file_name()));
-            if kind.is_dir() {
-                walk(&from, &to, depth + 1, files, bytes)?;
-            } else if kind.is_file() {
-                // Opened without following a link that replaced the file after the check.
-                let mut input = util::open_regular_nofollow(&from).ctx(|| format!("opening {}", from.display()))?;
-                let mut output = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&to)
-                    .ctx(|| format!("creating {}", to.display()))?;
-                *bytes += std::io::copy(&mut input, &mut output).ctx(|| format!("copying {}", from.display()))?;
-                *files += 1;
-            }
-        }
-        Ok(())
-    }
-    walk(src, dst, 0, files, bytes)
+/// How much a burner session may copy into the cache: what is free there now, less a tenth
+/// (at least 1 GiB) that stays free. The instance's worlds were written by earlier game
+/// sessions; a file that claims a terabyte must end the launch, not fill the disk.
+fn burner_copy_budget(cache: &std::path::Path) -> Result<u64> {
+    let stat = nix::sys::statvfs::statvfs(cache).ctx(|| format!("examining the file system of {}", cache.display()))?;
+    let free = (stat.blocks_available() as u64).saturating_mul(stat.fragment_size() as u64);
+    Ok(free.saturating_sub((free / 10).max(1 << 30)))
 }
 
-/// The game root for one session, plus extracted natives. Removed on drop, whatever happens.
+/// The game root for one session, plus extracted natives. Removed on drop, whatever happens —
+/// as far as that is possible: [`Scratch::remove`] is the way to find out whether it was.
 struct Scratch {
     root: PathBuf,
     natives: Option<PathBuf>,
+    removed: bool,
+    /// Tell a sweep by another launch (or by `scram`) that these directories are in use.
+    locks: Vec<crate::running::DirLock>,
 }
 
 impl Scratch {
@@ -296,16 +346,44 @@ impl Scratch {
         util::create_private_dir_all(&base)?;
         let root = base.join(format!("{instance}-{}", util::hex_encode(&util::random_bytes::<8>()?)));
         util::create_private_dir_all(&root)?;
-        Ok(Scratch { root, natives: None })
+        let lock = crate::running::lock_dir(&root).ctx(|| format!("locking {}", root.display()))?;
+        Ok(Scratch { root, natives: None, removed: false, locks: vec![lock] })
+    }
+
+    /// A directory for natives unpacked by the launcher, next to the game root.
+    fn natives_dir(&mut self, paths: &Paths) -> Result<PathBuf> {
+        let dir = paths.cache.join(format!("natives-{}", util::hex_encode(&util::random_bytes::<8>()?)));
+        util::create_private_dir_all(&dir)?;
+        self.locks.push(crate::running::lock_dir(&dir).ctx(|| format!("locking {}", dir.display()))?);
+        self.natives = Some(dir.clone());
+        Ok(dir)
+    }
+
+    /// Delete everything the session left. The tree was written by the sandbox: it is
+    /// removed the careful way (`tree::remove`), for a bounded time, and what could not be
+    /// removed is returned, one message per directory — never passed over.
+    fn remove(&mut self) -> Vec<String> {
+        self.removed = true;
+        self.locks.clear();
+        let deadline = std::time::Instant::now() + SCRATCH_REMOVAL_TIME;
+        let mut failures = Vec::new();
+        for dir in std::iter::once(&self.root).chain(&self.natives) {
+            match crate::tree::remove(dir, Some(deadline)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => failures.push(format!("{}: {e}", dir.display())),
+            }
+        }
+        failures
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // remove_dir_all never follows symlinks; the tree was written by the sandbox.
-        let _ = fs::remove_dir_all(&self.root);
-        if let Some(n) = &self.natives {
-            let _ = fs::remove_dir_all(n);
+        // The launch is ending some other way (an error, a cancelled start): best effort,
+        // and whatever stays is swept — and reported — by a later launch.
+        if !self.removed {
+            let _ = self.remove();
         }
     }
 }
@@ -349,14 +427,28 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
     // So that `bastion-mc scram` can find and stop this launch.
     let _running = crate::running::Marker::create(paths, &inst.id)?;
-    let swept = crate::running::sweep_leftovers(paths, Duration::from_secs(60));
-    if swept > 0 {
-        say(&format!("removed {swept} leftover director(ies) of earlier launches that did not end properly"));
+    // Bounded: how much an earlier game left behind was that game's choice.
+    let swept = crate::running::sweep_leftovers(
+        paths,
+        Duration::from_secs(60),
+        Some(std::time::Instant::now() + Duration::from_secs(20)),
+    );
+    if swept.removed > 0 {
+        say(&format!("removed {} leftover director(ies) of earlier launches that did not end properly", swept.removed));
     }
-    if cfg.launcher.confine == ConfineMode::Require {
-        // Known before anything is started: whether the kernel can confine a running,
-        // multi-threaded process at all.
-        confine::supported().map_err(|why| Error::Sandbox(format!("launcher.confine = \"require\", but {why}")))?;
+    for failure in &swept.failed {
+        reporter.warn(format!(
+            "WARNING: a directory an earlier launch left in {} could not be removed ({failure}); it holds what that \
+             game wrote. The next launch tries again.",
+            paths.scratch().display()
+        ));
+    }
+    if cfg.launcher.confine == ConfineMode::Require
+        && let confine::Support::Partly(gaps) = confine::support()
+    {
+        // Known before anything is started: "require" means the whole confinement, and this
+        // kernel cannot enforce all of it.
+        return Err(Error::Sandbox(format!("launcher.confine = \"require\", but {}", gaps.join("; "))));
     }
     if opts.burner && opts.join.is_some() {
         return Err(Error::Usage("--burner has no network; it cannot be combined with --join".into()));
@@ -391,14 +483,15 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // Held until the game has exited: the compositor accepts on the game's socket only
     // while it is.
     let wayland_context = desktop.wayland_context.take();
-    let display_protection = if desktop.nested.is_some() {
-        (Shield::On, "nested compositor: a display server of the game's own, clipboard cut")
-    } else if wayland_context.is_some() {
-        (Shield::On, "Wayland security context: capture and input injection withheld")
-    } else if desktop.uses_x11 {
-        (Shield::Off, "the session's X11 display: the game can watch and type into other windows")
+    // What is said about the display is what was seen, not what was asked for: for a
+    // security context, the list of what its socket offers (`display::plan` looked); for a
+    // nested compositor, the report of its clipboard cut-off — which does not exist before
+    // the compositor runs, so that case is settled where it is started.
+    let mut display_protection: (Shield, String) = if desktop.nested.is_some() {
+        (Shield::Partial, "nested compositor: not started yet".into())
     } else {
-        (Shield::Partial, "the session's Wayland socket, without a security context")
+        let seen = desktop.wayland_isolation.as_ref().filter(|_| wayland_context.is_some());
+        shields::planned_display(seen, desktop.uses_x11)
     };
 
     // 2–3. Files present and verified.
@@ -509,11 +602,22 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 
     // Scratch game root and the instance's writable directories.
     let mut scratch = Scratch::create(paths, &inst.id)?;
+    // The settings files the launcher carries live in a directory of their own inside the
+    // instance: it is the only part of the instance the launcher can still write once it
+    // has confined itself — not `instance.toml`, not the manifest, not the pack list. (A
+    // burner session writes nothing back, and so creates and moves nothing.)
+    let persist_dir = inst.dir.join(instance::PERSIST_DIR);
+    if !opts.burner {
+        for note in instance::adopt_persisted(&inst.dir, &cfg.sandbox.persist_files)? {
+            say(&format!("settings: {note}"));
+        }
+    }
     for name in &cfg.sandbox.persist_files {
         // Into the session: re-encoded, so a file damaged on the host does not reach the
         // game's parsers either. A file that does not parse is left where it is and the
         // game starts with its defaults.
-        match persist::carry(&inst.dir, &scratch.root, name) {
+        let from = if opts.burner { instance::persisted_in(&inst.dir, name) } else { persist_dir.clone() };
+        match persist::carry(&from, &scratch.root, name) {
             Ok(Some(report)) => {
                 if let Some(note) = report.describe(name) {
                     say(&format!("settings: {note}"));
@@ -531,9 +635,26 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
     if opts.burner {
         // Copies inside the per-launch scratch root, which is deleted when the launch ends.
+        // Bounded: these directories were written by earlier game sessions.
+        let budget = burner_copy_budget(&paths.cache)?;
         let (mut files, mut bytes) = (0u64, 0u64);
         for d in &rw_dirs {
-            copy_tree(&inst.dir.join(d), &scratch.root.join(d), &mut files, &mut bytes)?;
+            let limits = crate::tree::CopyLimits {
+                max_entries: BURNER_MAX_ENTRIES,
+                max_bytes: budget.saturating_sub(bytes),
+                max_depth: 64,
+            };
+            let copied = crate::tree::copy(&inst.dir.join(d), &scratch.root.join(d), &limits).map_err(|e| match e {
+                Error::Policy(why) => Error::Policy(format!(
+                    "a burner session copies the instance's {d}/ into the cache, and that copy was stopped: {why}. \
+                     (Free space in {} allows {} MiB.)",
+                    paths.cache.display(),
+                    budget >> 20
+                )),
+                other => other,
+            })?;
+            files += copied.files;
+            bytes += copied.bytes;
         }
         say(&format!(
             "burner session: the game works on copies of {} ({files} files, {} MiB); they are deleted afterwards",
@@ -606,9 +727,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         }
         dir
     } else {
-        let host = paths.cache.join(format!("natives-{}", util::hex_encode(&util::random_bytes::<8>()?)));
-        util::create_private_dir_all(&host)?;
-        scratch.natives = Some(host.clone());
+        let host = scratch.natives_dir(paths)?;
         let mut count = 0;
         for (_stored, exclude, file) in &files.natives {
             count += extract_natives(file, exclude, &host)?;
@@ -683,6 +802,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
 
     // 7. Authenticate — last thing before the sandbox starts.
+    let mut canary_note = None;
     let session = if opts.burner {
         say("auth: burner session — nobody is signed in, no token exists");
         None
@@ -699,7 +819,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         let (session, next_refresh) = auth::authenticate(&http, client_id, &refresh, cfg.auth.allow_game_pass).await?;
         drop(refresh);
         store.save(&opts.account, &next_refresh)?;
-        drop(next_refresh); // from here on the launcher holds no refresh token
+        // From here on no refresh token is in this process's memory. The stored one is still
+        // within its reach — until step 9, where the launcher confines itself and loses the
+        // kernel keyring (and, by Landlock, the vault directory and the `age` program).
+        drop(next_refresh);
         say(&format!("auth: signed in as {} ({:?} licence)", session.profile_name, session.license));
         // Display-only memory of who this account is; failing to record it changes nothing.
         let identity =
@@ -708,7 +831,16 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         let _ = auth::activity::record(paths, &opts.account, "launch", &inst.id);
         // Did the account change behind our back? Checked before the token goes anywhere.
         match canary_verdict(paths, cfg, &opts.account, &session.profile)? {
-            Ok(note) => say(&note),
+            Ok(note) => {
+                // What is not routine is shown whatever else is silenced (`--quiet`), and —
+                // like every note of the canary — goes into the launch log once that is open.
+                if note.notable {
+                    reporter.warn(&note.text)
+                } else {
+                    say(&note.text)
+                }
+                canary_note = Some(note);
+            }
             Err(refusal) => {
                 if cfg.auth.canary_wipe {
                     store.delete(&opts.account)?;
@@ -827,6 +959,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
 
     let (log, log_path) = Log::open(paths, &inst.id, reporter)?;
+    // Said before the log existed; it belongs in the record of this launch all the same.
+    if let Some(note) = &canary_note {
+        log.record(Source::Launcher, &note.text);
+    }
     log.line(Source::Launcher, &format!("jvm argv: {}", argv.join(" ")));
     log.line(
         Source::Launcher,
@@ -843,7 +979,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             say("limits: none (sandbox.cgroup = \"off\"): the game can use all memory and process slots you can");
             None
         }
-        mode => match cgroup::preflight().await {
+        mode => match cgroup::preflight(cfg.sandbox.cpu_quota_percent.is_some()).await {
             Ok(_) => {
                 let memory_max = cfg
                     .sandbox
@@ -855,7 +991,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                     None => String::new(),
                 };
                 say(&format!(
-                    "limits: {memory_max} MiB of memory, no swap, {} tasks{cpu} (systemd scope)",
+                    "limits: {memory_max} MiB of memory, no swap, {} tasks{cpu} (systemd scope; a probe scope held \
+                     its limits, the game's own are read back once it runs)",
                     cfg.sandbox.tasks_max
                 ));
                 Some(
@@ -879,6 +1016,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // A display server of the game's own, where the session's has no isolation (X11). It
     // is started only now — everything that could still fail without it has been done —
     // and the game is given its inner display, which did not exist until this moment.
+    let mut nested_limits = None;
     let mut nested = match desktop.nested.take() {
         Some(mut plan) => {
             say("starting the nested compositor…");
@@ -889,20 +1027,38 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                     cgroup::Limits::new(&format!("{}-display", inst.id), NESTED_MEMORY_MAX_MB, NESTED_TASKS_MAX)?
                         .with_cpu_quota(Some(NESTED_CPU_QUOTA_PERCENT)),
                 );
+                nested_limits = plan.limits.clone();
             }
             let sink = log.clone();
             let session =
-                nested::start(plan, &opts.program, Arc::new(move |line: String| sink.line(Source::Launcher, &line)))
-                    .await?;
+                nested::start(plan, &opts.program, Arc::new(move |line: String| sink.display_line(&line))).await?;
             session.attach(&mut mounts, &mut landlock.unix_sockets, &mut env);
             log.line(
                 Source::Launcher,
                 &format!("display: the game's display is :{} inside the nested compositor", session.display),
             );
+            // The clipboard: known from the compositor that is now running, or not claimed.
+            match &session.clipboard {
+                nested::ClipboardCut::Active => log.line(
+                    Source::Launcher,
+                    "display: the nested compositor's clipboard bridge is cut — the cut-off reported from inside the \
+                     compositor that the bridge's calls land in it",
+                ),
+                nested::ClipboardCut::Unconfirmed(why) => {
+                    let warning = format!(
+                        "display: WARNING: the nested compositor's clipboard bridge is NOT known to be cut — {why}. \
+                         The game may be able to read what you copy in other windows, and to set the clipboard."
+                    );
+                    log.record(Source::Launcher, &warning);
+                    reporter.warn(&warning);
+                }
+            }
+            display_protection = shields::nested_display(&session.clipboard);
             Some(session)
         }
         None => None,
     };
+    let game_limits = limits.clone();
     let spec = SandboxSpec {
         mounts,
         network,
@@ -921,61 +1077,45 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         },
     };
 
+    // What the game will be told about the network is fixed before the game exists: SRV
+    // records are looked up now, once. Afterwards the set of ports the relay connects to is
+    // closed, and the launcher can hold itself to it.
+    let srv = match &policy {
+        Some(policy) => Some(policy.resolve_srv().await),
+        None => None,
+    };
+    let outbound_ports = match (&policy, &srv) {
+        (Some(policy), Some(srv)) => policy.outbound_ports(srv),
+        _ => Vec::new(),
+    };
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .ctx(|| "installing SIGINT handler")?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .ctx(|| "installing SIGTERM handler")?;
+    let credential_protection: (Shield, &str) = if session.is_none() {
+        (Shield::On, "no account and no token in this session")
+    } else if broker_on {
+        (Shield::On, "broker: the game holds a placeholder, the token stays in the launcher")
+    } else if token_in_jvm {
+        (Shield::Partial, "the session token is inside the game process")
+    } else {
+        (Shield::On, "offline: the token is not given to the game")
+    };
+
     // 8. Start; deliver the frame; forget every secret.
     // From here a stop request means "shut the game down cleanly", not "abandon the launch".
     opts.stop.supervise();
     reporter.phase(Phase::Starting);
-    {
-        let item = |aspect: &str, (shield, detail): (Shield, &str)| Protection {
-            aspect: aspect.into(),
-            shield,
-            detail: detail.into(),
-        };
-        let confined = cfg.launcher.confine != ConfineMode::Off && confine::supported().is_ok();
-        reporter.emit(Event::Protection {
-            items: vec![
-                item("display", display_protection),
-                item(
-                    "network",
-                    match mode {
-                        NetworkMode::Filtered => (Shield::On, "filtered: only allowlisted hosts, through the launcher"),
-                        NetworkMode::None => (Shield::On, "offline: no network at all"),
-                        NetworkMode::Open => (Shield::Off, "open: the host's network, no egress control"),
-                    },
-                ),
-                item(
-                    "credential",
-                    if session.is_none() {
-                        (Shield::On, "no account and no token in this session")
-                    } else if broker_on {
-                        (Shield::On, "broker: the game holds a placeholder, the token stays in the launcher")
-                    } else if token_in_jvm {
-                        (Shield::Partial, "the session token is inside the game process")
-                    } else {
-                        (Shield::On, "offline: the token is not given to the game")
-                    },
-                ),
-                item(
-                    "limits",
-                    if spec.limits.is_some() {
-                        (Shield::On, "memory, swap and task limits (systemd scope)")
-                    } else {
-                        (Shield::Off, "no resource limits")
-                    },
-                ),
-                item(
-                    "launcher",
-                    if confined {
-                        (Shield::On, "confines itself while the game runs")
-                    } else {
-                        (Shield::Partial, "not self-confined")
-                    },
-                ),
-            ],
-        });
-    }
     let frame = build_frame(&main_class, &game_templates, &vars)?;
     drop(vars);
+    // From the moment the game exists until the launcher has confined itself, nothing the
+    // game can influence is read: its own output and its network sockets are picked up in
+    // step 10, and the output of its display server — which the game talks to — is held
+    // back here.
+    let display_output_held = match &nested {
+        Some(session) => Some(session.hold_output().await),
+        None => None,
+    };
     let mut running = sandbox::spawn(spec, &opts.program)?;
     let delivered = running.channel.write_all(frame.expose()).and_then(|_| running.channel.shutdown(Shutdown::Write));
     drop(frame); // wiped
@@ -995,25 +1135,154 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // The game's Wayland socket needs its name only until bubblewrap has bound it, which it
     // has once the program inside exists. (If that cannot be established, the name stays
     // until the launcher exits.)
-    if let Some(context) = &wayland_context
-        && running.payload_pid().await.is_some()
-    {
+    let payload = running.payload_pid().await;
+    if let (Some(context), Some(_)) = (&wayland_context, payload) {
         context.unlink();
+    }
+
+    // 9. Not assumed: looked at. First the resource limits, read back from the kernel for the
+    // program in the sandbox (and for its display server); a scope that was created is not
+    // yet a limit that is in force.
+    let mut limits_protection = shields::limits(shields::Limits::NotAsked);
+    if let Some(limits) = &game_limits {
+        let mut checks = vec![("the game", payload.map(|pid| pid as u32).or(running.child.id()), limits)];
+        if let (Some(session), Some(limits)) = (&nested, &nested_limits) {
+            checks.push(("the game's display server", session.process_id(), limits));
+        }
+        let mut problems = Vec::new();
+        for (what, pid, limits) in checks {
+            let verified = match pid {
+                Some(pid) => {
+                    cgroup::verify_started(pid, limits, Duration::from_secs(3)).await.map_err(|e| e.to_string())
+                }
+                None => Err("its process could not be identified".to_string()),
+            };
+            if let Err(why) = verified {
+                problems.push(format!("{what}: {why}"));
+            }
+        }
+        if problems.is_empty() {
+            log.line(
+                Source::Launcher,
+                "limits: in force — memory.max, memory.swap.max, pids.max (and cpu.max, where a quota is set) of \
+                 the sandbox's control group were read back from the kernel",
+            );
+            limits_protection = shields::limits(shields::Limits::InForce);
+        } else if matches!(running.child.try_wait(), Ok(Some(_))) {
+            // Nothing to read back from: the sandbox is already over (a game that failed to
+            // start). That is reported as what it is, below — not as limits that failed.
+            log.line(Source::Launcher, "limits: the sandbox ended before its limits could be read back");
+            limits_protection = shields::limits(shields::Limits::SandboxEnded);
+        } else {
+            let why = problems.join("; ");
+            if cfg.sandbox.cgroup == CgroupMode::Require {
+                let _ = running.stop(Duration::from_secs(5)).await;
+                return Err(Error::Sandbox(format!(
+                    "sandbox.cgroup = \"require\", but the limits that were asked for are not in force: {why}"
+                )));
+            }
+            let warning = format!(
+                "limits: WARNING: asked for, but NOT in force — {why}. The game can use all the memory and process \
+                 slots that you can."
+            );
+            log.record(Source::Launcher, &warning);
+            reporter.warn(&warning);
+            limits_protection = shields::limits(shields::Limits::NotInForce);
+        }
+    }
+
+    // Then this process: from here on it is a supervisor and a relay. Whatever else a user
+    // can do — read the home directory, run programs, read the kernel keyring, connect
+    // anywhere — it gives up, on every thread, so that a bug in handling what the game sends
+    // cannot be turned into that. This happens *before* anything the game sends is read.
+    let launcher_protection: (Shield, String) = match cfg.launcher.confine {
+        ConfineMode::Off => {
+            log.line(Source::Launcher, "launcher: not confined (launcher.confine = \"off\")");
+            shields::launcher_off()
+        }
+        mode => {
+            let mut keep = Confinement::supervisor();
+            // Settings carried back at exit: their directory, and nothing else of the
+            // instance — not its configuration, its manifest or its pack list. A burner
+            // session carries nothing back and keeps no part of the instance writable.
+            if !opts.burner {
+                keep.write.push(persist_dir.clone());
+            }
+            keep.write.push(paths.cache.clone()); // scratch and unpacked natives, removed at exit
+            keep.tcp_connect.extend(outbound_ports);
+            // What the broker forwards to Mojang goes through the proxy, if one is set.
+            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
+            let demand = if mode == ConfineMode::Require { confine::Demand::Whole } else { confine::Demand::Possible };
+            let outcome = match confine::apply(&keep, demand) {
+                Err(e) if mode == ConfineMode::Require => {
+                    let _ = running.stop(Duration::from_secs(5)).await;
+                    return Err(e);
+                }
+                outcome => outcome.map_err(|e| e.to_string()),
+            };
+            match &outcome {
+                Ok(applied) if applied.is_whole() => log.line(
+                    Source::Launcher,
+                    &format!(
+                        "launcher: confined itself, on all threads — Landlock: no program execution, files only under \
+                         {}, TCP only to port(s) {}; system-call filter: no kernel keyring, no new namespaces",
+                        if opts.burner {
+                            "the cache (nothing of the instance)"
+                        } else {
+                            "the instance's persist/ and the cache"
+                        },
+                        keep.tcp_connect.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+                    ),
+                ),
+                Ok(applied) => {
+                    let warning =
+                        format!("launcher: WARNING: only PARTLY confined — not in force: {}", applied.gaps.join("; "));
+                    log.record(Source::Launcher, &warning);
+                    reporter.warn(&warning);
+                }
+                Err(e) => {
+                    let warning = format!("launcher: WARNING: NOT confined — {e}");
+                    log.record(Source::Launcher, &warning);
+                    reporter.warn(&warning);
+                }
+            }
+            shields::launcher(&outcome)
+        }
+    };
+
+    // Which protections this launch runs with — said now, when each of them is a fact.
+    {
+        let item = |aspect: &str, shield: Shield, detail: &str| Protection {
+            aspect: aspect.into(),
+            shield,
+            detail: detail.into(),
+        };
+        let network: (Shield, &str) = match mode {
+            NetworkMode::Filtered => (Shield::On, "filtered: only allowlisted hosts, through the launcher"),
+            NetworkMode::None => (Shield::On, "offline: no network at all"),
+            NetworkMode::Open => (Shield::Off, "open: the host's network, no egress control"),
+        };
+        reporter.emit(Event::Protection {
+            items: vec![
+                item("display", display_protection.0, &display_protection.1),
+                item("network", network.0, network.1),
+                item("credential", credential_protection.0, credential_protection.1),
+                item("limits", limits_protection.0, &limits_protection.1),
+                item("launcher", launcher_protection.0, &launcher_protection.1),
+            ],
+        });
     }
     say(&format!("sandbox started; log: {}", log_path.display()));
     reporter.phase(Phase::Running);
 
-    // 9. Supervise.
-    let mut outbound_ports = Vec::new();
+    // 10. Supervise. Only now is anything the game sends looked at: its display server's
+    // output, its network sockets, its own output.
+    drop(display_output_held);
     let egress = match policy {
         Some(policy) => {
             let spec = policy.netns_spec();
             let sink = log.clone();
             let logger: egress::Logger = Arc::new(move |line: String| sink.line(Source::Egress, &line));
-            // SRV records are looked up now, once: afterwards the set of ports the relay
-            // connects to is closed, and the launcher can hold itself to it.
-            let srv = policy.resolve_srv().await;
-            outbound_ports = policy.outbound_ports(&srv);
             let broker = match authority {
                 Some(authority) => {
                     let broker =
@@ -1023,46 +1292,13 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 }
                 None => None,
             };
+            let srv = srv.expect("looked up with the policy");
             Some(egress::start(policy, &spec, std::mem::take(&mut running.egress), http.clone(), logger, srv, broker)?)
         }
         None => None,
     };
     let out = tokio::spawn(relay_output(running.child.stdout.take().expect("piped"), Source::Game, log.clone()));
     let err = tokio::spawn(relay_output(running.child.stderr.take().expect("piped"), Source::Game, log.clone()));
-
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .ctx(|| "installing SIGINT handler")?;
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .ctx(|| "installing SIGTERM handler")?;
-    // From here on this process is a supervisor and a relay. Whatever else a user can do —
-    // read the home directory, run programs, connect anywhere — it gives up, on every
-    // thread, so that a bug in handling the game's traffic cannot be turned into that.
-    match cfg.launcher.confine {
-        ConfineMode::Off => log.line(Source::Launcher, "launcher: not confined (launcher.confine = \"off\")"),
-        mode => {
-            let mut keep = Confinement::supervisor();
-            keep.write.push(inst.dir.clone()); // settings carried back at exit
-            keep.write.push(paths.cache.clone()); // scratch and unpacked natives, removed at exit
-            keep.tcp_connect.extend(outbound_ports);
-            // What the broker forwards to Mojang goes through the proxy, if one is set.
-            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
-            match confine::apply(&keep) {
-                Ok(()) => log.line(
-                    Source::Launcher,
-                    &format!(
-                        "launcher: confined itself (Landlock, all threads): no program execution, files only under \
-                         the instance and the cache, TCP only to port(s) {}",
-                        keep.tcp_connect.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
-                    ),
-                ),
-                Err(e) if mode == ConfineMode::Require => {
-                    let _ = running.stop(Duration::from_secs(5)).await;
-                    return Err(e);
-                }
-                Err(e) => log.line(Source::Launcher, &format!("launcher: not confined — {e}")),
-            }
-        }
-    }
 
     let mut interrupted = false;
     let status = tokio::select! {
@@ -1128,18 +1364,12 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         }
     }
 
-    // 10. Settings the launcher carries back on the game's behalf. (Not from a burner
-    // session: nothing it wrote is kept.)
-    if opts.burner {
-        log.line(
-            Source::Launcher,
-            "burner session: worlds, settings and everything else the game wrote are deleted now",
-        );
-    }
+    // 11. Settings the launcher carries back on the game's behalf, into the one directory of
+    // the instance it can still write. (Not from a burner session: nothing it wrote is kept.)
     for name in cfg.sandbox.persist_files.iter().filter(|_| !opts.burner) {
         // Back out: what the game left is untrusted. It is parsed and written out again;
         // what does not parse stays in the scratch directory and is deleted with it.
-        match persist::carry(&scratch.root, &inst.dir, name) {
+        match persist::carry(&scratch.root, &persist_dir, name) {
             Ok(Some(report)) => {
                 if let Some(note) = report.describe(name) {
                     log.line(Source::Launcher, &format!("settings: {note}"));
@@ -1148,6 +1378,28 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             Ok(None) => {}
             Err(e) => log.line(Source::Launcher, &format!("not persisting {name}: {e}")),
         }
+    }
+    // What the game wrote into its root is deleted — and that is only said if it is true. The
+    // game shapes that tree (it may leave directories without permission bits, or more files
+    // than can be deleted in the time allowed); what could not be removed is named.
+    let left_behind = scratch.remove();
+    if left_behind.is_empty() {
+        if opts.burner {
+            log.line(
+                Source::Launcher,
+                "burner session: worlds, settings and everything else the game wrote have been deleted",
+            );
+        }
+    } else {
+        let warning = format!(
+            "{}WARNING: NOT everything the game wrote could be deleted — {}. What is left holds only what that game \
+             wrote{}; the next launch tries again and says whether it succeeded.",
+            if opts.burner { "burner session: " } else { "" },
+            left_behind.join("; "),
+            if opts.burner { " (including its copies of the instance's worlds)" } else { "" }
+        );
+        log.record(Source::Launcher, &warning);
+        reporter.warn(&warning);
     }
     drop(scratch);
 
@@ -1172,43 +1424,213 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     Ok(code)
 }
 
+/// What the `Protection` event says about each thing this launch looked at.
+///
+/// The event is what a front end draws its shields from, so the rule is in one place and
+/// has a test: a shield is `On` only for what was seen to be whole. Asked for, set up,
+/// started — none of that is "on" by itself.
+mod shields {
+    use super::{Shield, confine, nested};
+
+    /// The display, where nothing has to be started for it. `context_seen`: with a Wayland
+    /// security context, what the launcher saw when it listed the game's socket (`Ok`: none
+    /// of the known privileged interfaces; `Err`: one of them, or no listing).
+    pub fn planned_display(
+        context_seen: Option<&std::result::Result<String, String>>,
+        uses_x11: bool,
+    ) -> (Shield, String) {
+        match context_seen {
+            Some(Ok(seen)) => (Shield::On, format!("Wayland security context: {seen}")),
+            Some(Err(problem)) => (
+                Shield::Partial,
+                format!("Wayland security context in place, but not shown to withhold anything: {problem}"),
+            ),
+            None if uses_x11 => {
+                (Shield::Off, "the session's X11 display: the game can watch and type into other windows".into())
+            }
+            None => (Shield::Partial, "the session's Wayland socket, without a security context".into()),
+        }
+    }
+
+    /// The display behind a nested compositor that is running.
+    pub fn nested_display(clipboard: &nested::ClipboardCut) -> (Shield, String) {
+        match clipboard {
+            nested::ClipboardCut::Active => (
+                Shield::On,
+                "nested compositor: a display server of the game's own; its clipboard bridge is cut (reported from \
+                 inside the compositor)"
+                    .into(),
+            ),
+            nested::ClipboardCut::Unconfirmed(_) => (
+                Shield::Partial,
+                "nested compositor: a display server of the game's own, but its clipboard bridge is not known to be \
+                 cut"
+                .into(),
+            ),
+        }
+    }
+
+    /// What was found out about the resource limits.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Limits {
+        /// None were asked for, or none could be had.
+        NotAsked,
+        /// Read back from the kernel, for the game and for its display server.
+        InForce,
+        /// The sandbox was over before anything could be read back.
+        SandboxEnded,
+        /// Asked for, and the kernel does not hold them.
+        NotInForce,
+    }
+
+    pub fn limits(seen: Limits) -> (Shield, String) {
+        match seen {
+            Limits::NotAsked => (Shield::Off, "no resource limits".into()),
+            Limits::InForce => {
+                (Shield::On, "memory, swap and task limits, read back from the kernel (systemd scope)".into())
+            }
+            Limits::SandboxEnded => (Shield::Off, "the sandbox ended before its limits could be read back".into()),
+            Limits::NotInForce => (Shield::Off, "resource limits were asked for but are not in force".into()),
+        }
+    }
+
+    /// The launcher's own confinement, for what confining returned.
+    pub fn launcher(outcome: &std::result::Result<confine::Applied, String>) -> (Shield, String) {
+        match outcome {
+            Ok(applied) if applied.is_whole() => {
+                (Shield::On, "confined itself: Landlock and a system-call filter on all threads".into())
+            }
+            Ok(applied) => (Shield::Partial, format!("partly confined; not in force: {}", applied.gaps.join("; "))),
+            Err(_) => (Shield::Off, "not self-confined: confining failed".into()),
+        }
+    }
+
+    pub fn launcher_off() -> (Shield, String) {
+        (Shield::Off, "not self-confined (launcher.confine = \"off\")".into())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The finding behind this module: "confined" was announced for a confinement that
+        /// had not happened, or had happened in part. Every shield is `On` for exactly one
+        /// outcome — the one in which the launcher saw the whole of what the shield stands
+        /// for — and what is missing is in the text.
+        #[test]
+        fn a_shield_is_on_only_for_what_was_seen_to_be_whole() {
+            // The launcher's own confinement.
+            let whole = Ok(confine::Applied::default());
+            assert_eq!(launcher(&whole).0, Shield::On);
+            let gap = "this kernel's Landlock (ABI 8) cannot restrict connections to pathname UNIX sockets";
+            let partly = Ok(confine::Applied { gaps: vec![gap.to_string()] });
+            let (shield, detail) = launcher(&partly);
+            assert_eq!(shield, Shield::Partial, "a confinement with a gap is not shown as on");
+            assert!(detail.contains(gap), "and the gap is named: {detail}");
+            assert_eq!(launcher(&Err("restrict_self: EPERM".into())).0, Shield::Off);
+            assert_eq!(launcher_off().0, Shield::Off);
+
+            // Resource limits: only what was read back from the kernel.
+            for (seen, shield) in [
+                (Limits::InForce, Shield::On),
+                (Limits::NotInForce, Shield::Off),
+                (Limits::SandboxEnded, Shield::Off),
+                (Limits::NotAsked, Shield::Off),
+            ] {
+                assert_eq!(limits(seen).0, shield, "{seen:?}");
+            }
+
+            // The display. A security context is "on" when its socket was listed and found
+            // free of privileged interfaces; one that offers them, or could not be listed,
+            // is not — and neither is a context that was planned but is not in place.
+            let listed =
+                Ok("37 interface(s) offered on the game's socket, none of the 16 known privileged ones".into());
+            assert_eq!(planned_display(Some(&listed), false).0, Shield::On);
+            let leaking = Err("the compositor still offers the game's socket: zwlr_screencopy_manager_v1".to_string());
+            let (shield, detail) = planned_display(Some(&leaking), false);
+            assert_eq!(shield, Shield::Partial);
+            assert!(detail.contains("zwlr_screencopy_manager_v1"), "{detail}");
+            assert_eq!(planned_display(None, false).0, Shield::Partial, "the session's Wayland socket");
+            assert_eq!(planned_display(None, true).0, Shield::Off, "the session's X11 display");
+
+            // A nested compositor: only the cut-off's own report counts.
+            assert_eq!(nested_display(&nested::ClipboardCut::Active).0, Shield::On);
+            let unconfirmed = nested::ClipboardCut::Unconfirmed("the cut-off library did not report".into());
+            let (shield, detail) = nested_display(&unconfirmed);
+            assert_eq!(shield, Shield::Partial);
+            assert!(detail.contains("not known to be cut"), "{detail}");
+        }
+    }
+}
+
+/// What the canary has to say about a profile that may be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanaryNote {
+    pub text: String,
+    /// Not routine — a difference that the configuration only warns about, a damaged record,
+    /// or a first pinning (which is also what a deleted record looks like). Every caller shows
+    /// such a note whatever else is silenced; none may drop it.
+    pub notable: bool,
+}
+
+impl CanaryNote {
+    fn routine(text: impl Into<String>) -> Self {
+        CanaryNote { text: text.into(), notable: false }
+    }
+    fn notable(text: impl Into<String>) -> Self {
+        CanaryNote { text: text.into(), notable: true }
+    }
+}
+
 /// Compare the profile just returned by Mojang with the pinned one.
 ///
-/// The outer `Result` is a failure to check at all. Inside: a note for the log, or the
-/// refusal that stops the launch.
+/// The outer `Result` is a failure to check at all. Inside: a note that the caller must
+/// show (and record, where it keeps a log), or the refusal that stops the command.
+///
+/// Nothing is pinned here except a first sight, and capes gained by an unchanged profile. In
+/// `warn` mode a difference and a damaged record leave the pin exactly as it was.
 pub fn canary_verdict(
     paths: &Paths,
     cfg: &Config,
     account: &str,
     profile: &auth::minecraft::Profile,
-) -> Result<std::result::Result<String, Error>> {
+) -> Result<std::result::Result<CanaryNote, Error>> {
     use crate::{auth::canary, config::CanaryMode};
     if cfg.auth.canary == CanaryMode::Off {
-        return Ok(Ok("canary: off (auth.canary = \"off\")".into()));
+        return Ok(Ok(CanaryNote::routine("canary: off (auth.canary = \"off\")")));
     }
     let checked = match canary::check(paths, account, profile) {
         Ok(checked) => checked,
         Err(damaged) if cfg.auth.canary == CanaryMode::Enforce => return Ok(Err(damaged)),
-        Err(damaged) => return Ok(Ok(format!("canary: WARNING: {damaged}"))),
+        Err(damaged) => {
+            return Ok(Ok(CanaryNote::notable(format!(
+                "canary: WARNING: {damaged} (auth.canary = \"warn\", so this continues; the damaged record is left \
+                 as it is)"
+            ))));
+        }
     };
     Ok(match checked {
         canary::Check::First => {
             canary::accept(paths, account, profile)?;
-            Ok(format!("canary: pinned this account's profile for the first time (player {})", profile.name))
+            Ok(CanaryNote::notable(format!(
+                "canary: pinned this account's profile for the first time (player {}). If this account was pinned \
+                 on this machine before, its record has been removed.",
+                profile.name
+            )))
         }
         canary::Check::Unchanged => {
             // Records capes gained since; a no-op otherwise.
             canary::accept(paths, account, profile)?;
-            Ok("canary: profile unchanged since it was pinned (name, skin, cape)".into())
+            Ok(CanaryNote::routine("canary: profile unchanged since it was pinned (name, skin, cape)"))
         }
         canary::Check::Changed(differences) if cfg.auth.canary == CanaryMode::Enforce => {
             Err(canary::refusal(account, &differences))
         }
-        canary::Check::Changed(differences) => Ok(format!(
-            "canary: WARNING: the profile changed outside this launcher ({}); auth.canary = \"warn\", so the \
-             launch continues. `bastion-mc canary accept` pins the new state.",
+        canary::Check::Changed(differences) => Ok(CanaryNote::notable(format!(
+            "canary: WARNING: the profile changed outside this launcher ({}); auth.canary = \"warn\", so this \
+             continues and the old pin is kept. `bastion-mc canary accept` pins the new state.",
             differences.join("; ")
-        )),
+        ))),
     })
 }
 
@@ -1250,9 +1672,9 @@ mod canary_tests {
         assert_eq!(cfg.auth.canary, CanaryMode::Enforce, "enforcing is the default");
 
         let first = canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().unwrap();
-        assert!(first.contains("first time"), "{first}");
+        assert!(first.text.contains("first time") && first.notable, "a first pinning is never silent: {first:?}");
         let same = canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().unwrap();
-        assert!(same.contains("unchanged"), "{same}");
+        assert!(same.text.contains("unchanged") && !same.notable, "{same:?}");
 
         let refusal = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap_err();
         assert!(matches!(refusal, Error::Policy(_)));
@@ -1263,7 +1685,8 @@ mod canary_tests {
 
         cfg.auth.canary = CanaryMode::Warn;
         let warned = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap();
-        assert!(warned.contains("WARNING") && warned.contains("Notch → Stolen"), "{warned}");
+        assert!(warned.text.contains("WARNING") && warned.text.contains("Notch → Stolen"), "{warned:?}");
+        assert!(warned.notable, "a warning is shown whatever else is silenced");
         cfg.auth.canary = CanaryMode::Enforce;
         assert!(
             canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().is_err(),
@@ -1271,12 +1694,71 @@ mod canary_tests {
         );
 
         cfg.auth.canary = CanaryMode::Off;
-        assert!(canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap().contains("off"));
+        let off = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap();
+        assert!(off.text.contains("off") && !off.notable);
 
-        // A damaged record stops an enforcing launch too.
+        // A damaged record stops an enforcing launch too…
         cfg.auth.canary = CanaryMode::Enforce;
-        std::fs::write(paths.canaries().join("default.json"), "{}").unwrap();
+        let pin = paths.canaries().join("default.json");
+        std::fs::write(&pin, "{}").unwrap();
         assert!(canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().is_err());
+        // …and in warn mode it is said and left as it is: a warning replaces no record.
+        cfg.auth.canary = CanaryMode::Warn;
+        let damaged = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap();
+        assert!(damaged.notable && damaged.text.contains("damaged"), "{damaged:?}");
+        assert_eq!(std::fs::read(&pin).unwrap(), b"{}", "the damaged record was replaced by a warning");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// What the launch says about deleting the game root rests on what `Scratch::remove`
+    /// returns: nothing when the tree is gone — also one the game left without permission
+    /// bits — and the name of every directory that is still there otherwise.
+    #[test]
+    fn a_game_root_that_could_not_be_deleted_is_named_and_one_without_permission_bits_is_deleted() {
+        let root = std::env::temp_dir()
+            .join(format!("bastion-scratch-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        let paths = Paths {
+            config: root.join("config"),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            state: root.join("state"),
+            runtime: None,
+        };
+        paths.ensure().unwrap();
+        let chmod = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+
+        // What a game can leave: a directory it took every permission bit from.
+        let mut scratch = Scratch::create(&paths, "vanilla").unwrap();
+        let natives = scratch.natives_dir(&paths).unwrap();
+        std::fs::create_dir_all(scratch.root.join("saves/copy-of-the-world")).unwrap();
+        std::fs::write(scratch.root.join("saves/copy-of-the-world/level.dat"), b"world").unwrap();
+        chmod(&scratch.root.join("saves"), 0o000);
+        let game_root = scratch.root.clone();
+        assert!(scratch.remove().is_empty(), "permission bits do not keep the tree");
+        assert!(!game_root.exists() && !natives.exists());
+        drop(scratch);
+
+        // What cannot be deleted (here: its parent directory does not allow it) is named.
+        let mut scratch = Scratch::create(&paths, "vanilla").unwrap();
+        std::fs::write(scratch.root.join("options.txt"), b"fov:70\n").unwrap();
+        let game_root = scratch.root.clone();
+        chmod(&paths.scratch(), 0o500);
+        let left = scratch.remove();
+        chmod(&paths.scratch(), 0o700);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].starts_with(&game_root.display().to_string()), "the directory is named: {left:?}");
+        assert!(game_root.exists(), "and it is in fact still there");
+        // Trying again (as the next launch's sweep does) finishes the job.
+        assert!(scratch.remove().is_empty());
+        assert!(!game_root.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -1284,6 +1766,56 @@ mod canary_tests {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    /// A game that prints until its share of the log is used up does not keep what is said
+    /// afterwards — by the relay, by the display server, by the launcher — out of the file.
+    #[test]
+    fn a_source_that_fills_its_share_of_the_log_does_not_silence_the_others() {
+        let dir = std::env::temp_dir()
+            .join(format!("bastion-logshare-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("launch.log");
+        let reporter = Reporter::capture();
+        // Shares in the order of `Share`: launcher, relay, display server, game.
+        let log = Log::over(File::create(&path).unwrap(), [400, 300, 300, 1000], &reporter);
+
+        log.line(Source::Launcher, "sandbox started");
+        for i in 0..200 {
+            log.line(Source::Game, &format!("flood line {i:03} ................................"));
+        }
+        // After the flood: everything a reader of the log needs to know about what the game did.
+        log.line(Source::Egress, "egress: DENY  name lookup \"exfil.example\" (not allowlisted)");
+        log.line(
+            Source::Egress,
+            "broker: api.minecraftservices.com POST /minecraft/profile/skins → 403 here [SECURITY]",
+        );
+        log.display_line("display server: (EE) something the game provoked");
+        log.line(Source::Launcher, "SECURITY: the game process was killed by the seccomp tripwire (SIGSYS).");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let count = |needle: &str| text.matches(needle).count();
+        assert!((10..30).contains(&count("[game] flood line")), "the game's share is what it could fill: {text}");
+        assert_eq!(count("log size limit for game output reached"), 1, "said once");
+        assert_eq!(count("[egress] egress: DENY"), 1, "{text}");
+        assert_eq!(count("[SECURITY]"), 1, "{text}");
+        assert_eq!(count("[launcher] display server: (EE)"), 1, "{text}");
+        assert_eq!(count("killed by the seccomp tripwire"), 1, "the launcher's own share is out of the game's reach");
+        assert!(text.len() < 2400, "the file stays within the sum of the shares (plus the notices): {}", text.len());
+
+        // The relay's share is its own too: a flood of refusals ends there, and the launcher's
+        // summary — which counts them — is still written.
+        for i in 0..50 {
+            log.line(Source::Egress, &format!("egress: DENY  name lookup \"n{i}.example\" (not allowlisted)"));
+        }
+        log.line(Source::Launcher, "egress summary: 0 connection(s) relayed, 0 denied, 51 name lookup(s) refused");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("log size limit for relay output reached").count(), 1);
+        assert!(text.contains("egress summary: 0 connection(s) relayed, 0 denied, 51 name lookup(s) refused"));
+        // Everything was still shown live, whatever the file holds.
+        let live = reporter.captured().iter().filter(|e| matches!(e, Event::Log { .. })).count();
+        assert_eq!(live, 1 + 200 + 4 + 50 + 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn old_launch_logs_are_pruned_and_nothing_else_is_touched() {
@@ -1320,37 +1852,5 @@ mod log_tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 9, "idempotent");
         prune_logs(std::path::Path::new("/nonexistent/bastion"), 3);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod burner_tests {
-    use super::*;
-
-    #[test]
-    fn a_burner_copy_takes_files_and_directories_and_nothing_else() {
-        let root = std::env::temp_dir()
-            .join(format!("bastion-burn-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
-        let (src, dst) = (root.join("saves"), root.join("copy"));
-        std::fs::create_dir_all(src.join("World/region")).unwrap();
-        std::fs::write(src.join("World/level.dat"), b"level").unwrap();
-        std::fs::write(src.join("World/region/r.0.0.mca"), vec![7u8; 5000]).unwrap();
-        std::fs::write(root.join("outside-secret"), b"SECRET").unwrap();
-        std::os::unix::fs::symlink(root.join("outside-secret"), src.join("World/link-to-outside")).unwrap();
-        std::os::unix::fs::symlink("/etc", src.join("etc-link")).unwrap();
-        nix::unistd::mkfifo(&src.join("World/fifo"), nix::sys::stat::Mode::S_IRWXU).unwrap();
-
-        let (mut files, mut bytes) = (0, 0);
-        copy_tree(&src, &dst, &mut files, &mut bytes).unwrap();
-        assert_eq!((files, bytes), (2, 5005));
-        assert_eq!(std::fs::read(dst.join("World/level.dat")).unwrap(), b"level");
-        assert_eq!(std::fs::read(dst.join("World/region/r.0.0.mca")).unwrap().len(), 5000);
-        for skipped in ["World/link-to-outside", "etc-link", "World/fifo"] {
-            assert!(std::fs::symlink_metadata(dst.join(skipped)).is_err(), "{skipped} was copied");
-        }
-        // The copy is independent of the original.
-        std::fs::write(dst.join("World/level.dat"), b"changed by the game").unwrap();
-        assert_eq!(std::fs::read(src.join("World/level.dat")).unwrap(), b"level");
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

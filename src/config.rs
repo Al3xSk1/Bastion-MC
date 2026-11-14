@@ -99,8 +99,26 @@ impl Config {
                      profile; resource and shader packs are added with `bastion-mc pack import`."
                 )));
             }
+            // Where the launcher keeps the settings files it carries (`persist_files`): what
+            // lies there has been through a sanitiser, which a game writing into the
+            // directory itself would bypass.
+            if name == crate::instance::PERSIST_DIR {
+                return Err(Error::Config(format!(
+                    "sandbox.extra_rw_dirs: {name:?} is the launcher's own directory for the settings files it \
+                     carries (persist_files); the game cannot be given it."
+                )));
+            }
         }
         for name in &self.sandbox.persist_files {
+            // Settings files are carried to and from the game, and moved into `persist/` for
+            // an instance from before that directory existed: never the files that say what
+            // the instance is (its manifest, its pack list).
+            if crate::instance::OWN_FILES.contains(&name.as_str()) {
+                return Err(Error::Config(format!(
+                    "sandbox.persist_files: {name:?} is the launcher's own file in an instance, not a settings file \
+                     of the game."
+                )));
+            }
             // Nothing crosses from the game to the instance as raw bytes: a persisted file
             // is parsed and written out again, so its format has to be one the launcher knows.
             if crate::persist::kind_of(name).is_none() {
@@ -246,6 +264,8 @@ pub enum TokenStore {
 #[serde(default, deny_unknown_fields)]
 pub struct AgeConfig {
     pub program: PathBuf,
+    /// To whom vault files are encrypted. Not used — nor are the per-account ones below —
+    /// when the root-owned `/etc/bastion-mc/age-recipients` exists (see `auth::store`).
     pub recipients_file: Option<PathBuf>,
     pub identity_file: Option<PathBuf>,
     /// Keys of their own for single accounts (`[auth.age.accounts.<label>]`): that
@@ -693,8 +713,9 @@ impl Default for DownloadsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LauncherConfig {
-    /// Confine the launcher process itself (Landlock, all threads) once the game is running:
-    /// "auto" (when the kernel can), "require", "off".
+    /// Confine the launcher process itself (Landlock and a system-call filter, on all
+    /// threads) once the game is running: "auto" (as far as the kernel can; what is missing
+    /// is reported), "require" (the whole of it, or no launch), "off".
     pub confine: ConfineMode,
 }
 
@@ -835,6 +856,35 @@ mod tests {
         assert!(toml::from_str::<Config>("[sandbox]\nalow_x11 = true\n").is_err());
         assert!(toml::from_str::<Config>("[sandbx]\n").is_err());
         assert!(toml::from_str::<InstanceConfig>("jvm_args = [\"-javaagent:x\"]\n").is_err());
+    }
+
+    #[test]
+    fn the_launchers_own_instance_directories_cannot_be_handed_to_the_game() {
+        let mut c = Config::default();
+        c.sandbox.extra_rw_dirs = vec!["screenshots".into()];
+        c.validate().unwrap();
+        for own in ["mods", "resourcepacks", "shaderpacks", "persist"] {
+            c.sandbox.extra_rw_dirs = vec!["screenshots".into(), own.into()];
+            assert!(matches!(c.validate(), Err(Error::Config(m)) if m.contains(own)), "{own}");
+        }
+    }
+
+    /// A settings file is carried between the game and `persist/`, and an instance from
+    /// before that layout has such files moved there from its own directory. Neither may
+    /// ever apply to the files that decide what the instance is and how it is protected.
+    #[test]
+    fn the_launchers_own_instance_files_cannot_be_carried_as_settings() {
+        let mut c = Config::default();
+        for own in ["profile.json", "packs.lock.json"] {
+            c.sandbox.persist_files = vec!["options.txt".into(), own.into()];
+            let refusal = c.validate().unwrap_err();
+            assert!(
+                matches!(&refusal, Error::Config(m) if m.contains(own) && m.contains("not a settings file of the game")),
+                "{refusal}"
+            );
+        }
+        c.sandbox.persist_files = vec!["options.txt".into(), "hotbar.nbt".into(), "command_history.txt".into()];
+        c.validate().unwrap();
     }
 
     #[test]

@@ -27,6 +27,8 @@ const LAUNCHER: &str = env!("CARGO_BIN_EXE_bastion-mc");
 
 struct Outcome {
     code: Option<i32>,
+    /// The signal that ended the sandbox's outermost process, if one did.
+    signal: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -123,7 +125,8 @@ impl Probe {
             running.child.wait().await.unwrap()
         };
         let status = tokio::time::timeout(Duration::from_secs(60), work).await.expect("sandbox payload timed out");
-        Outcome { code: status.code(), stdout: so, stderr: se }
+        let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+        Outcome { code: status.code(), signal, stdout: so, stderr: se }
     }
 }
 
@@ -625,7 +628,7 @@ show("udp6_other_port", attempt(lambda: socket.socket(socket.AF_INET6, socket.SO
     })
     .await
     .expect("timeout");
-    let o = Outcome { code: status.code(), stdout: so, stderr: se };
+    let o = Outcome { code: status.code(), signal: None, stdout: so, stderr: se };
     assert_eq!(o.code, Some(0), "stderr: {}", o.stderr);
     assert_eq!(o.line("ifaces"), "lo", "no interface but loopback exists");
     // Enumeration over netlink (what getifaddrs and java.net.NetworkInterface use) is not
@@ -854,6 +857,10 @@ async fn x11_client_connects_in_each_network_mode() {
         allow_x11: true,
         display: bastion_mc::config::DisplayPref::X11,
         audio: bastion_mc::config::AudioPref::None,
+        // This test is about the session's display handed over directly. Where gamescope is
+        // installed the plan would otherwise be a nested compositor — which is not started
+        // here, so the client would have no display at all.
+        nested_compositor: bastion_mc::config::IsolationMode::Off,
         ..Default::default()
     };
 
@@ -921,7 +928,7 @@ async fn scopes_available() -> bool {
         eprintln!("skipped: {why}");
         return false;
     }
-    cgroup::preflight().await.expect("a user manager is running, so a scope with limits must be obtainable");
+    cgroup::preflight(true).await.expect("a user manager is running, so a scope with limits must be obtainable");
     true
 }
 
@@ -963,7 +970,7 @@ except RuntimeError:
     pass
 show("threads", started)
 "#;
-    let (spec, _) = Probe { limits: Some(limits), ..Default::default() }.spec(&script(body));
+    let (spec, _) = Probe { limits: Some(limits.clone()), ..Default::default() }.spec(&script(body));
     let mut running = sandbox::spawn(spec, Path::new(LAUNCHER)).expect("spawn sandbox in a scope");
     let mut out = tokio::io::BufReader::new(running.child.stdout.take().unwrap());
     let mut err = running.child.stderr.take().unwrap();
@@ -993,6 +1000,19 @@ show("threads", started)
     }
     let members: Vec<u32> = knob("cgroup.procs").lines().filter_map(|l| l.parse().ok()).collect();
     assert!(members.len() >= 2, "bubblewrap and the payload are both in the scope: {members:?}");
+
+    // What the launcher itself does after starting the game: it reads the limits back, for
+    // the program inside the sandbox, and believes nothing else.
+    let payload = running.payload_pid().await.expect("the sandboxed program's host pid") as u32;
+    assert_eq!(cgroup::verify(payload, &limits), Ok(()), "the payload is in the scope with these limits");
+    assert_eq!(cgroup::verify(running.child.id().unwrap(), &limits), Ok(()));
+    // Limits that were asked for but are not the ones in force are not "verified"…
+    let other = Limits { tasks_max: 49, ..limits.clone() };
+    assert!(
+        matches!(cgroup::verify(payload, &other), Err(cgroup::NotVerified::NotEnforced(why)) if why.contains("pids.max"))
+    );
+    // …and neither is a process that is not in the scope at all.
+    assert!(matches!(cgroup::verify(std::process::id(), &limits), Err(cgroup::NotVerified::NotInScope(_))));
 
     running.channel.write_all(b"go\n").unwrap();
     running.channel.shutdown(Shutdown::Write).unwrap();
@@ -1031,7 +1051,21 @@ show("survived", len(block))
 "#;
     let o = Probe { limits: Some(small_limits("memory", 128, 64)), ..Default::default() }.run(&script(body)).await;
     assert!(!o.stdout.contains("survived"), "600 MiB were allocated under a 128 MiB ceiling: {}", o.stdout);
-    assert_eq!(o.code, Some(137), "killed (SIGKILL) by the kernel's per-group OOM handling; stderr: {}", o.stderr);
+    // The kernel kills the hog (SIGKILL) inside its group. What the launcher then sees of the
+    // sandbox is one of two things, and which one is a race this test must not depend on:
+    // bubblewrap reports its child's death (exit status 137) — or the user manager, whose
+    // default for a unit struck by the OOM killer is to stop it (`OOMPolicy=stop`), has
+    // terminated bubblewrap before it got that far. (Observed on systemd 262: the manager
+    // wins while the hog's memory is still being torn down.) Either way the sandbox is gone.
+    let relayed = o.code == Some(137);
+    let scope_stopped = matches!(o.signal, Some(libc::SIGTERM | libc::SIGKILL));
+    assert!(
+        relayed || scope_stopped,
+        "ended by the kernel's per-group OOM handling: exit status {:?}, signal {:?}; stderr: {}",
+        o.code,
+        o.signal,
+        o.stderr
+    );
 }
 
 /// The network-namespace helper is this program, executed here by systemd-run rather than

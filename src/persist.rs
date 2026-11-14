@@ -20,10 +20,17 @@
 //! | `options*.txt` | `key:value` lines | well-formed keys, printable values, first occurrence of each key |
 //! | other `*.txt` | text lines | printable UTF-8 lines |
 //! | other `*.dat`, `*.nbt` | NBT | the same tree, re-encoded; depth, size and node count bounded |
-//! | `*.json` | JSON | the same value, re-encoded |
+//! | `*.json` | JSON | the same value, re-encoded in printable ASCII: every other character of a string or key is written as a `\u` escape |
 //!
 //! The same pass runs in both directions: a file damaged on the host does not reach the
 //! game either.
+//!
+//! What "printable" means differs by kind, on purpose. Text lines and server names are
+//! *dropped* when they contain control characters or bidirectional overrides — there is no
+//! way to keep such a line and make it harmless. A JSON string can be kept exactly and still
+//! be harmless, because the format has escapes: so there the value survives unchanged and
+//! only its spelling is restricted. Binary NBT other than `servers.dat` is re-encoded as it
+//! is, strings included; it is a binary file before and after.
 
 use std::{collections::BTreeSet, path::Path};
 
@@ -192,8 +199,75 @@ fn json(input: &[u8]) -> Result<(Vec<u8>, Report)> {
     // serde_json bounds nesting itself (128 levels) and rejects trailing garbage.
     let value: serde_json::Value =
         serde_json::from_slice(input).map_err(|e| Error::Format(format!("not valid JSON ({e})")))?;
-    let out = serde_json::to_vec(&value).map_err(|e| Error::Format(format!("cannot re-encode JSON ({e})")))?;
+    let mut out = Vec::with_capacity(input.len());
+    write_json(&mut out, &value);
+    // Escaping makes a string longer (up to six bytes for one). The result is held to the
+    // same limit as any input: what is written is something this module would read again.
+    if out.len() as u64 > MAX_INPUT_BYTES {
+        return Err(Error::Format("the re-encoded JSON is larger than a settings file can be".into()));
+    }
     Ok((out, Report { kept: 1, dropped: 0 }))
+}
+
+/// Encode `value` as JSON made of printable ASCII and nothing else.
+///
+/// A general-purpose encoder escapes what the format requires — quotes, backslashes and the
+/// characters below U+0020 — and writes the rest of a string as it is: DEL, the C1 controls
+/// (U+009B is "CSI" to a terminal, as good as ESC `[`), bidirectional overrides, line
+/// separators. All of that is legal JSON, and all of it would land in the instance directory
+/// raw. Here every character outside `' '..='~'` is written as `\uXXXX` (two of them for a
+/// character beyond U+FFFF). A JSON reader gets the identical value; a terminal, an editor
+/// or a `grep` gets nothing to interpret.
+fn write_json(out: &mut Vec<u8>, value: &serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Null => out.extend_from_slice(b"null"),
+        Value::Bool(true) => out.extend_from_slice(b"true"),
+        Value::Bool(false) => out.extend_from_slice(b"false"),
+        // Digits, a sign, a point, an exponent.
+        Value::Number(number) => out.extend_from_slice(number.to_string().as_bytes()),
+        Value::String(text) => write_json_string(out, text),
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_json(out, item);
+            }
+            out.push(b']');
+        }
+        Value::Object(members) => {
+            out.push(b'{');
+            for (index, (key, member)) in members.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_json_string(out, key);
+                out.push(b':');
+                write_json(out, member);
+            }
+            out.push(b'}');
+        }
+    }
+}
+
+fn write_json_string(out: &mut Vec<u8>, text: &str) {
+    out.push(b'"');
+    for c in text.chars() {
+        match c {
+            '"' => out.extend_from_slice(b"\\\""),
+            '\\' => out.extend_from_slice(b"\\\\"),
+            ' '..='~' => out.push(c as u8),
+            _ => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.extend_from_slice(format!("\\u{unit:04x}").as_bytes());
+                }
+            }
+        }
+    }
+    out.push(b'"');
 }
 
 // ---------------------------------------------------------------- servers.dat
@@ -839,6 +913,52 @@ mod tests {
         for bad in [&b"{\"a\":1} trailing"[..], b"{", b"", b"\xff", &"[".repeat(1000).into_bytes()] {
             assert!(sanitize(Kind::Json, bad).is_err());
         }
+    }
+
+    /// What a general JSON encoder leaves raw in strings and keys — DEL, the C1 controls,
+    /// bidirectional overrides, line separators — does not reach the instance directory raw:
+    /// the output is printable ASCII, and still the same value.
+    #[test]
+    fn json_strings_and_keys_come_out_as_printable_ascii_with_the_same_value() {
+        // Written by the game as raw UTF-8, which is valid JSON: U+009B is CSI (ESC [ in one
+        // character), U+007F is DEL, U+202E reverses the text that follows.
+        let hostile = "{\"k\u{9b}31m\":\"red\u{9b}0m \u{7f}\u{85} \u{202e}gnp.exe\u{2028}\u{2066}x \u{feff}\u{200b}\",\
+                       \"plain\":\"caf\u{e9} \u{1d11e} \\\"q\\\" \\\\ /\",\"n\":[-1,2.5e3,true,null]}";
+        // The reason for this test: the standard encoder passes all of it through.
+        let standard = serde_json::to_vec(&serde_json::from_str::<serde_json::Value>(hostile).unwrap()).unwrap();
+        assert!(standard.windows(2).any(|w| w == [0xc2, 0x9b]), "serde_json writes U+009B raw");
+
+        let (out, report) = sanitize(Kind::Json, hostile.as_bytes()).unwrap();
+        assert_eq!(report, Report { kept: 1, dropped: 0 });
+        assert!(
+            out.iter().all(|b| (0x20..0x7f).contains(b)),
+            "not printable ASCII: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            text.contains(r#""k\u009b31m":"red\u009b0m \u007f\u0085 \u202egnp.exe\u2028\u2066x \ufeff\u200b""#),
+            "{text}"
+        );
+        assert!(text.contains(r#""plain":"caf\u00e9 \ud834\udd1e \"q\" \\ /""#), "{text}");
+        assert!(
+            text.contains(r#""n":[-1,2500.0,true,null]"#) || text.contains(r#""n":[-1,2.5e3,true,null]"#),
+            "{text}"
+        );
+        // The same value for a JSON reader…
+        let before: serde_json::Value = serde_json::from_str(hostile).unwrap();
+        let after: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(before, after);
+        // …and a fixed point of the sanitiser.
+        assert_eq!(sanitize(Kind::Json, &out).unwrap().0, out);
+
+        // Escaping lengthens the text; a result past the size limit is refused, not written.
+        let mut big = String::from("[\"");
+        big.extend(std::iter::repeat_n('\u{7f}', (MAX_INPUT_BYTES as usize / 6) + 16));
+        big.push_str("\"]");
+        assert!(big.len() as u64 <= MAX_INPUT_BYTES);
+        let err = sanitize(Kind::Json, big.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("larger than a settings file"), "{err}");
     }
 
     #[test]

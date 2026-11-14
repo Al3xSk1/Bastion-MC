@@ -195,16 +195,48 @@ fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     v
 }
 
-fn skin_png() -> Vec<u8> {
+/// A skin as an image editor writes it: `height` rows of 64 pixels of `bytes_per_pixel`
+/// bytes (colour type 6 = RGBA, 3 = indexed), each row with a filter byte, compressed.
+fn skin_png(height: u32, colour: u8) -> Vec<u8> {
+    use std::io::Write;
+    let bytes_per_pixel = if colour == 3 { 1 } else { 4 };
+    let mut rows = Vec::new();
+    for y in 0..height {
+        // Every row filter there is — for RGBA, where any byte is a colour value. An indexed
+        // image is left unfiltered, so that its bytes stay within its four-colour palette.
+        rows.push(if colour == 3 { 0 } else { (y % 5) as u8 });
+        rows.extend((0..64 * bytes_per_pixel).map(|x| ((x * 7 + y * 13) % 4) as u8));
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    encoder.write_all(&rows).unwrap();
+    let pixels = encoder.finish().unwrap();
+
     let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     let mut header = 64u32.to_be_bytes().to_vec();
-    header.extend_from_slice(&64u32.to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, colour, 0, 0, 0]);
     v.extend(png_chunk(b"IHDR", &header));
     v.extend(png_chunk(b"tEXt", b"Software\0editor"));
-    v.extend(png_chunk(b"IDAT", &[0x78, 0x9c, 0x01, 0x02, 0x03]));
+    if colour == 3 {
+        v.extend(png_chunk(b"PLTE", &[0, 0, 0, 255, 255, 255, 200, 30, 30, 30, 200, 30]));
+        v.extend(png_chunk(b"tRNS", &[0, 255]));
+    }
+    v.extend(png_chunk(b"IDAT", &pixels));
     v.extend(png_chunk(b"IEND", b""));
     v
+}
+
+/// A zip archive as an ordinary writer produces it (stored or deflated members).
+fn zip_archive(entries: &[(&str, &[u8])], deflate: bool) -> Vec<u8> {
+    use std::io::Write;
+    let method = if deflate { zip::CompressionMethod::Deflated } else { zip::CompressionMethod::Stored };
+    let options = zip::write::SimpleFileOptions::default().compression_method(method);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in entries {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(data).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
 }
 
 fn seeds(harness: &str) -> Vec<Vec<u8>> {
@@ -276,7 +308,16 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             text(
                 "{\"id\":\"069a79f444e94726a5befca90e38aaf5\",\"name\":\"Notch\",\"skins\":[{\"id\":\"6a6e65e5-76dd-4c3c-a625-162924514568\",\"state\":\"ACTIVE\",\"url\":\"http://textures.minecraft.net/texture/1a4af718455d4aab\",\"variant\":\"SLIM\"}],\"capes\":[{\"id\":\"5af20372-79e0-4e1f-80f8-6bd8e3135995\",\"state\":\"INACTIVE\",\"url\":\"https://textures.minecraft.net/texture/2340c0e03dd24a11\",\"alias\":\"Migrator\"}]}",
             ),
-            skin_png(),
+            skin_png(64, 6),
+            skin_png(32, 3),
+        ],
+        "zipdir" => vec![
+            zip_archive(&[("pack.mcmeta", b"{\"pack\":{}}"), ("assets/minecraft/lang/en_us.json", b"{}")], false),
+            zip_archive(
+                &[("shaders/final.fsh", b"void main(){}"), ("shaders/", b""), ("readme \u{e9}.txt", b"x")],
+                true,
+            ),
+            zip_archive(&[("a", b"")], false),
         ],
         other => panic!("no seeds for {other}"),
     }
@@ -322,7 +363,7 @@ fn run(name: &str) {
 
 #[test]
 fn every_harness_has_a_test_here() {
-    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile"];
+    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir"];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
@@ -365,6 +406,11 @@ fn profile_reply_and_skin_files() {
     run("profile");
 }
 
+#[test]
+fn zip_directory_reader() {
+    run("zipdir");
+}
+
 /// Mutation only explores a parser if it starts from inputs the parser accepts.
 #[test]
 fn the_starting_points_are_accepted_by_their_parsers() {
@@ -392,6 +438,14 @@ fn the_starting_points_are_accepted_by_their_parsers() {
     let globals = wayland::read_events_from(&seeds("wayland")[0]).expect("registry");
     assert_eq!(globals.len(), 3);
     assert!(wayland::read_events_from(&seeds("wayland")[1]).unwrap_err().to_string().contains("protocol error 1"));
-    let clean = minecraft::sanitize_skin_png(&skin_png()).expect("skin");
-    assert!(clean.len() < skin_png().len(), "the text chunk was removed");
+    for skin in [skin_png(64, 6), skin_png(32, 3)] {
+        let clean = minecraft::sanitize_skin_png(&skin).expect("skin");
+        assert!(skin.windows(4).any(|w| w == b"tEXt") && !clean.windows(4).any(|w| w == b"tEXt"));
+    }
+    let limits =
+        bastion_mc::profile::zipdir::Limits { max_entries: 1000, max_directory_bytes: 1 << 20, max_name_bytes: 512 };
+    for (archive, members) in seeds("zipdir").iter().zip([2, 3, 1]) {
+        let listed = bastion_mc::profile::zipdir::read(archive.as_slice(), archive.len() as u64, &limits);
+        assert_eq!(listed.expect("a zip archive").len(), members);
+    }
 }

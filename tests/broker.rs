@@ -43,7 +43,10 @@ use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
-use tokio::{io::AsyncReadExt, net::TcpListener};
+use tokio::{
+    io::AsyncReadExt,
+    net::{TcpListener, TcpStream},
+};
 use tokio_rustls::TlsAcceptor;
 
 const LAUNCHER: &str = env!("CARGO_BIN_EXE_bastion-mc");
@@ -158,6 +161,23 @@ async fn upstream() -> Upstream {
                             }
                             // A misbehaving endpoint that echoes the credential it was sent.
                             "/player/certificates" => reply(200, format!(r#"{{"echo":"{authorization}"}}"#)),
+                            // One that answers in an encoding nobody asked for (and could hide
+                            // an echo of the credential in it).
+                            "/encoded" => Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .header("content-encoding", "gzip")
+                                .body(Full::new(Bytes::from_static(b"\x1f\x8b\x08 not really gzip")))
+                                .unwrap(),
+                            // Large objects: `/blob/<n>` is n MiB.
+                            path if path.starts_with("/blob/") => {
+                                let megabytes: usize = path["/blob/".len()..].parse().unwrap_or(1);
+                                Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/octet-stream")
+                                    .body(Full::new(Bytes::from(vec![b'x'; megabytes << 20])))
+                                    .unwrap()
+                            }
                             "/privacy/blocklist" => reply(429, r#"{"error":"TOO_MANY_REQUESTS"}"#.into()),
                             _ => reply(404, r#"{"error":"NOT_FOUND"}"#.into()),
                         })
@@ -189,6 +209,12 @@ struct Harness {
 
 impl Harness {
     async fn new(config: BrokerConfig, signed_in: bool) -> Self {
+        Self::build(config, signed_in, None).await
+    }
+
+    /// `budget`: the broker's budget for buffered bodies and how long a request waits for
+    /// room in it, where a test needs other values than the launcher's.
+    async fn build(config: BrokerConfig, signed_in: bool, budget: Option<(usize, Duration)>) -> Self {
         let upstream = upstream().await;
         let mut roots = RootCertStore::empty();
         roots.add(upstream.root.clone()).unwrap();
@@ -200,7 +226,10 @@ impl Harness {
             token: Secret::from_slice(REAL_TOKEN.as_bytes()).unwrap(),
             profile_id: PROFILE.into(),
         });
-        let broker = Broker::new(authority, &config, &to_upstream, PLACEHOLDER.into(), credential).unwrap();
+        let mut broker = Broker::new(authority, &config, &to_upstream, PLACEHOLDER.into(), credential).unwrap();
+        if let Some((bytes, wait)) = budget {
+            broker = broker.with_buffer_budget(bytes, wait);
+        }
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
         let log: Logger = Arc::new(move |line: String| sink.lock().unwrap().push(line));
@@ -220,6 +249,9 @@ impl Harness {
         tokio::spawn(async move {
             loop {
                 let Ok((tcp, _)) = listener.accept().await else { break };
+                // A small, fixed send buffer: what a client does not read stays with the
+                // broker, where the tests can see it, whatever this machine's TCP tuning is.
+                let _ = nix::sys::socket::setsockopt(&tcp, nix::sys::socket::sockopt::SndBuf, &(16 * 1024));
                 let inner = inner.clone();
                 tokio::spawn(async move {
                     let ctx = Context { gate: &inner.gate, log: &inner.log, stats: &inner.stats };
@@ -244,6 +276,35 @@ impl Harness {
     fn log(&self) -> Vec<String> {
         self.inner.lines.lock().unwrap().clone()
     }
+
+    /// A game connection that sends `request` and then reads nothing: TLS to the broker at
+    /// `addr`, trusting its authority, with a receive buffer too small to take a reply off
+    /// the broker's hands.
+    async fn stalling_game(&self, addr: SocketAddr, request: &str) -> tokio_rustls::client::TlsStream<TcpStream> {
+        use tokio::io::AsyncWriteExt;
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(self.authority_der.clone())).unwrap();
+        let config = tls::client_config(roots, PinSet::default()).unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let tcp = socket.connect(addr).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from(API).unwrap();
+        let mut stream = tokio_rustls::TlsConnector::from(config).connect(name, tcp).await.expect("TLS to the broker");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        stream
+    }
+}
+
+/// Poll `condition` (bounded) until it holds.
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never happened: {what}");
 }
 
 fn bearer(token: &str) -> Vec<(hyper::header::HeaderName, hyper::header::HeaderValue)> {
@@ -433,6 +494,90 @@ async fn a_reply_that_contains_the_token_is_withheld() {
     assert!(h.log().iter().any(|l| l.contains("[SECURITY]") && l.contains("withheld")), "{:?}", h.log());
 }
 
+/// A reply to a request that carried the token is checked for the token as it arrived. If
+/// it arrives in an encoding (which the launcher did not ask for), that check would be
+/// blind: such a reply is withheld. The same answer to a request that carried no credential
+/// has nothing to leak and is passed on.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_encoded_reply_to_a_credentialed_request_is_withheld() {
+    let config = BrokerConfig {
+        extra_token_endpoints: vec!["GET api.minecraftservices.com/encoded".into()],
+        ..BrokerConfig::default()
+    };
+    let h = Harness::new(config, true).await;
+    let game = h.game(API).await;
+    let url = "https://api.minecraftservices.com/encoded";
+    let (status, text) = send(&game, Method::GET, url, Some(PLACEHOLDER), None).await;
+    assert_eq!(h.upstream.last().header("authorization"), Some(format!("Bearer {REAL_TOKEN}").as_str()));
+    assert_eq!(h.upstream.last().header("accept-encoding"), Some("identity"), "the launcher asked for no encoding");
+    assert_eq!(status, 502, "{text}");
+    assert!(text.contains("came back encoded") && !text.contains("not really gzip"), "{text}");
+    assert!(h.log().iter().any(|l| l.contains("[SECURITY]") && l.contains("encoded")), "{:?}", h.log());
+
+    // Without the credential the token was never sent, so there is nothing to check for.
+    let (status, text) = send(&game, Method::GET, url, None, None).await;
+    assert_eq!(h.upstream.last().header("authorization"), None);
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("not really gzip"));
+}
+
+/// A game that asks for large objects on many connections and never reads the answers gets
+/// the launcher to hold at most one budget's worth of them — not one reply per connection —
+/// and is refused beyond that; room comes back when a reply is read or its connection ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn replies_the_game_does_not_read_come_out_of_one_bounded_budget() {
+    const MIB: usize = 1 << 20;
+    // Room for two replies of the largest size (8 MiB is reserved before a reply's real size
+    // is known), and a wait short enough for a test.
+    let h = Harness::build(BrokerConfig::default(), true, Some((16 * MIB, Duration::from_millis(500)))).await;
+    let broker = &h.inner.broker;
+    let addr = h.serve_as(API).await;
+    let blob = "GET /blob/7 HTTP/1.1\r\nHost: api.minecraftservices.com\r\n\r\n";
+    let fetched = || h.log().iter().filter(|l| l.contains("GET /blob/7 → 200")).count();
+
+    // Two connections each have the launcher fetch 7 MiB and then do not read it.
+    let first = h.stalling_game(addr, blob).await;
+    let second = h.stalling_game(addr, blob).await;
+    eventually("both replies were fetched", || fetched() == 2).await;
+    assert_eq!(broker.buffered_bytes(), 14 * MIB, "each unread reply occupies its size, no more");
+
+    // A third finds no room for a reply (2 MiB are left, 8 would be reserved): it waits, is
+    // refused, and Mojang is not even asked.
+    let third = h.stalling_game(addr, blob).await;
+    eventually("the third request was refused", || h.log().iter().any(|l| l.contains("GET /blob/7 → 503 here"))).await;
+    assert_eq!(fetched(), 2);
+    assert_eq!(h.upstream.requests().iter().filter(|s| s.target == "/blob/7").count(), 2);
+    assert!(broker.buffered_bytes() <= 16 * MIB, "never more than the budget: {}", broker.buffered_bytes());
+    let mut third = third;
+    let mut refusal = vec![0u8; 4096];
+    let n = third.read(&mut refusal).await.unwrap();
+    let refusal = String::from_utf8_lossy(&refusal[..n]).into_owned();
+    assert!(refusal.starts_with("HTTP/1.1 503") && refusal.contains("already holding"), "{refusal}");
+    // An ordinary small request is refused for the same reason while the two are stalled.
+    let game = h.game(API).await;
+    let (status, _) = send(&game, Method::GET, "https://api.minecraftservices.com/publickeys", None, None).await;
+    assert_eq!(status, 503);
+
+    // The first connection reads its reply after all: its room comes back.
+    let mut first = first;
+    let mut got = 0usize;
+    let mut chunk = vec![0u8; 64 * 1024];
+    while got < 7 * MIB {
+        let n = tokio::time::timeout(Duration::from_secs(20), first.read(&mut chunk)).await.expect("reply").unwrap();
+        assert!(n > 0, "the reply ended after {got} bytes");
+        got += n;
+    }
+    eventually("the first reply's room was given back", || broker.buffered_bytes() <= 7 * MIB).await;
+    let (status, _) = send(&game, Method::GET, "https://api.minecraftservices.com/publickeys", None, None).await;
+    assert_eq!(status, 200, "with room again, requests are served again");
+
+    // The second hangs up without ever reading: that gives its room back as well.
+    drop(second);
+    drop(first);
+    drop(third);
+    eventually("everything was given back", || broker.buffered_bytes() == 0).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_an_account_nothing_is_authenticated() {
     let h = Harness::new(BrokerConfig::default(), false).await;
@@ -500,7 +645,9 @@ async fn a_sandboxed_jvm_holding_only_the_placeholder() {
     let jvms = java::discover().expect("system JVMs");
     let jvm = java::select(&jvms, 8, JavaMatch::Newer, None).expect("a JVM");
 
-    // A "game server" on the host's loopback.
+    // A "game server" on the host's loopback. It answers what it is sent, as a real one does
+    // before a client can ask for a join: that answer is how the probe knows that its game
+    // connection exists end to end (and is therefore known to the relay).
     let game_server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let game_port = game_server.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -508,7 +655,11 @@ async fn a_sandboxed_jvm_holding_only_the_placeholder() {
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut buf = [0u8; 64];
-                while matches!(std::io::Read::read(&mut stream, &mut buf), Ok(n) if n > 0) {}
+                while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut buf) {
+                    if std::io::Write::write_all(&mut stream, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
             });
         }
     });

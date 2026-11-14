@@ -31,10 +31,26 @@
 //! (`native/noclip.c`, built with the launcher and embedded in it) that makes the four SDL
 //! calls carrying the bridge do nothing. `tests/nested.rs` checks both directions.
 //!
+//! A preload can fail without a sound — the dynamic linker skips it for a program with file
+//! capabilities, and a compositor built to reach SDL differently never calls it. So the
+//! launcher does not assume the cut: the library reports from inside the compositor
+//! ([`ClipboardCut`]), and only the report "active" lets the launch say "clipboard cut".
+//! **"Active" establishes** that the library was loaded into the process that started the
+//! launcher's ready child (the compositor), that the dynamic linker resolves the six SDL
+//! text-clipboard functions to the library's own definitions, that an SDL library providing
+//! them stands behind it (so the compositor gets them by name, not from a private copy), and
+//! that SDL's clipboard interface for arbitrary data, which the library does not cover, does
+//! not exist in the compositor's symbol scope. **It does not establish** that this build of
+//! the compositor has no other way of moving a selection (another backend, direct X11 or
+//! Wayland calls): that is a property of the compositor, checked by `tests/nested.rs` for
+//! gamescope 3.17 as packaged by Arch and for nothing else. Without the report the launch
+//! log and the front end say that the cut is not confirmed, and
+//! `sandbox.nested_compositor = "require"` stops the launch.
+//!
 //! How the launcher learns the inner display: gamescope starts one child once its display
 //! is ready. That child is this program again in a tiny mode ([`READY_ARG`]): it prints the
-//! `DISPLAY` it was given and then waits for its standard input to close. Closing it is how
-//! the launcher ends the compositor.
+//! `DISPLAY` it was given (and the cut-off's report) and then waits for its standard input
+//! to close. Closing it is how the launcher ends the compositor.
 
 use std::{
     collections::VecDeque,
@@ -73,12 +89,75 @@ const X11_DIR: &str = "/tmp/.X11-unix";
 /// The clipboard cut-off, preloaded into the compositor.
 const NOCLIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libbastion_noclip.so"));
 const NOCLIP_PATH: &str = "/bastion/noclip.so";
+/// Where the preloaded library leaves its report, for the ready child to pass on.
+const NOCLIP_STATUS_ENV: &str = "BASTION_MC_NOCLIP";
+const NOCLIP_FIELD: &str = "noclip=";
 const STARTUP: Duration = Duration::from_secs(30);
 const RECENT_LINES: usize = 12;
+
+/// Whether the clipboard bridge of the compositor that was started is known to be cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardCut {
+    /// The cut-off reported from inside the compositor that the bridge calls land in it.
+    /// (What that does and does not establish: see the module documentation.)
+    Active,
+    /// Not established. The text says what was (not) seen.
+    Unconfirmed(String),
+}
+
+impl ClipboardCut {
+    /// From the word the preloaded library left (`None`: it left none).
+    fn from_report(word: Option<&str>) -> Self {
+        ClipboardCut::Unconfirmed(match word {
+            Some("active") => return ClipboardCut::Active,
+            None => "the cut-off library did not report from inside the compositor: it was not loaded (the \
+                     dynamic linker skips a preload it may not or cannot load)"
+                .into(),
+            Some("shadowed") => "the compositor defines SDL's clipboard functions itself, so the preloaded cut-off \
+                                 is never called"
+                .into(),
+            Some("no-sdl") => "the compositor does not get SDL's clipboard functions from the dynamic linker (no \
+                               SDL library provided them at start-up), so the preloaded cut-off is never called"
+                .into(),
+            Some("data-interface") => "the compositor's SDL has a clipboard interface for arbitrary data, which \
+                                       the cut-off does not cover"
+                .into(),
+            Some(other) => format!("the cut-off library reported something unknown ({other:?})"),
+        })
+    }
+}
 
 /// Where the compositor's own output goes (the launch log).
 pub type Sink = Arc<dyn Fn(String) + Send + Sync>;
 type Recent = Arc<Mutex<VecDeque<String>>>;
+
+/// Lets the launcher stop reading the compositor's output for a while.
+///
+/// The compositor talks to the game: once the game runs, what the compositor prints is
+/// influenced by the game. The launcher reads nothing of that kind before it has confined
+/// itself, so between starting the game and that moment it holds this output back
+/// ([`Session::hold_output`]). `held` tells the two relay tasks to step aside; `pass` is what
+/// a relay holds while it reads and handles a line, so that whoever takes it exclusively
+/// knows that no relay is in the middle of one.
+#[derive(Clone)]
+struct Gate {
+    held: tokio::sync::watch::Receiver<bool>,
+    pass: Arc<tokio::sync::RwLock<()>>,
+}
+
+/// While this exists, nothing the compositor prints is read. Dropping it resumes the
+/// relays; what the compositor wrote meanwhile waited in its pipes (a compositor that
+/// prints more than a pipe holds waits too — its own delay, for as long as the hold lasts).
+pub struct OutputHold {
+    held: Arc<tokio::sync::watch::Sender<bool>>,
+    _pass: tokio::sync::OwnedRwLockWriteGuard<()>,
+}
+
+impl Drop for OutputHold {
+    fn drop(&mut self) {
+        self.held.send_replace(false);
+    }
+}
 
 /// Are gamescope and what it runs installed as system programs?
 ///
@@ -118,6 +197,12 @@ pub struct Plan {
     pub layers: Vec<PathBuf>,
     pub limits: Option<cgroup::Limits>,
     pub seccomp: SeccompPolicy,
+    /// Do not accept a compositor whose clipboard bridge is not known to be cut
+    /// (`sandbox.nested_compositor = "require"`).
+    pub require_clipboard_cut: bool,
+    /// Test support, not reachable from a configuration file: `false` starts the compositor
+    /// without the cut-off library, to see that its absence is noticed.
+    pub preload_clipboard_cut: bool,
 }
 
 fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -152,7 +237,9 @@ impl Plan {
         // Before the session's socket, which is mounted inside it.
         mounts.push(Mount::Bind { src: self.dir, dst: X11_DIR.into() });
         mounts.extend(self.mounts);
-        mounts.push(Mount::RoData { data: NOCLIP.to_vec(), dst: NOCLIP_PATH.into(), mode: 0o444 });
+        if self.preload_clipboard_cut {
+            mounts.push(Mount::RoData { data: NOCLIP.to_vec(), dst: NOCLIP_PATH.into(), mode: 0o444 });
+        }
 
         let mut landlock = base.landlock;
         landlock.devices.extend(self.devices);
@@ -166,8 +253,13 @@ impl Plan {
         env.extend(self.env);
         // Shader caches and the like go to the sandbox's own tmpfs.
         set_env(&mut env, "HOME", "/tmp");
-        // gamescope only: the library takes itself out of the environment once loaded.
-        set_env(&mut env, "LD_PRELOAD", NOCLIP_PATH);
+        // Whatever the session's environment said: the report comes from the library or not
+        // at all.
+        env.retain(|(key, _)| key != NOCLIP_STATUS_ENV && key != "LD_PRELOAD");
+        if self.preload_clipboard_cut {
+            // gamescope only: the library takes itself out of the environment once loaded.
+            set_env(&mut env, "LD_PRELOAD", NOCLIP_PATH);
+        }
 
         let mut seccomp = self.seccomp;
         for name in EXTRA_SYSCALLS {
@@ -197,6 +289,13 @@ pub struct Session {
     /// The inner display's socket, on the host.
     socket: PathBuf,
     dir: PathBuf,
+    /// What is known about this compositor's clipboard bridge.
+    pub clipboard: ClipboardCut,
+    /// Tells a sweep of the cache that `dir` is in use (`running::sweep_leftovers`).
+    _in_use: Option<crate::running::DirLock>,
+    /// The switch and the lock of the output relays' [`Gate`].
+    held: Arc<tokio::sync::watch::Sender<bool>>,
+    pass: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Remove terminal colour sequences (`ESC [ … letter`): gamescope colours its log even when
@@ -231,37 +330,54 @@ async fn relay(
     sink: Sink,
     recent: Recent,
     mut ready: Option<tokio::sync::oneshot::Sender<String>>,
+    mut gate: Gate,
 ) {
     let mut reader = BufReader::with_capacity(16 * 1024, stream);
     let mut buf = Vec::with_capacity(512);
-    loop {
+    'lines: loop {
         buf.clear();
+        // At most this much is taken for one line, however the reading is interrupted.
         let mut limited = (&mut reader).take(16 * 1024);
-        match limited.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                    buf.pop();
-                }
-                let line = util::sanitize_line(&strip_ansi(&buf), 400);
-                if let Some(display) = line.strip_prefix(READY_PREFIX)
-                    && let Some(tx) = ready.take()
-                {
-                    let _ = tx.send(display.to_string());
-                    continue;
-                }
-                if line.is_empty() || is_routine(&line) {
-                    continue;
-                }
-                if let Ok(mut recent) = recent.lock() {
-                    if recent.len() == RECENT_LINES {
-                        recent.pop_front();
-                    }
-                    recent.push_back(line.clone());
-                }
-                sink(format!("display server: {line}"));
+        let _pass = loop {
+            // Not while the output is held: then nothing is read, and nothing is handled.
+            // (An error means that the session — the one who could hold — is gone.)
+            let _ = gate.held.wait_for(|held| !*held).await;
+            let pass = gate.pass.clone().read_owned().await;
+            let read = tokio::select! {
+                biased;
+                // A hold begins: step aside. What was read of the line so far stays in `buf`
+                // (reading up to a delimiter may be interrupted and taken up again).
+                Ok(_) = gate.held.wait_for(|held| *held) => None,
+                read = limited.read_until(b'\n', &mut buf) => Some(read),
+            };
+            match read {
+                None => continue,
+                // The end of the stream — unless part of a line was read before a hold.
+                Some(Ok(0)) if buf.is_empty() => break 'lines,
+                Some(Err(_)) => break 'lines,
+                Some(Ok(_)) => break pass,
             }
+        };
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
         }
+        let line = util::sanitize_line(&strip_ansi(&buf), 400);
+        if let Some(display) = line.strip_prefix(READY_PREFIX)
+            && let Some(tx) = ready.take()
+        {
+            let _ = tx.send(display.to_string());
+            continue;
+        }
+        if line.is_empty() || is_routine(&line) {
+            continue;
+        }
+        if let Ok(mut recent) = recent.lock() {
+            if recent.len() == RECENT_LINES {
+                recent.pop_front();
+            }
+            recent.push_back(line.clone());
+        }
+        sink(format!("display server: {line}"));
     }
 }
 
@@ -269,12 +385,18 @@ async fn relay(
 pub async fn start(plan: Plan, launcher_exe: &Path, sink: Sink) -> Result<Session> {
     util::create_private_dir_all(&plan.dir)?;
     let dir = plan.dir.clone();
+    let require_clipboard_cut = plan.require_clipboard_cut;
+    let mut in_use = crate::running::lock_dir(&dir).ok();
+    let (held, held_rx) = tokio::sync::watch::channel(false);
+    let (held, pass) = (Arc::new(held), Arc::new(tokio::sync::RwLock::new(())));
+    let gate = Gate { held: held_rx, pass: pass.clone() };
     let started = async {
         let mut running = super::spawn(plan.spec()?, launcher_exe)?;
         let recent: Recent = Arc::default();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(relay(running.child.stdout.take().expect("piped"), sink.clone(), recent.clone(), Some(tx)));
-        tokio::spawn(relay(running.child.stderr.take().expect("piped"), sink, recent.clone(), None));
+        let (out, err) = (running.child.stdout.take().expect("piped"), running.child.stderr.take().expect("piped"));
+        tokio::spawn(relay(out, sink.clone(), recent.clone(), Some(tx), gate.clone()));
+        tokio::spawn(relay(err, sink, recent.clone(), None, gate));
 
         let answer = tokio::select! {
             answer = tokio::time::timeout(STARTUP, rx) => match answer {
@@ -287,8 +409,8 @@ pub async fn start(plan: Plan, launcher_exe: &Path, sink: Sink) -> Result<Sessio
                 Err(e) => format!("waiting for it failed: {e}"),
             }),
         };
-        let display = match answer {
-            Ok(display) => display,
+        let announced = match answer {
+            Ok(announced) => announced,
             Err(why) => {
                 let _ = running.stop(Duration::from_secs(2)).await;
                 // The output tasks may still be draining; give the last lines a moment.
@@ -300,6 +422,10 @@ pub async fn start(plan: Plan, launcher_exe: &Path, sink: Sink) -> Result<Sessio
                 )));
             }
         };
+        // "<display>", then what the cut-off library left for the ready child to pass on.
+        let mut fields = announced.split_ascii_whitespace();
+        let display = fields.next().unwrap_or_default().to_string();
+        let clipboard = ClipboardCut::from_report(fields.find_map(|field| field.strip_prefix(NOCLIP_FIELD)));
         let Some(number) = display::x11_display_number(&display) else {
             let _ = running.stop(Duration::from_secs(2)).await;
             return Err(Error::Sandbox(format!("the nested compositor announced an unusable display {display:?}")));
@@ -311,11 +437,29 @@ pub async fn start(plan: Plan, launcher_exe: &Path, sink: Sink) -> Result<Sessio
                 "the nested compositor announced display :{number}, but its socket did not appear"
             )));
         }
-        Ok(Session { running, display: number, socket, dir: dir.clone() })
+        if let (true, ClipboardCut::Unconfirmed(why)) = (require_clipboard_cut, &clipboard) {
+            let _ = running.stop(Duration::from_secs(2)).await;
+            return Err(Error::Sandbox(format!(
+                "sandbox.nested_compositor = \"require\", but it is not established that this compositor's clipboard \
+                 bridge is cut: {why}. With \"auto\" the launch continues and says that the game may read and set the \
+                 session's clipboard."
+            )));
+        }
+        Ok(Session {
+            running,
+            display: number,
+            socket,
+            dir: dir.clone(),
+            clipboard,
+            _in_use: in_use.take(),
+            held: held.clone(),
+            pass: pass.clone(),
+        })
     }
     .await;
     if started.is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(in_use);
+        let _ = crate::tree::remove(&dir, Some(std::time::Instant::now() + Duration::from_secs(5)));
     }
     started
 }
@@ -342,6 +486,19 @@ impl Session {
         self.running.child.id()
     }
 
+    /// Stop reading the compositor's output until the returned value is dropped. Returns
+    /// once neither output relay is reading or handling a line.
+    ///
+    /// For the stretch between starting the game and the launcher confining itself: from
+    /// the moment the game exists, what the compositor prints is no longer only its own.
+    pub async fn hold_output(&self) -> OutputHold {
+        self.held.send_replace(true);
+        // Granted when both relays have let go of theirs — which they do as soon as they
+        // see the switch, also in the middle of waiting for output.
+        let pass = self.pass.clone().write_owned().await;
+        OutputHold { held: self.held.clone(), _pass: pass }
+    }
+
     /// Resolves when the compositor is gone (its window was closed, or it crashed).
     pub async fn exited(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.running.child.wait().await
@@ -359,8 +516,10 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // The process itself is killed with its handle; this is what it leaves behind.
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // The process itself is killed with its handle; this is what it leaves behind. It was
+        // written by the compositor's sandbox, which the game talks to: removed the careful
+        // way, and for a bounded time (what stays is swept by a later launch).
+        let _ = crate::tree::remove(&self.dir, Some(std::time::Instant::now() + Duration::from_secs(5)));
     }
 }
 
@@ -368,8 +527,16 @@ impl Drop for Session {
 /// compositor's sandbox. Never returns.
 pub fn ready_main() -> ! {
     let display = std::env::var("DISPLAY").unwrap_or_default();
+    // What the preloaded cut-off left in the compositor's environment (this process is the
+    // compositor's child, and the library itself is not loaded here). Passed on only if it
+    // is one plain word; its absence is a report too.
+    let report = std::env::var(NOCLIP_STATUS_ENV)
+        .ok()
+        .filter(|word| (1..=32).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
+        .map(|word| format!(" {NOCLIP_FIELD}{word}"))
+        .unwrap_or_default();
     let mut out = std::io::stdout();
-    let announced = writeln!(out, "{READY_PREFIX}{display}").and_then(|_| out.flush()).is_ok();
+    let announced = writeln!(out, "{READY_PREFIX}{display}{report}").and_then(|_| out.flush()).is_ok();
     if announced {
         let mut stdin = std::io::stdin();
         let mut scratch = [0u8; 256];
@@ -409,7 +576,47 @@ mod tests {
             layers: Vec::new(),
             limits: None,
             seccomp: SeccompPolicy::default(),
+            require_clipboard_cut: true,
+            preload_clipboard_cut: true,
         }
+    }
+
+    #[test]
+    fn only_the_report_active_counts_as_a_cut_clipboard() {
+        assert_eq!(ClipboardCut::from_report(Some("active")), ClipboardCut::Active);
+        for (word, says) in [
+            (None, "was not loaded"),
+            (Some("shadowed"), "defines SDL's clipboard functions itself"),
+            (Some("no-sdl"), "does not get SDL's clipboard functions from the dynamic linker"),
+            (Some("data-interface"), "arbitrary data"),
+            (Some("ACTIVE"), "unknown"),
+            (Some(""), "unknown"),
+        ] {
+            match ClipboardCut::from_report(word) {
+                ClipboardCut::Unconfirmed(why) => assert!(why.contains(says), "{word:?}: {why}"),
+                ClipboardCut::Active => panic!("{word:?} was taken for a cut clipboard"),
+            }
+        }
+    }
+
+    #[test]
+    fn without_the_library_nothing_is_preloaded_and_no_report_can_be_inherited() {
+        let mut plan = plan();
+        plan.env.push((NOCLIP_STATUS_ENV.into(), "active".into()));
+        plan.env.push(("LD_PRELOAD".into(), "/somewhere/else.so".into()));
+        plan.preload_clipboard_cut = false;
+        let spec = plan.spec().unwrap();
+        assert!(spec.policy.env.iter().all(|(key, _)| key != "LD_PRELOAD" && key != NOCLIP_STATUS_ENV));
+        assert!(!spec.mounts.iter().any(|m| matches!(m, Mount::RoData { dst, .. } if dst == Path::new(NOCLIP_PATH))));
+
+        // With it: exactly the library, and still no report from outside.
+        let mut plan = self::plan();
+        plan.env.push((NOCLIP_STATUS_ENV.into(), "active".into()));
+        let spec = plan.spec().unwrap();
+        let env =
+            |key: &str| spec.policy.env.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str()).collect::<Vec<_>>();
+        assert_eq!(env("LD_PRELOAD"), [NOCLIP_PATH]);
+        assert!(env(NOCLIP_STATUS_ENV).is_empty(), "the status can only come from the library itself");
     }
 
     #[test]
@@ -478,6 +685,66 @@ mod tests {
         assert_eq!(strip_ansi(b"lone \x1b escape"), b"lone \x1b escape");
     }
 
+    /// A gate nobody holds, and the two handles a [`Session`] keeps to hold it.
+    fn open_gate() -> (Gate, Arc<tokio::sync::watch::Sender<bool>>, Arc<tokio::sync::RwLock<()>>) {
+        let (held, held_rx) = tokio::sync::watch::channel(false);
+        let pass = Arc::new(tokio::sync::RwLock::new(()));
+        (Gate { held: held_rx, pass: pass.clone() }, Arc::new(held), pass)
+    }
+
+    /// What `Session::hold_output` does, for a relay that is not attached to a compositor.
+    async fn hold(held: &Arc<tokio::sync::watch::Sender<bool>>, pass: &Arc<tokio::sync::RwLock<()>>) -> OutputHold {
+        held.send_replace(true);
+        OutputHold { held: held.clone(), _pass: pass.clone().write_owned().await }
+    }
+
+    /// Between the start of the game and the launcher's confinement nothing the compositor
+    /// prints is read — not a line that arrives during the hold, and not the rest of a line
+    /// whose beginning had already arrived. Afterwards nothing is missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_output_is_not_read_until_it_is_released_and_nothing_is_lost() {
+        use tokio::io::AsyncWriteExt;
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink: Sink = {
+            let lines = lines.clone();
+            Arc::new(move |line| lines.lock().unwrap().push(line))
+        };
+        let seen = || lines.lock().unwrap().clone();
+        // A pipe of 64 bytes: what the relay has not read stays visible as back-pressure.
+        let (mut compositor, launcher) = tokio::io::duplex(64);
+        let (gate, held, pass) = open_gate();
+        let task = tokio::spawn(relay(launcher, sink, Arc::default(), None, gate));
+
+        compositor.write_all(b"before the game\nhalf a li").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen(), ["display server: before the game"]);
+
+        // The relay is waiting for the rest of a line at this moment; the hold is granted all
+        // the same, at once.
+        let holding = tokio::time::timeout(Duration::from_secs(5), hold(&held, &pass)).await.expect("hold granted");
+        compositor.write_all(b"ne\nprinted while held\n").await.unwrap();
+        // More than the pipe holds: this write only completes if somebody reads.
+        let mut flood = tokio::spawn(async move {
+            compositor.write_all(&[b'x'; 200]).await.unwrap();
+            compositor.write_all(b"\nlast\n").await.unwrap();
+            compositor
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen(), ["display server: before the game"], "nothing is handled while the output is held");
+        assert!(!flood.is_finished(), "nothing is even read: the writer is still waiting for room");
+
+        drop(holding);
+        let compositor = tokio::time::timeout(Duration::from_secs(5), &mut flood).await.expect("resumed").unwrap();
+        drop(compositor);
+        tokio::time::timeout(Duration::from_secs(5), task).await.expect("the relay ends with its stream").unwrap();
+        let seen = seen();
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        assert_eq!(seen[1], "display server: half a line", "the interrupted line arrives whole");
+        assert_eq!(seen[2], "display server: printed while held");
+        assert_eq!(seen[3], format!("display server: {}", "x".repeat(200)));
+        assert_eq!(seen[4], "display server: last");
+    }
+
     #[tokio::test]
     async fn the_ready_line_is_taken_once_and_everything_else_is_logged() {
         let lines: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -493,7 +760,7 @@ mod tests {
              [gamescope] [Info]  vulkan:   AR24 (0x34325241)\n",
             "x".repeat(1000)
         );
-        relay(input.as_bytes(), sink, recent.clone(), Some(tx)).await;
+        relay(input.as_bytes(), sink, recent.clone(), Some(tx), open_gate().0).await;
         assert_eq!(rx.await.unwrap(), ":7");
         let lines = lines.lock().unwrap();
         assert_eq!(lines[0], "display server: starting");

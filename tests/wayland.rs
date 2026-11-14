@@ -60,29 +60,8 @@ const MANAGER: &str = "wp_security_context_manager_v1";
 
 /// Interfaces that give a client power over other clients or the session. A compositor
 /// that implements security contexts is expected to keep whichever of these it has away
-/// from a sandboxed client.
-///
-/// (The two `ext_*_image_capture_source_manager_v1` interfaces are deliberately absent:
-/// sway leaves them visible, and they only mint opaque handles that nothing but the
-/// withheld `ext_image_copy_capture_manager_v1` can turn into pixels.)
-const PRIVILEGED: &[&str] = &[
-    "zwlr_screencopy_manager_v1",
-    "ext_image_copy_capture_manager_v1",
-    "zwlr_export_dmabuf_manager_v1",
-    "zwp_virtual_keyboard_manager_v1",
-    "zwlr_virtual_pointer_manager_v1",
-    "zwlr_data_control_manager_v1",
-    "ext_data_control_manager_v1",
-    "zwlr_layer_shell_v1",
-    "zwlr_foreign_toplevel_manager_v1",
-    "ext_foreign_toplevel_list_v1",
-    "zwp_input_method_manager_v2",
-    "zwlr_gamma_control_manager_v1",
-    "zwlr_output_manager_v1",
-    "zwlr_output_power_manager_v1",
-    "ext_session_lock_manager_v1",
-    "ext_transient_seat_manager_v1",
-];
+/// from a sandboxed client — and the launcher checks exactly this list at every launch.
+const PRIVILEGED: &[&str] = wayland::PRIVILEGED;
 
 #[test]
 fn a_real_compositor_withholds_its_privileged_interfaces_from_the_sandbox_socket() {
@@ -97,10 +76,19 @@ fn a_real_compositor_withholds_its_privileged_interfaces_from_the_sandbox_socket
     assert!(trusted.contains(MANAGER), "this compositor does not implement security contexts: {trusted:?}");
 
     let dir = std::env::temp_dir().join(format!("bastion-wl-it-{}", std::process::id()));
-    let Setup::Secured(context) = wayland::secure(&compositor, &dir, "integration-test").expect("setup") else {
+    let Setup::Secured(context, offered) = wayland::secure(&compositor, &dir, "integration-test").expect("setup")
+    else {
         panic!("the manager is advertised but the setup reported no support")
     };
+    // What the launcher itself saw on the game's socket while setting it up…
+    let offered = offered.expect("the launcher listed the game's socket");
+    println!("the launcher's own look: {}", offered.describe());
+    assert!(offered.privileged.is_empty(), "{:?}", offered.privileged);
+    assert!(!offered.manager);
+    // …and the same thing, asked again from here.
     let sandboxed = names(&context.socket);
+    assert_eq!(offered.interfaces, sandboxed.iter().cloned().collect::<Vec<_>>());
+    assert_eq!(offered.withheld, trusted.difference(&sandboxed).count());
 
     let withheld: Vec<&String> = trusted.difference(&sandboxed).collect();
     println!("offered to a trusted client: {}", trusted.len());
@@ -167,6 +155,11 @@ async fn a_sandboxed_client_is_offered_only_what_the_security_context_allows() {
         "the session's own socket must not be what the sandbox gets"
     );
     assert!(desktop.notes.iter().any(|n| n.contains("security context")), "{:?}", desktop.notes);
+    // The plan does not say "secured" on the strength of the setup alone: it looked.
+    let seen = desktop.wayland_isolation.clone().expect("a security context was set up");
+    let seen = seen.expect("none of the known privileged interfaces is offered on the game's socket");
+    println!("display plan: {seen}");
+    assert!(seen.contains("interface(s) offered on the game's socket") && seen.contains("withheld"), "{seen}");
 
     let mut base = sandbox::base(&BaseOptions {
         tmp_size_mb: 64,

@@ -19,6 +19,12 @@
 //!
 //! Accepted states are kept as a short history: it is the evidence Mojang support asks for
 //! in an ownership dispute (names and capes the account had, with dates).
+//!
+//! **What moves the pin**, and nothing else does: a first sight; `canary accept` (the whole
+//! profile, because the user looked at the differences and said yes); and a change made
+//! through this launcher — which pins exactly the part that command changed
+//! ([`accept_change`]), not whatever else the profile has become in the meantime. With
+//! `auth.canary = "warn"` a difference is reported and the pin stays where it was.
 
 use std::path::PathBuf;
 
@@ -184,27 +190,76 @@ pub fn check(paths: &Paths, account: &str, profile: &Profile) -> Result<Check> {
     })
 }
 
-/// Pin `profile` as the account's state. The previous state, if it differs, moves to the
-/// history. A damaged record is replaced.
-pub fn accept(paths: &Paths, account: &str, profile: &Profile) -> Result<()> {
+impl Record {
+    /// Make `snapshot` the current state; the previous one, if it differs, moves to the
+    /// history.
+    fn advance(&mut self, snapshot: Snapshot) {
+        let same = Snapshot { recorded: self.current.recorded, ..snapshot.clone() } == self.current;
+        if !same {
+            let previous = std::mem::replace(&mut self.current, snapshot);
+            self.history.push(previous);
+            let excess = self.history.len().saturating_sub(MAX_HISTORY);
+            self.history.drain(..excess);
+        }
+    }
+}
+
+fn store(paths: &Paths, account: &str, record: &Record) -> Result<()> {
     let path = file(paths, account)?;
+    util::create_private_dir_all(&paths.canaries())?;
+    let json = serde_json::to_vec_pretty(record).map_err(|e| Error::Other(format!("encoding the canary: {e}")))?;
+    util::write_atomic(&path, &json, 0o600)
+}
+
+/// Pin `profile` — all of it — as the account's state. The previous state, if it differs,
+/// moves to the history. A damaged record is replaced.
+///
+/// For a first sight and for `canary accept`. A command that changed one thing uses
+/// [`accept_change`]: pinning the whole profile there would also pin whatever somebody else
+/// changed.
+pub fn accept(paths: &Paths, account: &str, profile: &Profile) -> Result<()> {
     let snapshot = Snapshot::of(profile, now());
     let record = match load(paths, account) {
         Ok(Some(mut record)) => {
-            let same = Snapshot { recorded: record.current.recorded, ..snapshot.clone() } == record.current;
-            if !same {
-                let previous = std::mem::replace(&mut record.current, snapshot);
-                record.history.push(previous);
-                let excess = record.history.len().saturating_sub(MAX_HISTORY);
-                record.history.drain(..excess);
-            }
+            record.advance(snapshot);
             record
         }
         Ok(None) | Err(_) => Record { current: snapshot, history: Vec::new() },
     };
-    util::create_private_dir_all(&paths.canaries())?;
-    let json = serde_json::to_vec_pretty(&record).map_err(|e| Error::Other(format!("encoding the canary: {e}")))?;
-    util::write_atomic(&path, &json, 0o600)
+    store(paths, account, &record)
+}
+
+/// The part of a profile that a command of this launcher changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aspect {
+    Skin,
+    Cape,
+}
+
+/// Record a change that was made through this launcher. `after` is the profile as Mojang
+/// reports it once the change is made; of it, exactly the changed `aspect` is pinned, on top
+/// of what was pinned before. Everything else stays as it was pinned: if the name, or the
+/// other aspect, differs as well — because somebody changed it between this command's two
+/// looks at the profile, or earlier while the canary only warns — that is still a
+/// difference at the next check, and is returned here for the caller to report.
+///
+/// With nothing pinned yet, `after` is pinned as a first sight. A damaged record is an
+/// error and is left as it is: only `canary accept` replaces one.
+pub fn accept_change(paths: &Paths, account: &str, after: &Profile, aspect: Aspect) -> Result<Vec<String>> {
+    let seen = Snapshot::of(after, now());
+    let Some(mut record) = load(paths, account)? else {
+        store(paths, account, &Record { current: seen, history: Vec::new() })?;
+        return Ok(Vec::new());
+    };
+    let mut pinned = Snapshot { recorded: seen.recorded, ..record.current.clone() };
+    match aspect {
+        Aspect::Skin => pinned.skin = seen.skin.clone(),
+        Aspect::Cape => pinned.cape = seen.cape.clone(),
+    }
+    let unpinned = pinned.differences(&seen);
+    record.advance(pinned);
+    store(paths, account, &record)?;
+    Ok(unpinned)
 }
 
 pub fn forget(paths: &Paths, account: &str) -> Result<()> {
@@ -340,6 +395,59 @@ mod tests {
         forget(&paths, "default").unwrap();
         forget(&paths, "default").unwrap();
         assert_eq!(check(&paths, "default", &profile()).unwrap(), Check::First);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A change made through the launcher pins what that command changed and nothing else:
+    /// a rename by somebody else — in the seconds between the command's two looks at the
+    /// profile, or earlier under `warn` — does not become part of the pin.
+    #[test]
+    fn an_own_change_pins_its_own_aspect_and_leaves_foreign_changes_unpinned() {
+        let (root, paths) = paths();
+        accept(&paths, "default", &profile()).unwrap();
+
+        // The user sets a skin; when the profile is fetched again, the name has changed too.
+        let mut after = profile();
+        after.skins[0].texture = "00000000000000000000000000000abc".into();
+        after.name = "Sold4Cheap".into();
+        let unpinned = accept_change(&paths, "default", &after, Aspect::Skin).unwrap();
+        assert_eq!(unpinned, ["player name: Notch → Sold4Cheap"], "reported, and not pinned");
+        let record = load(&paths, "default").unwrap().unwrap();
+        assert_eq!(record.current.name, "Notch", "the foreign rename is not the pin");
+        assert_eq!(record.current.skin.as_ref().unwrap().0, "00000000000000000000000000000abc", "the own change is");
+        assert_eq!(record.history.len(), 1);
+        // So the next check still raises the alarm, about exactly the foreign change.
+        assert_eq!(
+            check(&paths, "default", &after).unwrap(),
+            Check::Changed(vec!["player name: Notch → Sold4Cheap".into()])
+        );
+
+        // A cape command pins the cape and not a skin somebody else set.
+        let mut later = profile();
+        later.capes[0].active = false;
+        later.capes[1].active = true;
+        later.skins[0].texture = "ffffffffffffffffffffffffffffffff".into();
+        let unpinned = accept_change(&paths, "default", &later, Aspect::Cape).unwrap();
+        assert!(unpinned.len() == 1 && unpinned[0].starts_with("skin: "), "{unpinned:?}");
+        let record = load(&paths, "default").unwrap().unwrap();
+        assert_eq!(record.current.cape.as_ref().unwrap().1, "Vanilla");
+        assert_eq!(record.current.skin.as_ref().unwrap().0, "00000000000000000000000000000abc");
+
+        // Nothing else changed: nothing is left unpinned, and the profile then checks clean.
+        accept(&paths, "default", &profile()).unwrap();
+        let mut own = profile();
+        own.skins.clear();
+        assert!(accept_change(&paths, "default", &own, Aspect::Skin).unwrap().is_empty());
+        assert_eq!(check(&paths, "default", &own).unwrap(), Check::Unchanged);
+
+        // A damaged record is not replaced by the way: that is `canary accept`'s decision.
+        let path = paths.canaries().join("default.json");
+        std::fs::write(&path, "damaged").unwrap();
+        assert!(accept_change(&paths, "default", &own, Aspect::Skin).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"damaged");
+        // Nothing pinned at all: a first sight.
+        assert!(accept_change(&paths, "fresh", &own, Aspect::Skin).unwrap().is_empty());
+        assert_eq!(check(&paths, "fresh", &own).unwrap(), Check::Unchanged);
         std::fs::remove_dir_all(root).unwrap();
     }
 
