@@ -1,13 +1,23 @@
 # TODO — where the work stands
 
-Snapshot of 2026-11-14, after the fourth round was merged into this tree. Everything under
-"Done in the fourth round", "Done in the third round" and "Done in the second pass" is
-committed.
+Snapshot of 2026-11-14, after the fifth round was merged into this tree. Everything under
+"Done in the fifth round", "Done in the fourth round", "Done in the third round" and "Done
+in the second pass" is committed.
 
-The fourth round — the in-game phone and its services (Spotify, the browser with Discord,
-clips, Realms, settings sync), the redone home screen and dark menus, and the companion mod
-on every Fabric release from 1.20.1 to 26.3 — was built by five engineers in separate
-working copies against one contract (`docs/notes/round4-contract.md`) and is **merged**
+The fifth round — **Minecraft: Bedrock Edition**, the Android build, run by your installed
+`mcpelauncher-client` inside the launcher's sandbox: finding the client and a store of
+imported versions, the launch and the client's sandbox profile, the network (HTTPS by name,
+RakNet to listed servers, Realms and event-server joins approved outside the game), the
+sign-in outside the game, and the account-risk controls (the licence gate, the per-session
+data directory, scram, doctor, the canary) — was built by five engineers in separate working
+copies against one contract (`docs/notes/round5-contract.md`, after the research in
+`docs/notes/bedrock-research.md`), **integrated** with a sign-in handler for the desktop
+added on top (`docs/notes/bedrock-integration.md`), and documented in this pass. Nothing of
+it has run with the real client, the game, a Google Play purchase or a Microsoft account:
+none was on the development machine. The fourth round — the in-game phone and its services
+(Spotify, the browser with Discord, clips, Realms, settings sync), the redone home screen and
+dark menus, and the companion mod on every Fabric release from 1.20.1 to 26.3 — was built the
+same way against its own contract (`docs/notes/round4-contract.md`) and merged before it
 (commits `a671183`, `afd43a9`, `18d3911`, `06e6ff0`; integration commits `d3f6931`,
 `a533e43`, `c6f25a8`; then the documents). The third round — the "workshop HUD" front end,
 the first-party companion Fabric mod, the UDP relay for voice chat with the fix of review
@@ -19,13 +29,40 @@ to GitHub Pages by `.github/workflows/pages.yml`) and continuous integration
 
 Commit references are to this repository's history. Rounds 3 and 4 were built in separate
 working copies and are committed here one step per merge or fix; each such commit's message
-lists the commits of the working copy it contains.
+lists the commits of the working copy it contains. The fifth round is referred to by its
+notes files, which name the steps of its integration.
 
 How to read this file: **Open** is what is left and why; **Blocked on you** needs
-something only you have; **Done in the fourth round**, **Done in the third round** and
-**Done in the second pass** are the record of what changed, with where it is and how it was
-checked; **Independent review** is the record of the review round; **Decided against /
+something only you have; **Done in the fifth round**, **Done in the fourth round**, **Done
+in the third round** and **Done in the second pass** are the record of what changed, with
+where it is and how it was checked; **Independent review** is the record of the review round; **Decided against /
 deferred** keeps the reasoning for the big ideas so they are not re-argued from scratch.
+
+Verification state of the merged tree of the fifth round (the integrator's runs,
+2026-11-14, `docs/notes/bedrock-integration.md` section 6, and this documents pass's, with
+separate XDG directories, a private runtime directory, only private displays, and never your
+session bus): `cargo fmt --check` clean, also in `fuzz/`; `cargo clippy --workspace
+--all-targets` without warnings; `cargo test --workspace` 986 passed, 0 failed, 2 ignored
+(44 result lines; how such a number is counted: README "Status"), and the same again in this
+pass, where one of five runs of the launcher's unit tests failed once on a flaky store test
+(see Open); the Bedrock suites in it: `bedrock_launch` (three sessions of a stand-in client
+in the real sandbox — the sign-in pasted at the trusted input in one, handed back by the real
+`bastion-mc bedrock hand-back` with the launcher confined in another), `bedrock_sandbox` 3,
+`signin_stub` 4, `bedrock_store` 3, `bedrock_net` 7, `bedrock_cli` 4; on the Java launch path
+the opt-in suites again — nested 4, Wayland 2, `nested_game` 1, `companion_game` on three
+instances, `browser_game` 1, `clips_game` 2 — and demo launches of three instances, which
+reached their texture atlases with the launcher confined on all threads; the CI's steps
+simulated with a clean target directory and a fresh home (every step passed), and once more
+with bubblewrap, ffmpeg, xdg-dbus-proxy, Firefox and `systemd-run` hidden (only tests that
+check root ownership failed, an artefact of the user namespace used to hide the programs);
+`cargo deny check` ok, no dependency added in the round; `python3 -I site/build.py --check`
+passes; `makepkg` from a `git archive` of the tree: the packages build, `check()` and the
+hardening check pass, and the `bastion-mc` package holds `docs/BEDROCK.md` and the desktop
+entry of the sign-in handler, which is valid and was registered as the scheme's default in
+isolated XDG directories (`gio open` ran the command). **Not run:** anything with the real
+`mcpelauncher-client`, a game file, a Google Play purchase or a Microsoft account; the tests
+that reach Mojang's and Microsoft's live services (`BASTION_NET_TESTS=1`); the libFuzzer
+targets; the fifth round's tree on GitHub.
 
 Verification state of the merged tree of the fourth round (the integrator's runs,
 2026-11-14, with separate XDG directories, only private displays, and never your session
@@ -179,17 +216,16 @@ libFuzzer targets themselves.
       like any other window; running it in the nested compositor, as the game, would
       isolate it, at the cost of a second compositor for a short task.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
-- [ ] **CI on GitHub: the first run** (run 43580491851, 2026-11-14, after the first push of
-      `.github/workflows/ci.yml`): formatting and lints, the fuzz check and `cargo deny`
-      passed; two jobs failed for what the local simulation on the development machine could
-      not show, both fixed in the commit after this one's first run: the package job's
-      `git archive` ran as root in the container on a checkout owned by the runner's user
-      ("dubious ownership"; now `git -c safe.directory=…` for that command, reproduced and
-      checked in a user namespace), and two unit tests of `src/spotify/picture.rs` ran
-      `ffmpeg`, which the container lacks (they now read two sample JPEGs from
-      `src/spotify/testdata/`; the PKGBUILD's `check()` in a clean chroot would have failed the
-      same way). Still to be seen on GitHub: the front end's, the protocol's and the
-      website's tests in the container, and the package job past `git archive`.
+- [ ] **A flaky unit test of the Bedrock store** (found in the documents pass of the fifth
+      round): `bedrock::store::tests::remove_refuses_while_a_launch_holds_the_version_and_removes_it_after`
+      failed once in five runs of the launcher's unit tests — `remove` still found the version
+      locked after the test had dropped both of its descriptors ("in use by a running launch
+      (it holds the version open)") — and passed in the four others and in eight runs on its
+      own. Not investigated further. One explanation that fits: the lock is shared by every
+      copy of the descriptor, and a process that another test starts at that moment holds
+      copies of the test process's descriptors until it executes its program (they are
+      close-on-exec). If that is it, the store is right and the test needs a retry or the
+      descriptor opened where no other test forks.
 - [ ] **The integration suites on a GitHub runner** (`.github/workflows/integration.yml`,
       started by hand): never run. The runner's kernel (7.0) lacks Landlock ABI 10, so the
       UDP-rule tests will skip; what else differs from the development machine (AppArmor's
@@ -214,6 +250,65 @@ libFuzzer targets themselves.
       compiled in, and its live test failing (a project renamed or removed) is the cue to
       update it.
 
+### Bedrock (the fifth round)
+- [ ] **The real client, game and accounts have never run** under the launcher (none was on
+      the development machine; what that leaves unverified is listed per package under "Not
+      verified here", and what you can do about it under "Blocked on you"). When they do, in
+      this order (`docs/notes/bedrock-integration.md` §8):
+      - **Profile the client's system calls once**: one session with `[bedrock] seccomp =
+        "log"`; fold what the kernel log names (`journalctl -k -g 'type=1326'`) into
+        `seccomp::BEDROCK_ALLOW`, or your `[bedrock] extra_syscalls`. The allowlist was
+        derived from the client's source and has never met the real client.
+      - **Check that a second session asks for the sign-in again.** If it does not, the
+        game keeps its sign-in somewhere the per-session directory does not cover, and the
+        kept folders (`minecraftWorlds/`, `minecraftpe/`) hold sign-in material (threat model
+        B16).
+      - **Measure a real version**: its size, number of files and depth against
+        `store::LIMITS`, and the time a launch spends checking it (single-threaded; hashing
+        in parallel would shorten it if it is slow).
+- [ ] **The sign-in's scope, after the first real sign-in** (bedrock-signin.md §4): a page that
+      asks for more than `service::user.auth.xboxlive.com::MBI_SSL` is refused, with the scope
+      named in the warning. If the real start address carries another scope, review what it
+      grants before adding it to `check::SCOPE`.
+- [ ] **The 1023-byte limit of the final address** (bedrock-signin.md §4): the client reads
+      the address with one 1024-byte read, so a longer one could not reach it from any
+      webview; the launcher refuses such an address with that reason instead of letting it
+      be cut. Whether real addresses stay below it is seen at the first real sign-in.
+- [ ] **LAN, same-machine servers and NetherNet are refused** (bedrock-net.md §4, §6): LAN and
+      loopback servers need a per-server `allow_private` in the shared `BedrockServer` (a
+      product decision); NetherNet (friends' worlds, NetherNet Realms) connects to addresses
+      its signalling negotiates, which the relay cannot tie to a name or an approval.
+- [ ] **The client's build downloads curl without a checksum** (threat model B3):
+      mcpelauncher's manifest builds curl 8.21.0 statically from a download it does not
+      check (`ext/curl.cmake`, `USE_OWN_CURL=ON` by default), and the AUR PKGBUILD of
+      `mcpelauncher-linux` 1.8.7-1 keeps that default. Not the launcher's code; read in the
+      manifest, never built here. Whether the client builds and runs against the system's
+      libcurl (`USE_OWN_CURL=OFF`) was not tried.
+- [ ] **Featured servers** (bedrock-net.md §4) come by host name from the gatherings
+      discovery: you must list them, and the refusal line says how. The broker could learn
+      their names from that answer and say so (not built).
+- [ ] **Unlisted IP addresses typed into the game** never reach the relay (no route), so they
+      cannot be reported; a local route for all addresses in the namespace would let the
+      relay see, refuse and report them (a change to `sandbox::netns`, not made).
+- [ ] **A tripwire for a failed token split** (bedrock-risk.md §7, a proposal): a session
+      whose game reaches `xsts.auth.xboxlive.com` or `sisu.xboxlive.com` without a sign-in
+      through the bridge had a token from somewhere; the launch could say so at its end.
+      Not built.
+- [ ] **`scram --bedrock-data`** (bedrock-risk.md §7, a proposal): delete Bedrock worlds and
+      settings too, for a user who suspects the game kept a sign-in there. Not built; scram
+      keeps them and says so.
+- [ ] **`--join` for Bedrock**: the client takes `-u <minecraft:// URI>`, whose form for a
+      server was not verified; `launch --join` refuses a Bedrock instance and says to list the
+      server instead.
+- [ ] **The `bedrock` commands with `--events`** (bedrock-store.md §5): not offered, so a front
+      end cannot list or import versions; the window offers none of them.
+- [ ] **The front end's demo switch** stays visible beside a Bedrock instance, where it changes
+      nothing (bedrock-integration.md, decision 8).
+- [ ] **A terminal launch of Bedrock end to end** (bedrock-integration.md §7): the launch takes
+      only a root-owned client under `/usr`, which a stand-in cannot be, so the launch tests
+      give the client to `launch_with`; the terminal reader was run by its unit tests and a
+      pseudo-terminal probe, not by a real launch.
+
 ### Needs a design decision first
 - [ ] **Wayland compositors without `wp_security_context_v1`** (Mutter/GNOME, Weston,
       Wayfire — per wayland.app's table, 2026-11-13). `auto` falls back to the session
@@ -231,9 +326,13 @@ libFuzzer targets themselves.
 - [ ] **Login-protocol proxy**, **signed server allowlist**, **approval prompts beyond
       Realms joins**, **frozen `/usr`**: see "Decided against / deferred". Each is days
       of work; say which.
-- [ ] **Approving a Realms join from the front end** (realms-sync.md §7): it would let
-      vanilla instances (no phone) approve joins, but the front end would have to send the
-      launcher something other than `stop`, and that protocol is one-way on purpose.
+- [ ] **Approving a Realms join of a Java launch from the front end** (realms-sync.md §7):
+      it would let vanilla instances (no phone) approve joins. Since the fifth round the
+      front end can send answers (`answer realms <code>` on the launcher's standard input, the
+      trusted input of `src/events/input.rs`), and a Bedrock session takes its Realms codes
+      that way (`realms::answers`); a Java launch still takes the code only from the phone.
+      Whether a Java launch should take it from the front end too is the decision; wiring it
+      is small (the Bedrock launch shows how).
 - [ ] **Clips in a burner session**: `src/launch.rs` prepares the recorder for a `--burner`
       launch like for any other (the browser is not started there, Spotify has no network,
       settings sync and Realms take no part). A clip saved there stays in the clips folder:
@@ -364,6 +463,39 @@ libFuzzer targets themselves.
       anything with another host, STUN/ICE or WebRTC will not); the cargo-fuzz target `udp`
       (compile-checked only); Simple Voice Chat's own network code (read from its class
       files, not run).
+- [ ] **Bedrock: the client and the version store** (bedrock-store.md §3): a real
+      `mcpelauncher-linux` package and its record in pacman's database, a version that
+      `mcpelauncher-ui` downloaded, a real compiled `AndroidManifest.xml`, real Flatpak and
+      AppImage installs, a mounted FUSE file system, device files in a download (a user cannot
+      make them) — so the import's limits and the time a launch spends checking a real version
+      are unmeasured; the libFuzzer target `bedrock_store`.
+- [ ] **Bedrock: the launch and its sandbox** (bedrock-launch.md §3, bedrock-integration.md §7):
+      the real client starting with these mounts, environment (PATH, HOME, the working
+      directory `/`, the telemetry switch) and arguments; its allowlist complete; an empty
+      read-only `mods/` accepted; SDL3/EGL, sound, the nested compositor or a Wayland security
+      context with a Bedrock session (none ran with a display, a GPU or sound); resource limits
+      (the tests use `cgroup = "off"`) and the default memory ceiling against the game; where
+      the game keeps its Xbox tokens, and that nothing of the sign-in lands in the kept folders.
+- [ ] **Bedrock: the network** (bedrock-net.md §3): a real Bedrock server, Realm or event
+      server; the real Realms API and gatherings service (their paths and answers were read in
+      a third-party client, gophertunnel); whether the game's TLS stack accepts the per-launch
+      authority (shown with Arch's curl and OpenSSL); whether the client binds fixed UDP ports,
+      pings and connects from different sockets, or opens a flow with something other than a
+      ping or connection request; an approved join to an IPv6 address; the libFuzzer targets
+      `raknet`, `bedrock_realms`, `bedrock_gatherings`.
+- [ ] **Bedrock: the sign-in** (bedrock-signin.md §3, bedrock-integration.md §3): that the
+      client executes the stub and takes its line, and that the game's sign-in library accepts
+      the rebuilt address; Microsoft's real start address and its scope, its last redirect,
+      two-factor steps, passkeys, account creation; a real browser following the last redirect
+      into the desktop's handler (the path was exercised with `gio open`, not a browser);
+      Chromium-based browsers (where they show the final address); the background race of a
+      terminal launch; the libFuzzer targets `signin_frame`, `signin_url`, `answers`.
+- [ ] **Bedrock: the gate, scram, doctor and the canary** (bedrock-risk.md §3): the real game's
+      token files in scram; `doctor`'s client line against a real package; a cape claimed in
+      Bedrock reaching the Java profile, and bastion-mc's Java sign-in (never live); Microsoft's
+      sign-out pages were not fetched again in this round.
+- [ ] **Bedrock: the Arch package installed** (bedrock-integration.md §7): `makepkg` built it;
+      nothing was installed with pacman, so desktop-file-utils' hook was read, not run on it.
 
 ## Blocked on you (hardware, accounts, identity)
 - [ ] **Live Microsoft → Xbox → Minecraft sign-in.** Needs your Azure client ID and
@@ -381,6 +513,22 @@ libFuzzer targets themselves.
       mode, the pass connecting to the Realm's server; tested against a stand-in Realms
       service only. First things to run: `[realms] approve = "code"` in a Fabric instance
       with the phone, a join; then `bastion-mc realms totp-setup` and `approve = "totp"`.
+- [ ] **Minecraft: Bedrock Edition, for real** (the fifth round; nothing of it has met the real
+      client or game): `mcpelauncher-linux` and `mcpelauncher-ui` built from the AUR (read
+      their PKGBUILDs first), Minecraft bought on Google Play — with a Google account of its
+      own — and a version downloaded with `mcpelauncher-ui`; then `[bedrock]
+      accept_licence_substitution = true`, `bastion-mc bedrock import`, `bastion-mc instance
+      new … --bedrock`. First things to run: one session with `[bedrock] seccomp = "log"` (see
+      Open); a session signed in with your Microsoft account (two-factor steps or a passkey;
+      the browser handing the address back through the handler, and pasting it); a second
+      session, which must ask for the sign-in again.
+- [ ] **A Bedrock server, a Realm, an event** (in a signed-in Bedrock session): a listed
+      server; a Realm join approved in the front end's panel and on the terminal (`[realms]
+      approve = "code"`); an event server when Mojang runs one (none was running on
+      2026-11-14); whether a challenge is credited with telemetry on, and off.
+- [ ] **A cape claimed in Bedrock reaching your Java profile**: `bastion-mc skin show` listing
+      it and `bastion-mc cape set` wearing it — which also needs bastion-mc's own Java sign-in
+      (the first item of this list).
 - [ ] **A Spotify client ID and a Spotify account** (Premium for playback control through
       the Web API): `bastion-mc spotify login`, then a launch with the phone — search,
       queue, devices, control without the desktop app; and the Spotify desktop app itself
@@ -418,17 +566,150 @@ libFuzzer targets themselves.
       whose sign-ins you can lose.
 - [ ] **PKGBUILD**: the real `url` (a value is there, still marked TODO), your
       release-signing key in `validpgpkeys`, a signed tag. Everything else in it is done
-      (auditable build, reproducibility notes, vendoring recipe, the documents of the third
-      round installed as a tree — see Open for `docs/PHONE.md` and the fourth round's
-      optional packages).
+      (auditable build, reproducibility notes, vendoring recipe, the documents installed as a
+      tree — `docs/PHONE.md`, `COMPANION.md` and `MODS.md` since the fourth round,
+      `docs/BEDROCK.md` since the fifth —, the phone's optional packages, and the desktop entry
+      of the Bedrock sign-in handler with desktop-file-utils as optional).
 - [ ] **Coverage-guided fuzzing**: `rustup toolchain install nightly && cargo install
-      cargo-fuzz`, then `fuzz/README.md`. The 24 targets compile (`cargo check --offline
-      --bins` in `fuzz/`, run on the merged tree of the fourth round while its documents were
-      written, with the lock file brought up to date — see Open); they have never run.
+      cargo-fuzz`, then `fuzz/README.md`. The 31 targets (seven of them the fifth round's:
+      `bedrock_store`, `raknet`, `bedrock_realms`, `bedrock_gatherings`, `signin_frame`,
+      `signin_url`, `answers`) compile (`cargo check` in `fuzz/`, last run by the integrator of
+      the fifth round on its merged tree); they have never run.
 - [ ] **`mc-vault` account / `ptrace_scope=3`**: documented (`docs/MC_VAULT_ACCOUNT.md`),
       needs root; not exercised.
 - [ ] **Minecraft help-centre wording in the runbook**: their site needs a browser; only
       the request-form address was checked to exist. Read it once and adjust phase 3.
+
+## Done in the fifth round
+
+Minecraft: Bedrock Edition, the Android build. The record of each package — what was
+verified, how, and what was not — is its notes file in `docs/notes/` (index:
+`docs/README.md`); the contract the five packages built against is
+`docs/notes/round5-contract.md`, the research behind it `docs/notes/bedrock-research.md`, and
+the integration `docs/notes/bedrock-integration.md`. Where a note and the code disagree, the
+code is right. Nothing of this round has run with the real client, the game, a Google Play
+purchase or a Microsoft account.
+
+### The installed client and the version store — `docs/notes/bedrock-store.md`
+- `bedrock::runtime` finds the installed `mcpelauncher-client` (`/usr/bin`, `/usr/local/bin`,
+  or `[bedrock] client`) and holds it to a stricter form of the JDK's rule: root-owned, every
+  directory and link hop on the way root-owned and writable by nobody else, not under the
+  home, not on FUSE, an x86-64 program, not set-user-ID; Flatpak and AppImage installs
+  refused, each with the reason; the client's data directory checked file by file; every
+  place where the client could find a sign-in window listed; the version taken from pacman's
+  database (the client is never run outside the sandbox).
+- `bedrock::store`: `bastion-mc bedrock client | import <dir> [--id ID] | versions [--verify]
+  | remove <id>`. The import copies only what the client reads (x86_64 builds only), refuses
+  links, hard links, FIFOs, sockets, devices, names that are not plain, trees beyond its
+  limits and any APK, works relative to directory descriptors, ends when a file changes while
+  it is copied, writes a SHA-256 manifest last and leaves the copy read-only; every launch
+  checks every file from the directory it then mounts; `remove` is refused while a launch
+  holds the version (a shared `flock`) or a marked launch names it.
+- Verified: 14 tests of the discovery on fake install trees, 19 of the store, unit tests of
+  its compiled-XML, manifest and ELF readers, 3 of the commands end to end with the real
+  binary (`tests/bedrock_store.rs`); `/usr/bin/true` as a root-owned program from a package;
+  the `bedrock_store` harness, once 3 × 150 000 and 2 000 000 generated inputs.
+
+### The launch and the client's sandbox — `docs/notes/bedrock-launch.md`
+- `Kind::Bedrock` and `instance new <id> --bedrock <version>`; Java keys in a Bedrock
+  instance refused with the reason; the Java-only commands refuse it; `launch` refuses
+  `--burner`, `--join` and `--repair` and takes `--demo` with a note that it changes nothing.
+- The client's sandbox profile: only the client, its libraries, the loader and the stub may
+  run; the version read-only, by descriptor; a data root of the session's own, into which
+  only the worlds, `games/com.mojang/minecraftpe` and the client's settings file are bound
+  from the instance's `bedrock-data/` (none of the settings file's sixteen keys names a path
+  or a program: checked in the client's source); `mods/` empty and read-only; a system-call
+  allowlist of the client's own with the tripwire, and a log mode for profiling it that still
+  refuses namespaces, keyrings, io_uring, userfaultfd and perf events; `[bedrock]
+  extra_syscalls`; network `filtered` or `none`, never `open`; a sixth protection aspect,
+  `sign-in`.
+- Verified: `tests/bedrock_launch.rs` (a stand-in client the test compiles, run in the real
+  sandbox), `tests/bedrock_sandbox.rs` (the client's filter in the kernel, 3),
+  `tests/bedrock_cli.rs` (4), unit tests. Its branch: `cargo test --workspace` 799 passed.
+
+### The network — `docs/notes/bedrock-net.md`
+- The relay's Bedrock profile: HTTPS by name only (exact names, sub-domain suffixes, and a deny
+  list that wins over them: the Java services and NetherNet's signalling); RakNet over UDP to
+  the servers you list, a flow opened only by a RakNet ping or connection request, only to the
+  address looked up for a listed server, within limits; Realms and event-server joins through
+  a broker that terminates TLS for four hosts with a name-constrained authority made for each
+  launch, holds the join answer and hands the game a one-time pass once you approved outside
+  the game; NetherNet and private addresses refused with the reason; `prepare` before the
+  sandbox, `start` after the launcher has confined itself.
+- Verified: unit tests of the rules, the RakNet parser, the relay's table and the broker;
+  `tests/bedrock_net.rs` (7): a sandboxed Python and curl client against a stand-in RakNet
+  server and stand-in Realms and gatherings services over TLS, also with the launcher
+  confined; harnesses `raknet`, `bedrock_realms`, `bedrock_gatherings` (once 60 000 inputs
+  each with three seeds). Its branch: `cargo test --workspace` 817 passed.
+
+### The sign-in outside the game — `docs/notes/bedrock-signin.md`
+- The stub: the launcher's own binary under the name `mcpelauncher-webview`, where the client
+  looks for its sign-in window. The bridge server checks each request — only Microsoft's page
+  for Minecraft for Android's own client, its redirect, `response_type=code`, the Xbox scope,
+  PKCE with S256, a state; no override or return-address parameters — and shows the page
+  outside the game; the address is taken only from the trusted input (the front end's `answer
+  signin` line, the terminal while the launcher is its foreground job), checked against this
+  sign-in's state, and only its code and state go back to the game; prompts and connections
+  are bounded. New events `SignInPage` and `Answerable`; the front end's *Microsoft sign-in for
+  Bedrock* panel; `realms::answers`, which takes Realms codes typed outside the game.
+- Verified: the answer grammar, the trusted input, the URL checks and frames, the server over
+  real sockets (14 tests now, the handler's included), the real binary as the stub in
+  bubblewrap under an allowlist of exactly its 30 system calls (`tests/signin_stub.rs`, 4),
+  the front end (logic, views, the emulated application), Firefox 159 against a stand-in
+  redirect page; harnesses `signin_frame`, `signin_url`, `answers`. Its branch: `cargo test
+  --workspace` 830 passed.
+
+### The gate, scram, doctor and the canary — `docs/notes/bedrock-risk.md`, `docs/BEDROCK.md`
+- `policy::gate` (every Bedrock launch refused until `accept_licence_substitution = true`,
+  with what is accepted and what the launcher does not do); the sessions' data directories
+  (`bedrock-sessions/` in the cache, 0700, locked, removed at the session's end, and what a
+  killed session left at the next Bedrock start); `doctor`'s Bedrock section; scram stops a
+  Bedrock session (a marker of its own kind) and deletes what Bedrock sessions left, keeping
+  the worlds and saying so; the canary names a gained cape and pins it, and the lines after a
+  signed-in session say where a cape shows; the user guide `docs/BEDROCK.md` (written by this
+  package, checked against the merged code by the integrator, and once more by this pass).
+- Verified: unit tests; `tests/scram.rs` (15, four with stand-in Bedrock sessions); `doctor`
+  and scram's confirmation in isolated directories. Its branch: the launcher 651 tests, the
+  front end 126, the protocol 7, none failed.
+
+### Integration — `docs/notes/bedrock-integration.md`
+- The five packages merged and reconciled decision by decision (its section 2): one data
+  directory per session (the risk package's) with the launch package's kept parts bound into
+  it; the version held for the whole session, a duplicate of its descriptor mounted; every
+  installed sign-in window covered by the stub; `PATH` exactly `/bastion/bin:/usr/bin` and the
+  working directory `/`; the bridge served after the confinement, the stub's system calls held
+  to the client's filter; the network package's `prepare`/`start` in place of the launch
+  package's placeholder rules; Realms answers through one path (`totp` acts as `code` in a
+  Bedrock session); the gate first, the `bedrock:` marker, leftovers removed before the
+  session; `[bedrock] telemetry = false` also sets the client's own
+  `MCPELAUNCHER_DISABLE_TELEMETRY=1`; the front end plays a Bedrock instance without a Java
+  sign-in or demo mode. Found while integrating: `bedrock remove` read only `launch:`
+  markers, and the `bedrock_store` harness had no libFuzzer target; both fixed.
+- **The desktop's sign-in handler** (its section 3): the packaged desktop entry for
+  `x-scheme-handler/ms-xal-0000000048183522` runs `bastion-mc bedrock hand-back <address>`,
+  which hands the address to the running session through a socket in your runtime directory
+  (0600 in a 0700 directory, bound before the confinement, the peer's user id checked); the
+  session checks it as it checks a pasted one, and a refused one does not use up the prompt's
+  tries; one session holds the handler, a second falls back to pasting and says so. The
+  PKGBUILD installs the entry and `docs/BEDROCK.md`, and names desktop-file-utils as optional
+  for its hook. Verified by unit tests, the end-to-end test (the real command, with the
+  launcher confined) and `gio open` in isolated XDG directories.
+- Verification of the merged tree: above, and its section 6.
+
+### Documents (this pass)
+- README: an introduction paragraph, Status rows for Bedrock and a recount, a section
+  "Minecraft: Bedrock Edition", the front end's sixth aspect and sign-in panel, the Java-only
+  statements about UDP and Realms qualified, the emergency paragraph, configuration, layout,
+  tests (the new suites, and the temporary directory the suite assumes: re-measured), the
+  documents and the source map. `docs/THREAT_MODEL.md`: the new asset and adversaries, the
+  trust boundary of a Bedrock session, section 4.8 with rows B1 to B39 (the integration's
+  consolidated table), section 5's items 17 to 19 and item 7's Bedrock sentence, a deviation,
+  experiments E33 to E37, what was built and what not. `docs/SCRAM_RUNBOOK.md` (the Bedrock
+  step; `runbook::LINKS` unchanged), `docs/TOKEN_INJECTION.md` (Bedrock sessions have no Java
+  token), `docs/README.md` (the guide and the round's notes), `docs/BEDROCK.md` (one sentence
+  corrected against the code; its maintainer comment taken out for the website), this file.
+- The website: `bedrock.html`, and Bedrock on the overview, getting started and the security
+  overview (`docs/notes/website.md`, section 12).
 
 ## Done in the fourth round
 
@@ -575,7 +856,18 @@ in `docs/notes/` (index: `docs/README.md`); the contract the five packages built
 - CI (`e0b93fe`): `.github/workflows/ci.yml` and the manual `integration.yml` (see Open).
   Simulating its test job found that `check()` needs fonts: `PKGBUILD` has
   `checkdepends=('adwaita-fonts')` now (without a monospace face two layout tests fail, and a
-  clean chroot has no fonts at all).
+  clean chroot has no fonts at all). Its **first run on GitHub** (run 43580491851,
+  2026-11-14, after the first push) passed formatting and lints, the fuzz check and `cargo
+  deny`, and failed two jobs for what the local simulation could not show, both fixed in the
+  commit after that run: the package job's `git archive` ran as root in the container on a
+  checkout owned by the runner's user ("dubious ownership"; now `git -c safe.directory=…` for
+  that command, reproduced and checked in a user namespace), and two unit tests of
+  `src/spotify/picture.rs` ran `ffmpeg`, which the container lacks (they now read two sample
+  JPEGs from `src/spotify/testdata/`; the PKGBUILD's `check()` in a clean chroot would have
+  failed the same way). Its **second run** (run 43581607682, 2026-11-14, on that fix — the
+  tree the fifth round started from) **passed all five jobs**: lints, fuzz, the tests in the
+  Arch container (the launcher's unit tests, the protocol, the front end, the website), `cargo
+  deny`, and `makepkg`. The manual `integration.yml` has still never run (Open).
 - Documents (this pass): the README (the phone and each app, the home screen and dark menus,
   Realms, settings sync, the versions, the new commands, configuration sections and tests,
   one Status row per part), `docs/README.md`, `docs/SCRAM_RUNBOOK.md` (what scram now
