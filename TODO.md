@@ -29,9 +29,13 @@ Simple Voice Chat — loaded their mods, native libraries included, and stopped 
 status 130; `cargo deny check` (offline): advisories, bans, licences and sources ok. The
 README's quick start (`instance new`, `install`, `launch --demo`, `doctor`, `status`,
 `versions`, `config example`) was run on the final commit by the README's writer, and the
-fuzz crate compiles there (`cargo check --bins` in `fuzz/`, all twelve targets). **Not run
-on the merged tree:** `makepkg`, the front end's live test, anything that needs an
-account, `age`, root or another kernel, and the libFuzzer targets themselves.
+fuzz crate compiles there (`cargo check --bins` in `fuzz/`, all twelve targets). On the
+final commit (2026-11-14) the integrator also ran `makepkg` from a tarball of the tree (both
+packages build, `check()` passes, both binaries pass the hardening check, the documents are
+installed as a tree) and the front end's live test (2 passed: a real demo game started,
+followed phase by phase and stopped through the window's own controls). **Not run on the
+merged tree:** anything that needs an account, `age`, root or another kernel, and the
+libFuzzer targets themselves.
 
 ## Open
 
@@ -41,13 +45,6 @@ account, `age`, root or another kernel, and the libFuzzer targets themselves.
       `bastion-mc wiki scram`.
 - [ ] **`README.md` "Status" numbers** drift with every test added; re-count before a
       release (the README says how: the `test result` lines of `cargo test --workspace`).
-- [ ] **`makepkg` on the merged tree.** Last run in the second pass. Since then the review
-      fixes, the third round and the PKGBUILD's `java-environment>=17` came in; the
-      integrator's script for it exists, but it was not run.
-- [ ] **The package installs five documents** (`README.md`, `THREAT_MODEL.md`,
-      `TOKEN_INJECTION.md`, `SCRAM_RUNBOOK.md`, `MC_VAULT_ACCOUNT.md`), not the new
-      `docs/MODS.md`, `docs/COMPANION.md` and `docs/README.md` that the README links to
-      (`packaging/arch/PKGBUILD`, `package_bastion-mc`).
 - [ ] **Java runtimes from Arch's jre packages are not found** (review of the documents).
       The launcher recognises a runtime by its `release` file (`src/java.rs`, `read_release`
       and `discover_in`), and for Java 17 and later Arch ships that file only in the jdk
