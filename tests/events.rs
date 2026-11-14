@@ -94,9 +94,13 @@ fn status_reports_account_and_instances_without_touching_a_token() {
     let (events, code) = sandbox.run(&["status"]);
     assert_eq!(code, 0);
     assert_eq!(events[0], hello(), "the stream always starts with the protocol version");
-    let [_, Event::Account(account), Event::Instances { instances }] = events.as_slice() else {
+    let [_, Event::Account(account), Event::Accounts { default, accounts }, Event::Instances { instances }] =
+        events.as_slice()
+    else {
         panic!("unexpected stream: {events:?}")
     };
+    assert_eq!(default, "default");
+    assert_eq!(accounts.as_slice(), std::slice::from_ref(account), "the only account is the default one");
     assert_eq!(
         account,
         &Account {
@@ -125,7 +129,7 @@ fn status_reports_account_and_instances_without_touching_a_token() {
 
     let (events, _) = sandbox.run(&["status", "--account", "second"]);
     assert!(matches!(&events[1], Event::Account(a) if a.account == "second"));
-    assert!(matches!(&events[2], Event::Instances { instances } if instances.len() == 1));
+    assert!(matches!(&events[3], Event::Instances { instances } if instances.len() == 1));
 }
 
 #[test]
@@ -181,9 +185,47 @@ fn signing_out_clears_the_remembered_identity() {
     }
     assert_eq!(code, 0, "{events:?}");
     assert!(
-        matches!(events.last(), Some(Event::Account(a)) if a.account == account && !a.signed_in && a.player.is_none())
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Account(a) if a.account == account && !a.signed_in && a.player.is_none())),
+        "{events:?}"
+    );
+    // The account is gone from the registry as well: nothing is recorded for it any more.
+    assert!(
+        matches!(events.last(), Some(Event::Accounts { default, accounts })
+            if default == "default" && accounts.iter().all(|a| a.account != account)),
+        "{events:?}"
     );
     assert!(!remembered.exists());
+}
+
+#[test]
+fn accounts_are_listed_and_a_default_can_be_chosen() {
+    let sandbox = Sandbox::new("accounts");
+    let identities = sandbox.root.join("state/bastion-mc/accounts");
+    std::fs::create_dir_all(&identities).unwrap();
+    std::fs::write(identities.join("work.json"), r#"{"player":"Alex","uuid":"069a79f444e94726a5befca90e38aaf5"}"#)
+        .unwrap();
+    let names = |events: &[Event]| match events.last() {
+        Some(Event::Accounts { default, accounts }) => {
+            (default.clone(), accounts.iter().map(|a| a.account.clone()).collect::<Vec<_>>())
+        }
+        other => panic!("expected the account list last, got {other:?}"),
+    };
+    let (events, code) = sandbox.run(&["account", "list"]);
+    assert_eq!(code, 0);
+    assert_eq!(names(&events), ("default".to_string(), vec!["default".to_string(), "work".to_string()]));
+
+    let (events, code) = sandbox.run(&["account", "default", "work"]);
+    assert_eq!(code, 0);
+    assert_eq!(names(&events), ("work".to_string(), vec!["work".to_string()]));
+    // From now on commands without --account mean that account.
+    let (events, _) = sandbox.run(&["status"]);
+    assert!(matches!(&events[1], Event::Account(a) if a.account == "work"), "{events:?}");
+
+    let (events, code) = sandbox.run(&["account", "default", "../etc"]);
+    assert_eq!(code, 2, "{events:?}");
+    assert!(matches!(events.last(), Some(Event::Error { .. })));
 }
 
 /// A browser sign-in waits for the user for minutes. A front end must be able to abandon it:

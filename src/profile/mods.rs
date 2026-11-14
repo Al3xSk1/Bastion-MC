@@ -49,12 +49,18 @@ fn list(dir: &File) -> Result<Vec<Vec<u8>>> {
 /// Verify `dir` against the manifest's mod list. An absent directory is acceptable only when
 /// no mods are expected.
 pub fn verify_mods_dir(dir: &Path, expected: &[ModEntry]) -> Result<Vec<VerifiedMod>> {
+    verify_listed(dir, expected, "mod", "the signed manifest")
+}
+
+/// The same check for any directory that must hold exactly a recorded set of files.
+/// `noun` names one file ("mod", "resource pack"), `list` the record it is checked against.
+pub fn verify_listed(dir: &Path, expected: &[ModEntry], noun: &str, list_name: &str) -> Result<Vec<VerifiedMod>> {
     let handle = match open_dir(dir) {
         Ok(h) => h,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && expected.is_empty() => return Ok(Vec::new()),
         Err(e) => {
             return Err(Error::Policy(format!(
-                "mods directory {} cannot be opened as a real directory: {e}",
+                "{noun} directory {} cannot be opened as a real directory: {e}",
                 dir.display()
             )));
         }
@@ -70,7 +76,7 @@ pub fn verify_mods_dir(dir: &Path, expected: &[ModEntry]) -> Result<Vec<Verified
     if !unexpected.is_empty() {
         let shown: Vec<String> = unexpected.iter().take(10).map(|n| util::sanitize_line(n.as_bytes(), 120)).collect();
         return Err(Error::Policy(format!(
-            "{} unexpected entr{} in {} not covered by the signed manifest: {}{}",
+            "{} unexpected entr{} in {} not covered by {list_name}: {}{}",
             unexpected.len(),
             if unexpected.len() == 1 { "y" } else { "ies" },
             dir.display(),
@@ -85,17 +91,17 @@ pub fn verify_mods_dir(dir: &Path, expected: &[ModEntry]) -> Result<Vec<Verified
         let file = util::openat_regular_nofollow(&handle, OsStr::from_bytes(entry.file.as_bytes())).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::Policy(format!(
-                    "mod {:?} is listed in the signed manifest but missing from {}",
+                    "{noun} {:?} is listed in {list_name} but missing from {}",
                     entry.file,
                     dir.display()
                 ))
             } else {
-                Error::Policy(format!("mod {:?} is not a plain regular file ({e})", entry.file))
+                Error::Policy(format!("{noun} {:?} is not a plain regular file ({e})", entry.file))
             }
         })?;
         // Freeze, then hash: an in-place rewrite between the two is no longer possible.
         let _ = crate::verity::enable(&file);
-        Expected::sha256(&entry.sha256)?.verify_file(&file, Some(entry.size), &format!("mod {}", entry.file))?;
+        Expected::sha256(&entry.sha256)?.verify_file(&file, Some(entry.size), &format!("{noun} {}", entry.file))?;
         out.push(VerifiedMod { file_name: entry.file.clone(), file });
     }
     Ok(out)
@@ -104,6 +110,11 @@ pub fn verify_mods_dir(dir: &Path, expected: &[ModEntry]) -> Result<Vec<Verified
 /// Hash what is currently in `dir` to produce manifest entries (used by `profile lock`; the
 /// result still has to be reviewed and signed by a human).
 pub fn scan_mods_dir(dir: &Path) -> Result<Vec<ModEntry>> {
+    scan_dir(dir, ".jar", "locking the profile")
+}
+
+/// Hash every file in `dir`, all of which must be plain files named `*<extension>`.
+pub fn scan_dir(dir: &Path, extension: &str, before: &str) -> Result<Vec<ModEntry>> {
     let handle = match open_dir(dir) {
         Ok(h) => h,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -114,9 +125,9 @@ pub fn scan_mods_dir(dir: &Path) -> Result<Vec<ModEntry>> {
         let name =
             String::from_utf8(name).map_err(|_| Error::Policy(format!("non-UTF-8 file name in {}", dir.display())))?;
         validate_file_name(&name)?;
-        if !name.ends_with(".jar") {
+        if !name.ends_with(extension) {
             return Err(Error::Policy(format!(
-                "{} contains {name:?}, which is not a .jar; remove it before locking the profile",
+                "{} contains {name:?}, which is not a {extension}; remove it before {before}",
                 dir.display()
             )));
         }

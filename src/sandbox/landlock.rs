@@ -136,5 +136,64 @@ pub fn apply(policy: &LandlockPolicy) -> Result<RulesetStatus> {
     if status.ruleset == RulesetStatus::NotEnforced || !status.no_new_privs {
         return Err(Error::Sandbox("Landlock ruleset was not enforced by the kernel".into()));
     }
+    if let Some(ports) = &policy.udp_send {
+        restrict_udp(ports)?;
+    }
     Ok(status.ruleset)
+}
+
+/// First Landlock ABI with UDP port rules (Linux 7.2).
+pub const UDP_ABI: i32 = 10;
+
+/// A second, stacked ruleset for UDP: datagrams only to `send_ports`, binding only to
+/// kernel-chosen ephemeral ports (what an unbound socket gets when it first sends).
+///
+/// Written against the system call interface directly: the `landlock` crate knows the ABI
+/// up to version 9, and UDP rules arrived with version 10. Returns whether the kernel has
+/// them; without, nothing is changed (the network namespace remains the barrier, as before).
+pub fn restrict_udp(send_ports: &[u16]) -> Result<bool> {
+    const BIND_UDP: u64 = 1 << 2;
+    const CONNECT_SEND_UDP: u64 = 1 << 3;
+    const RULE_NET_PORT: libc::c_int = 2;
+    #[repr(C)]
+    struct RulesetAttr {
+        handled_access_fs: u64,
+        handled_access_net: u64,
+        scoped: u64,
+    }
+    #[repr(C)]
+    struct NetPortAttr {
+        allowed_access: u64,
+        port: u64,
+    }
+    if kernel_abi() < UDP_ABI {
+        return Ok(false);
+    }
+    let os = |what: &str| landlock_err(what, std::io::Error::last_os_error());
+    let attr = RulesetAttr { handled_access_fs: 0, handled_access_net: BIND_UDP | CONNECT_SEND_UDP, scoped: 0 };
+    // SAFETY: `attr` is a valid, initialised structure of the size passed; flags are 0.
+    let fd = unsafe {
+        libc::syscall(libc::SYS_landlock_create_ruleset, &attr as *const RulesetAttr, size_of::<RulesetAttr>(), 0u32)
+    };
+    if fd < 0 {
+        return Err(os("creating the UDP ruleset"));
+    }
+    // SAFETY: a descriptor just returned by the kernel, owned by nothing else.
+    let ruleset = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd as i32) };
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&ruleset);
+    let rules = std::iter::once(NetPortAttr { allowed_access: BIND_UDP, port: 0 })
+        .chain(send_ports.iter().map(|p| NetPortAttr { allowed_access: CONNECT_SEND_UDP, port: u64::from(*p) }));
+    for rule in rules {
+        // SAFETY: `rule` is a valid landlock_net_port_attr; `raw` is a ruleset descriptor.
+        if unsafe { libc::syscall(libc::SYS_landlock_add_rule, raw, RULE_NET_PORT, &rule as *const NetPortAttr, 0u32) }
+            != 0
+        {
+            return Err(os(&format!("allowing UDP port {}", rule.port)));
+        }
+    }
+    // SAFETY: restricts the calling thread; no_new_privs is already set by the caller.
+    if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, raw, 0u32) } != 0 {
+        return Err(os("enforcing the UDP ruleset"));
+    }
+    Ok(true)
 }

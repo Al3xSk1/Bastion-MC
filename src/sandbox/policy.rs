@@ -43,6 +43,11 @@ pub struct LandlockPolicy {
     /// Paths that are granted only if they exist (optional mounts).
     pub read_if_present: Vec<PathBuf>,
     pub tcp: TcpPolicy,
+    /// UDP ports datagrams may be sent to; `None` leaves UDP alone (open network mode).
+    /// With `Some`, binding is limited to kernel-chosen ephemeral ports. Needs Landlock
+    /// ABI 10; on older kernels the private network namespace is the only UDP barrier.
+    #[serde(default)]
+    pub udp_send: Option<Vec<u16>>,
     /// Deny connecting to abstract UNIX sockets created outside the sandbox.
     pub scope_abstract_unix: bool,
 }

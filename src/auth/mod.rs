@@ -8,16 +8,30 @@
 //! → Xbox Live user token → XSTS token → Minecraft access token → entitlement check → profile.
 //!
 //! Token lifetime in this process:
-//!  * every token is deserialised straight into an mlock'd [`Secret`];
+//!  * every token is deserialised straight into a locked [`Secret`] (`memfd_secret` pages
+//!    where the kernel has them);
 //!  * each intermediate token is dropped (wiped) as soon as the next step has used it;
 //!  * the refresh token is written back to the store and wiped before the game starts;
-//!  * the Minecraft token is wiped the moment it has been written into the launch channel.
+//!  * the Minecraft access token goes one of two ways. With the credential broker (the
+//!    default in filtered network mode) it stays here, in secret memory, for as long as the
+//!    game runs — the game is handed a placeholder and the launcher authenticates the few
+//!    requests that need it (`egress::broker`). Without the broker it is written into the
+//!    launch channel and wiped at that moment.
 //!
-//! While the game runs the launcher holds no credential at all.
+//! So while the game runs the launcher holds either exactly one credential, the 24-hour
+//! access token that would otherwise be inside the game, or none. It never holds the
+//! refresh token then.
+//!
+//! Around the chain: [`registry`] (which local accounts exist), [`canary`] (did the
+//! profile change behind our back), [`activity`] (when each account was used), and the
+//! profile commands in [`minecraft`] (skins and capes).
 
+pub mod activity;
+pub mod canary;
 pub mod identity;
 pub mod minecraft;
 pub mod msa;
+pub mod registry;
 pub mod store;
 pub mod xbox;
 
@@ -63,6 +77,8 @@ pub struct Session {
     pub profile_id: String,
     pub profile_name: String,
     pub license: minecraft::License,
+    /// The whole profile as Mojang returned it at sign-in: skins and capes included.
+    pub profile: minecraft::Profile,
 }
 
 /// Tokens are embedded in hand-built JSON (so they never pass through a `String`); that is
@@ -104,7 +120,7 @@ pub async fn session_from_msa(api: &impl Api, msa_access: Secret, allow_game_pas
     drop(xsts);
     let license = minecraft::check_entitlement(api, &access_token, allow_game_pass).await?;
     let profile = minecraft::profile(api, &access_token).await?;
-    Ok(Session { access_token, profile_id: profile.id, profile_name: profile.name, license })
+    Ok(Session { access_token, profile_id: profile.id.clone(), profile_name: profile.name.clone(), license, profile })
 }
 
 #[cfg(test)]

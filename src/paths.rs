@@ -4,7 +4,7 @@
 //! $XDG_CONFIG_HOME/bastion-mc/   config.toml, trusted-keys.d/
 //! $XDG_DATA_HOME/bastion-mc/     instances/<id>/, libraries/, versions/, assets/, vault/
 //! $XDG_CACHE_HOME/bastion-mc/    scratch/ (per-launch game root), natives/
-//! $XDG_STATE_HOME/bastion-mc/    logs/, profile-serials/
+//! $XDG_STATE_HOME/bastion-mc/    logs/, profile-serials/, accounts/, canary/, default-account
 //! ```
 
 use std::{
@@ -99,6 +99,14 @@ impl Paths {
     /// Who each local account was at its last sign-in (player name only; no credentials).
     pub fn identities(&self) -> PathBuf {
         self.state.join("accounts")
+    }
+    /// Pinned profile state per account (`auth::canary`).
+    pub fn canaries(&self) -> PathBuf {
+        self.state.join("canary")
+    }
+    /// The account label used when `--account` is not given.
+    pub fn default_account_file(&self) -> PathBuf {
+        self.state.join("default-account")
     }
 }
 

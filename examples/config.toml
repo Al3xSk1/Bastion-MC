@@ -8,11 +8,24 @@
 flow = "pkce"              # "pkce" (browser + loopback redirect) | "device" (code on another device)
 token_store = "keyutils"   # "keyutils" (kernel keyring, RAM only) | "age" | "none"
 allow_game_pass = false    # accept accounts licensed through Xbox Game Pass
+# Profile canary: the account's name, skin and cape are pinned at sign-in and compared at
+# every launch. A change that was not made through this launcher (`skin set`, `cape set`):
+canary = "enforce"         # "enforce" (refuse to launch until `bastion-mc canary accept`) | "warn" | "off"
+canary_wipe = false        # on a mismatch also delete that account's stored refresh token
 
 # [auth.age]               # only for token_store = "age"
 # program = "/usr/bin/age"
 # recipients_file = "/home/you/.config/bastion-mc/age-recipients.txt"
 # identity_file = "/home/you/.config/bastion-mc/age-identity.txt"   # e.g. an age-plugin-yubikey stub
+# Keys of their own for single accounts (`--account work`); others use the two files above.
+# [auth.age.accounts.work]
+# recipients_file = "/home/you/.config/bastion-mc/work-recipients.txt"
+# identity_file = "/home/you/.config/bastion-mc/work-identity.txt"
+
+[launcher]
+# Once the game runs the launcher gives up, on all its threads, everything it no longer
+# needs: files outside the instance and the cache, running programs, most of the network.
+confine = "auto"           # "auto" (when the kernel can: Landlock ABI 8) | "require" | "off"
 
 [tls]
 # Pin Microsoft/Mojang hosts to the root and intermediate keys those services chain to
@@ -33,7 +46,15 @@ allow_serialization = false
 
 [sandbox]
 display = "auto"           # "auto" | "wayland" | "x11"
-allow_x11 = false          # X11 has no client isolation; enabling it accepts a sandbox-escape path
+allow_x11 = false          # hand the game the session's own X11 display (no isolation between X clients):
+                           # only needed on X11 without gamescope; accepts a sandbox-escape path
+# On X11: run the game inside a nested compositor (gamescope, in a sandbox of its own), so
+# that it gets a display server to itself. The clipboard is not bridged.
+nested_compositor = "auto" # "auto" (when gamescope is installed) | "require" | "off"
+nested_compositor_args = []          # extra gamescope options, e.g. ["-W", "1920", "-H", "1080", "-f"]
+# On Wayland: a socket of the game's own that the compositor knows to be a sandbox
+# (wp_security_context_v1): no screen capture, no input injection, no clipboard managers.
+wayland_security_context = "auto"    # "auto" (when the compositor supports it) | "require" | "off"
 audio = "pulse"            # "pulse" | "alsa" | "none"
 allow_pulse_module_loading = false   # expose the audio socket even if the sound server lets clients load modules into it
 gpu = true
@@ -42,15 +63,41 @@ tripwire = true            # SIGSYS-kill on exploit-only syscalls (ptrace, bpf, 
 expose_timezone = false
 exec_allow = []            # extra executables the JVM may execve (absolute paths)
 extra_syscalls = []        # extra syscall names for the allowlist
-persist_files = ["options.txt", "servers.dat"]   # copied back by the launcher after exit
-extra_rw_dirs = []         # e.g. ["screenshots"]
+# Carried into the session and back by the launcher. Never copied: each file is parsed
+# against the grammar of its kind and written out again, in both directions.
+persist_files = ["options.txt", "servers.dat"]
+extra_rw_dirs = []         # e.g. ["screenshots"]; not mods, resourcepacks or shaderpacks (see `bastion-mc pack`)
 tmp_size_mb = 1024
+# Resource limits through a transient systemd scope: memory ceiling, no swap, task count.
+cgroup = "auto"            # "auto" (when a systemd user manager is there) | "require" | "off"
+# memory_max_mb = 10240    # default: 2 x java.memory_mb + tmp_size_mb + 1024
+tasks_max = 4096
+# cpu_quota_percent = 400  # CPU time ceiling in percent of one CPU (400 = four CPUs); default: none
 
 [network]
 mode = "filtered"          # "filtered" | "open" | "none"
 service_domains = ["minecraft.net", "mojang.com", "minecraftservices.com"]
 texture_gateway = true
 servers = []               # e.g. ["play.example.org", "203.0.113.7:25570", { host = "lan-box", allow_private = true }]
+# Send the LAUNCHER's own traffic (sign-in, downloads, what the broker forwards to Mojang)
+# through a SOCKS5 proxy that also resolves the names, e.g. Tor. The game's connections to
+# multiplayer servers are not affected.
+# launcher_proxy = "socks5h://127.0.0.1:9050"
+
+# Credential broker (filtered mode): the game is given a placeholder instead of the access
+# token; the launcher terminates the game's HTTPS to Mojang's API and attaches the real
+# token only to the kinds of request switched on here. Skin, cape and name changes are
+# never possible from the game, whatever is set.
+[network.broker]
+enabled = true
+join = true                # prove your identity to a server you connect to (online-mode multiplayer)
+chat_signing = true        # fetch the chat-signing key pair
+account_read = true        # read privileges, ban status, block list
+friends = false
+settings = false           # change account preferences
+reports = false            # send player reports
+telemetry = false
+extra_token_endpoints = [] # "METHOD host/path", for game versions newer than this launcher
 
 [downloads]
 extra_hosts = []

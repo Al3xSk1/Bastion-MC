@@ -585,7 +585,7 @@ impl Broker {
             });
         }
         // Minecraft's server hash: a signed hexadecimal SHA-1.
-        let hash = request.server_id.strip_prefix('-').unwrap_or(&request.server_id);
+        let hash = request.server_id.strip_prefix('-').unwrap_or(request.server_id);
         if hash.is_empty() || hash.len() > 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(refuse(400, "the join request's server hash is malformed"));
         }
@@ -849,6 +849,64 @@ impl Broker {
     }
 }
 
+/// For the robustness tests and fuzz targets: classify arbitrary request lines and read an
+/// arbitrary join body, with and without an open game connection. Whatever the bytes are,
+/// a join that is accepted is one this broker built: the real token, the session's own
+/// profile, and a server id made of the characters a server id can have.
+#[doc(hidden)]
+pub fn fuzz_requests(data: &[u8]) {
+    use std::sync::OnceLock;
+    static BROKER: OnceLock<Option<Broker>> = OnceLock::new();
+    let broker = BROKER.get_or_init(|| {
+        let roots = tls::load_system_roots().ok()?;
+        let http = HttpClient::new(tls::client_config(roots, tls::PinSet::default()).ok()?, &[]);
+        let credential = Credential {
+            token: Secret::from_slice(b"FUZZ.REAL.TOKEN").ok()?,
+            profile_id: "069a79f444e94726a5befca90e38aaf5".into(),
+        };
+        Broker::new(
+            Authority::generate().ok()?,
+            &BrokerConfig::default(),
+            &http,
+            "bastion-placeholder-fuzz".into(),
+            Some(credential),
+        )
+        .ok()
+    });
+    let Some(broker) = broker else { return };
+    let text = String::from_utf8_lossy(data);
+    for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+        for host in ["api.minecraftservices.com", "sessionserver.mojang.com"] {
+            for placeholder in [true, false] {
+                let verdict = broker.classify(host, &method, &text, false, placeholder);
+                // The token is only ever attached to a path that is exactly a known one.
+                if let Verdict::Credentialed(_) | Verdict::Join = verdict {
+                    assert!(path_is_canonical(&text), "credential for a non-canonical path {text:?}");
+                    assert!(!text.to_ascii_lowercase().starts_with("/minecraft/profile"), "{text:?}");
+                }
+            }
+        }
+    }
+    let gate = JoinGate::default();
+    assert!(broker.join_body(&gate, data).is_err(), "a join without a game connection was accepted");
+    let _connection = gate.opened("fuzz");
+    if let Ok((body, connection)) = broker.join_body(&gate, data) {
+        assert_eq!(connection, "fuzz", "the join was tied to the open game connection");
+        // What goes out is exactly the object the broker wrote: the real token, the
+        // session's profile, and a server hash made of hash characters only.
+        let sent = std::str::from_utf8(&body).expect("ASCII");
+        let prefix =
+            r#"{"accessToken":"FUZZ.REAL.TOKEN","selectedProfile":"069a79f444e94726a5befca90e38aaf5","serverId":""#;
+        let server_id = sent.strip_prefix(prefix).and_then(|rest| rest.strip_suffix("\"}")).unwrap_or_else(|| {
+            panic!("the forwarded join is not the broker's own object: {sent}");
+        });
+        let hash = server_id.strip_prefix('-').unwrap_or(server_id);
+        assert!((1..=40).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit()), "{server_id:?}");
+        // One join per game connection.
+        assert!(broker.join_body(&gate, data).is_err(), "the same game connection paid for two joins");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +931,77 @@ mod tests {
 
     fn status(verdict: &Verdict) -> Option<(u16, bool)> {
         if let Verdict::Refuse { status, security, .. } = verdict { Some((*status, *security)) } else { None }
+    }
+
+    /// J13: nothing in the sandbox can change the skin, the cape or the player name —
+    /// with every optional capability switched on, with or without the placeholder, in any
+    /// spelling, on any path below the profile. No configuration switch opens these.
+    #[test]
+    fn skin_cape_and_name_changes_are_refused_under_every_configuration() {
+        let everything =
+            BrokerConfig { friends: true, settings: true, reports: true, telemetry: true, ..BrokerConfig::default() };
+        for (config, signed_in) in [(BrokerConfig::default(), true), (everything.clone(), true), (everything, false)] {
+            let b = broker_with(config, signed_in);
+            for method in [Method::POST, Method::PUT, Method::DELETE] {
+                for path in [
+                    "/minecraft/profile",
+                    "/minecraft/profile/skins",
+                    "/minecraft/profile/skins/active",
+                    "/minecraft/profile/capes",
+                    "/minecraft/profile/capes/active",
+                    "/minecraft/profile/name",
+                    "/minecraft/profile/name/Hijacked",
+                    "/minecraft/profile/anything/new",
+                    "/Minecraft/Profile/Skins",
+                    "/MINECRAFT/PROFILE/NAME/Hijacked",
+                    "/minecraft/profile/capes/ACTIVE",
+                ] {
+                    for placeholder in [true, false] {
+                        let verdict = b.classify(API, &method, path, false, placeholder);
+                        assert_eq!(
+                            status(&verdict),
+                            Some((403, true)),
+                            "{method} {path} (placeholder: {placeholder}, signed in: {signed_in}): {verdict:?}"
+                        );
+                    }
+                }
+                // Spellings a server might fold into the same path never get that far.
+                for path in [
+                    "/minecraft/profile/skins/",
+                    "/minecraft//profile/skins",
+                    "/minecraft/profile/./skins",
+                    "/minecraft/x/../profile/skins",
+                    "/minecraft/profile%2Fskins",
+                    "/minecraft/profile/skins;x=1",
+                ] {
+                    let verdict = b.classify(API, &method, path, false, true);
+                    let refused = matches!(status(&verdict), Some((400 | 403, _)));
+                    assert!(refused, "{method} {path}: {verdict:?}");
+                }
+            }
+            // An extra endpoint cannot be used to open one either: configuration parsing
+            // is where that is decided.
+        }
+        for spec in [
+            "PUT api.minecraftservices.com/minecraft/profile/name/x",
+            "POST api.minecraftservices.com/minecraft/profile/skins",
+            "DELETE api.minecraftservices.com/minecraft/profile/capes/active",
+        ] {
+            let config = BrokerConfig { extra_token_endpoints: vec![spec.to_string()], ..BrokerConfig::default() };
+            let built =
+                Broker::new(Authority::generate().unwrap(), &config, &http(), "bastion-placeholder-t".into(), None);
+            match built {
+                Err(_) => {}
+                Ok(b) => {
+                    let (method, _, path) = parse_endpoint(spec).unwrap();
+                    let verdict = b.classify(API, &method, &path, false, true);
+                    assert!(
+                        !matches!(verdict, Verdict::Credentialed(_)),
+                        "{spec}: an extra endpoint must not hand the token to a profile-changing request"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

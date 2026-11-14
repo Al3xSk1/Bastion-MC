@@ -73,6 +73,7 @@ async fn the_real_client_draws_through_the_hardened_display_path() {
         instance,
         account: "default".into(),
         demo: true,
+        burner: false,
         join: None,
         repair: false,
         stop: stop.clone(),

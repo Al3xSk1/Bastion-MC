@@ -31,7 +31,9 @@ use crate::{
 };
 
 /// The game may write here and nowhere else in the instance (kernel-enforced).
-pub const WRITABLE_DIRS: [&str; 4] = ["saves", "logs", "config", "resourcepacks"];
+/// `resourcepacks/` and `shaderpacks/` are deliberately not in this list: packs are added
+/// by the user (`bastion-mc pack import`) and are read-only to the game; see `profile::packs`.
+pub const WRITABLE_DIRS: [&str; 3] = ["saves", "logs", "config"];
 pub const MANIFEST_FILE: &str = "profile.json";
 pub const SIGNATURE_FILE: &str = "profile.json.sig";
 

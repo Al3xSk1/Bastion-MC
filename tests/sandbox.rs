@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use bastion_mc::sandbox::landlock;
 use bastion_mc::{
     config::SeccompMode,
     sandbox::{
@@ -46,6 +47,7 @@ struct Probe {
     write_paths: Vec<PathBuf>,
     tcp: TcpPolicy,
     scope_abstract: bool,
+    udp_send: Option<Vec<u16>>,
     limits: Option<Limits>,
 }
 
@@ -59,6 +61,7 @@ impl Default for Probe {
             write_paths: Vec::new(),
             tcp: TcpPolicy::Ports(vec![]),
             scope_abstract: true,
+            udp_send: None,
             limits: None,
         }
     }
@@ -85,6 +88,7 @@ impl Probe {
         base.landlock.write.extend(self.write_paths);
         base.landlock.tcp = self.tcp;
         base.landlock.scope_abstract_unix = self.scope_abstract;
+        base.landlock.udp_send = self.udp_send.clone();
         // /bastion only exists because the init binary is bound there.
         let spec = SandboxSpec {
             mounts: base.mounts,
@@ -476,6 +480,22 @@ async fn network_none_has_no_way_out() {
         .run(&script(
             r#"
 show("ifaces", ",".join(sorted(l.split(":")[0].strip() for l in open("/proc/net/dev").read().splitlines()[2:])))
+# What java.net.NetworkInterface would report: names via if_nameindex, hardware addresses via ioctl.
+import fcntl, struct
+try:
+    names = sorted(n for _, n in socket.if_nameindex())
+    show("if_names", ",".join(names))
+except OSError as e:
+    names = ["lo"]          # netlink is not available at all (seccomp): ask about loopback by name
+    show("if_names", errno.errorcode.get(e.errno, str(e.errno)))
+names += ["eth0", "enp1s0", "wlan0"]
+q = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def mac(n):
+    try:
+        return fcntl.ioctl(q.fileno(), 0x8927, struct.pack("256s", n.encode()))[18:24].hex()
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+show("macs", ",".join(sorted(set(mac(n) for n in names))))
 c = socket.socket(); c.settimeout(3); show("connect_public", attempt(lambda: c.connect(("1.1.1.1", 443))))
 u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); show("udp_public", attempt(lambda: u.sendto(b"x", ("1.1.1.1", 53))))
 show("resolve", attempt(lambda: socket.getaddrinfo("example.com", 443)))
@@ -484,6 +504,11 @@ show("resolve", attempt(lambda: socket.getaddrinfo("example.com", 443)))
         .await;
     assert_eq!(o.code, Some(0), "stderr: {}", o.stderr);
     assert_eq!(o.line("ifaces"), "lo");
+    // Enumeration over netlink (what getifaddrs and java.net.NetworkInterface use) is not
+    // available at all; where it is, it must show loopback only.
+    assert!(matches!(o.line("if_names"), "lo" | "ENOSYS" | "EPERM" | "EAFNOSUPPORT"), "{}", o.line("if_names"));
+    // Asked by name: loopback has the all-zero address, and no other interface exists.
+    assert_eq!(o.line("macs"), "000000000000,ENODEV", "no hardware address to fingerprint");
     assert_eq!(o.line("connect_public"), "ENETUNREACH");
     assert_eq!(o.line("udp_public"), "ENETUNREACH");
     assert_ne!(o.line("resolve"), "ok");
@@ -505,9 +530,26 @@ async fn filtered_network_delivers_only_to_launcher_held_sockets() {
     })
     .unwrap();
     base.landlock.tcp = TcpPolicy::Ports(vec![443, 25565]);
+    base.landlock.udp_send = Some(vec![53]);
     let payload = script(
         r#"
 show("ifaces", ",".join(sorted(l.split(":")[0].strip() for l in open("/proc/net/dev").read().splitlines()[2:])))
+# What java.net.NetworkInterface would report: names via if_nameindex, hardware addresses via ioctl.
+import fcntl, struct
+try:
+    names = sorted(n for _, n in socket.if_nameindex())
+    show("if_names", ",".join(names))
+except OSError as e:
+    names = ["lo"]          # netlink is not available at all (seccomp): ask about loopback by name
+    show("if_names", errno.errorcode.get(e.errno, str(e.errno)))
+names += ["eth0", "enp1s0", "wlan0"]
+q = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def mac(n):
+    try:
+        return fcntl.ioctl(q.fileno(), 0x8927, struct.pack("256s", n.encode()))[18:24].hex()
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+show("macs", ",".join(sorted(set(mac(n) for n in names))))
 def talk(ip, port):
     c = socket.socket(); c.settimeout(5)
     try:
@@ -524,6 +566,14 @@ u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.settimeout(5)
 u.sendto(b"query", ("127.0.0.1", 53)); show("dns", u.recv(64).decode())
 show("resolv_conf", open("/etc/resolv.conf").read().split()[1])
 t = socket.socket(); show("bind_443", attempt(lambda: t.bind(("0.0.0.0", 443))))
+# UDP beyond the DNS port (Landlock ABI 10): not to another port, not from a chosen port.
+v = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+show("udp_other_port", attempt(lambda: v.sendto(b"x", ("127.0.0.1", 5353))))
+show("udp_connect_other", attempt(lambda: v.connect(("127.0.0.1", 4445))))
+w = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+show("udp_bind_chosen", attempt(lambda: w.bind(("127.0.0.1", 4445))))
+show("udp_bind_ephemeral", attempt(lambda: w.bind(("127.0.0.1", 0))))
+show("udp6_other_port", attempt(lambda: socket.socket(socket.AF_INET6, socket.SOCK_DGRAM).sendto(b"x", ("::1", 5353))))
 "#,
     );
     let spec = SandboxSpec {
@@ -578,6 +628,11 @@ t = socket.socket(); show("bind_443", attempt(lambda: t.bind(("0.0.0.0", 443))))
     let o = Outcome { code: status.code(), stdout: so, stderr: se };
     assert_eq!(o.code, Some(0), "stderr: {}", o.stderr);
     assert_eq!(o.line("ifaces"), "lo", "no interface but loopback exists");
+    // Enumeration over netlink (what getifaddrs and java.net.NetworkInterface use) is not
+    // available at all; where it is, it must show loopback only.
+    assert!(matches!(o.line("if_names"), "lo" | "ENOSYS" | "EPERM" | "EAFNOSUPPORT"), "{}", o.line("if_names"));
+    // Asked by name: loopback has the all-zero address, and no other interface exists.
+    assert_eq!(o.line("macs"), "000000000000,ENODEV", "no hardware address to fingerprint");
     // Any 127/8 address on an allowlisted port reaches the launcher, which learns the address.
     assert_eq!(o.line("fake_ip_443"), "dst=127.64.0.9:443");
     assert_eq!(o.line("fake_ip_game"), "dst=127.99.1.2:25565");
@@ -590,6 +645,15 @@ t = socket.socket(); show("bind_443", attempt(lambda: t.bind(("0.0.0.0", 443))))
     assert_eq!(o.line("dns"), "answered-by-launcher");
     assert_eq!(o.line("resolv_conf"), "127.0.0.1");
     assert_eq!(o.line("bind_443"), "EACCES", "the payload itself has no capability over the namespace");
+    if landlock::kernel_abi() >= landlock::UDP_ABI {
+        assert_eq!(o.line("udp_other_port"), "EACCES", "datagrams go to the DNS port only");
+        assert_eq!(o.line("udp_connect_other"), "EACCES");
+        assert_eq!(o.line("udp_bind_chosen"), "EACCES", "no listening on a chosen UDP port");
+        assert_eq!(o.line("udp_bind_ephemeral"), "ok", "an ephemeral source port is all a client needs");
+        assert_eq!(o.line("udp6_other_port"), "EACCES");
+    } else {
+        eprintln!("note: Landlock ABI {} has no UDP rules; only the namespace was tested", landlock::kernel_abi());
+    }
 }
 
 /// The launch frame arrives on fd 0, which is a socket: not visible in the command line, the
@@ -773,8 +837,10 @@ show("mountinfo_names_bind_source", "bastion-procfs-" in mi)
 }
 
 /// X11 clients in each network mode (needs an X session and `glxinfo`; `BASTION_X11_TESTS=1`).
-/// libxcb tries the server's *abstract* socket before the socket file. This pins down how
-/// that interacts with Landlock's abstract-socket scoping.
+/// libxcb tries the server's *abstract* socket before the socket file when the display is
+/// given as `:N`, and gives up if Landlock's abstract-socket scoping refuses that. The game
+/// is therefore given the socket's path as its DISPLAY, which is only ever opened as a file:
+/// an X11 client then connects in both kinds of network namespace with scoping on.
 #[tokio::test(flavor = "multi_thread")]
 async fn x11_client_connects_in_each_network_mode() {
     if std::env::var_os("BASTION_X11_TESTS").is_none() {
@@ -793,8 +859,7 @@ async fn x11_client_connects_in_each_network_mode() {
 
     for (label, open_network, scope, expect_ok) in [
         ("filtered network, abstract-socket scoping on", false, true, true),
-        ("open network, abstract-socket scoping off", true, false, true),
-        ("open network, abstract-socket scoping on", true, true, false),
+        ("open network, abstract-socket scoping on", true, true, true),
     ] {
         let desktop = display::plan(&cfg, &paths, "test").expect("display plan");
         let mut base = sandbox::base(&BaseOptions {
@@ -864,6 +929,7 @@ fn small_limits(tag: &str, memory_mb: u64, tasks: u32) -> Limits {
     Limits {
         memory_max_bytes: memory_mb << 20,
         tasks_max: tasks,
+        cpu_quota_percent: Some(150),
         unit: format!("bastion-mc-test-{tag}-{}", std::process::id()),
     }
 }
@@ -920,6 +986,11 @@ show("threads", started)
     assert_eq!(knob("pids.max"), "48");
     assert_eq!(knob("memory.max"), (256u64 << 20).to_string());
     assert_eq!(knob("memory.swap.max"), "0", "nothing of the game may be written to swap");
+    // The cpu controller is delegated to user managers on current systemd; where it is not,
+    // the file does not exist and systemd ignores the property.
+    if dir.join("cpu.max").exists() {
+        assert_eq!(knob("cpu.max"), "150000 100000", "CPUQuota=150%");
+    }
     let members: Vec<u32> = knob("cgroup.procs").lines().filter_map(|l| l.parse().ok()).collect();
     assert!(members.len() >= 2, "bubblewrap and the payload are both in the scope: {members:?}");
 

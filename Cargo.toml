@@ -13,6 +13,7 @@ build = "build.rs"
 # are ever linked into the binary that handles tokens:  cargo build -p bastion-mc-gui
 [workspace]
 members = [".", "crates/proto", "gui"]
+exclude = ["fuzz"]   # cargo-fuzz targets: a nightly toolchain and their own lockfile
 resolver = "3"
 
 [lib]

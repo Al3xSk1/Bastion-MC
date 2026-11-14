@@ -1,3 +1,6 @@
+//! Also compiles `native/noclip.c`, the clipboard cut-off preloaded into the nested
+//! compositor (see `src/sandbox/nested.rs`), with the C compiler Rust already links with.
+//!
 //! Compiles `java/BastionBootstrap.java` with the *system* javac and embeds the class file.
 //!
 //! No precompiled binary blob is checked into the repository: the bootstrap that handles the
@@ -11,8 +14,11 @@ fn main() {
     println!("cargo:rerun-if-changed=java/BastionBootstrap.java");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=JAVAC");
+    println!("cargo:rerun-if-changed=native/noclip.c");
+    println!("cargo:rerun-if-env-changed=CC");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    build_noclip(&out_dir);
     let javac = env::var_os("JAVAC").unwrap_or_else(|| "javac".into());
     let class_file = out_dir.join("BastionBootstrap.class");
 
@@ -58,4 +64,26 @@ fn main() {
         format!("/// Lowest Java feature release able to load the embedded bootstrap class.\npub const BOOTSTRAP_MIN_JAVA: u32 = {min_java};\n"),
     )
     .expect("write bootstrap_meta.rs");
+}
+
+fn build_noclip(out_dir: &std::path::Path) {
+    println!("cargo:rerun-if-env-changed=CFLAGS");
+    let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let lib = out_dir.join("libbastion_noclip.so");
+    // The packager's hardening flags (CFLAGS) first, then what this library needs whatever
+    // they are. `-U` before `-D`: a package's own _FORTIFY_SOURCE level wins without a
+    // redefinition warning (which -Werror would turn into a failure).
+    let cflags = env::var("CFLAGS").unwrap_or_default();
+    let fortify = if cflags.contains("_FORTIFY_SOURCE") { vec![] } else { vec!["-D_FORTIFY_SOURCE=2"] };
+    let output = Command::new(&cc)
+        .args(cflags.split_ascii_whitespace().filter(|flag| *flag != "-fPIE" && *flag != "-pie"))
+        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Werror", "-fstack-protector-strong"])
+        .args(fortify)
+        .args(["-Wl,-z,relro,-z,now,-z,noexecstack", "-Wl,--build-id=none", "-o"])
+        .arg(&lib)
+        .arg("native/noclip.c")
+        .arg("-ldl")
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run the C compiler ({}): {e}. Set CC.", cc.to_string_lossy()));
+    assert!(output.status.success(), "compiling native/noclip.c failed:\n{}", String::from_utf8_lossy(&output.stderr));
 }

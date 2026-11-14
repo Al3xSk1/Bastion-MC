@@ -64,7 +64,7 @@ fn set(env: &mut Vec<(String, String)>, k: &str, v: impl Into<String>) {
 
 // ---------------------------------------------------------------- display
 
-fn wayland_socket(paths: &Paths) -> Option<PathBuf> {
+pub fn wayland_socket(paths: &Paths) -> Option<PathBuf> {
     let name = std::env::var_os("WAYLAND_DISPLAY").filter(|v| !v.is_empty())?;
     let path = PathBuf::from(&name);
     let path = if path.is_absolute() { path } else { paths.runtime.as_ref()?.join(name) };
@@ -80,14 +80,15 @@ pub(super) fn x11_display_number(display: &str) -> Option<u32> {
         .flatten()
 }
 
-fn x11_socket() -> Option<(u32, PathBuf)> {
+pub fn x11_socket() -> Option<(u32, PathBuf)> {
     let number = x11_display_number(&std::env::var("DISPLAY").ok()?)?;
     let path = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
     is_socket(&path).then_some((number, path))
 }
 
 /// Reduce an Xauthority file to the one MIT cookie a *local* client of this display would
-/// use, rewritten as `FamilyWild` so it still matches under the sandbox's different host name.
+/// use, rewritten as `FamilyWild` with no display number, so that it still matches under
+/// the sandbox's different host name and for a client that was given a socket path.
 ///
 /// Selection mirrors libXau for a UNIX-socket connection: a `FamilyLocal` entry whose address
 /// is this machine's host name, or an existing wildcard entry, for this display number.
@@ -135,7 +136,9 @@ pub fn filter_xauthority(raw: &[u8], display: u32, hostname: &str) -> Vec<u8> {
         // Exactly one record: the first usable one, as the client library would choose.
         let mut out = Vec::with_capacity(32 + data.len());
         out.extend_from_slice(&FAMILY_WILD.to_be_bytes());
-        for f in [&b""[..], wanted.as_bytes(), name, data] {
+        // An empty display number matches any (libXau): the sandbox contains one display,
+        // and a client given the socket's path as DISPLAY does not know its number.
+        for f in [&b""[..], &b""[..], name, data] {
             out.extend_from_slice(&(f.len() as u16).to_be_bytes());
             out.extend_from_slice(f);
         }
@@ -194,11 +197,25 @@ fn add_wayland(d: &mut Desktop, compositor: PathBuf, cfg: &SandboxConfig, paths:
     Ok(())
 }
 
-fn add_x11(d: &mut Desktop, number: u32, socket: PathBuf, paths: &Paths) {
+/// Hand `d` the session's X display `number`. `display_as_path`: how `DISPLAY` names it.
+///
+/// * `true` (the game, when it is given the session's display directly): the socket's
+///   path. libxcb then opens the file and never tries the abstract socket of the same
+///   name, so Landlock's abstract-socket scoping can stay on in every network mode.
+/// * `false` (the nested compositor's own sandbox): the classic `:N`. gamescope's SDL
+///   front end does not come up with a path there (its display was never ready, in
+///   `tests/nested.rs`), and it does not need one: that sandbox always has a private
+///   network namespace, where the abstract name does not exist and libxcb falls back to
+///   the socket file.
+fn add_x11(d: &mut Desktop, number: u32, socket: PathBuf, paths: &Paths, display_as_path: bool) {
     let dst = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
     d.mounts.push(Mount::RoBind { src: socket, dst: dst.clone() });
+    if display_as_path {
+        set(&mut d.env, "DISPLAY", dst.to_string_lossy());
+    } else {
+        set(&mut d.env, "DISPLAY", format!(":{number}"));
+    }
     d.sockets.push(dst);
-    set(&mut d.env, "DISPLAY", format!(":{number}"));
     set(&mut d.env, "XDG_SESSION_TYPE", "x11");
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -247,7 +264,7 @@ fn use_x11(d: &mut Desktop, cfg: &SandboxConfig, paths: &Paths, number: u32, soc
             });
             match available {
                 Ok(()) => {
-                    add_x11(&mut host, number, socket, paths);
+                    add_x11(&mut host, number, socket, paths, false);
                     d.nested = Some(nested::Plan {
                         mounts: host.mounts,
                         env: host.env,
@@ -282,7 +299,7 @@ fn use_x11(d: &mut Desktop, cfg: &SandboxConfig, paths: &Paths, number: u32, soc
              (3) accept the risk: `allow_x11 = true` under [sandbox] in config.toml."
         )));
     }
-    add_x11(d, number, socket, paths);
+    add_x11(d, number, socket, paths, true);
     d.notes.push(format!("display: no nested compositor ({nested_unavailable})"));
     Ok(())
 }
@@ -490,17 +507,20 @@ mod tests {
         raw.extend(record(256, b"myhost", b"0", b"MIT-MAGIC-COOKIE-1", b"GOOD-COOKIE-DPY0"));
         raw.extend(record(0, b"\xc0\xa8\x58\xfc", b"0", b"MIT-MAGIC-COOKIE-1", b"GOOD-COOKIE-DPY0"));
         let out = filter_xauthority(&raw, 0, "myhost");
-        assert_eq!(out, record(0xFFFF, b"", b"0", b"MIT-MAGIC-COOKIE-1", b"GOOD-COOKIE-DPY0"));
+        assert_eq!(out, record(0xFFFF, b"", b"", b"MIT-MAGIC-COOKIE-1", b"GOOD-COOKIE-DPY0"));
         assert!(!out.windows(6).any(|w| w == b"myhost"), "the real host name must not leak into the sandbox");
         assert_eq!(
             filter_xauthority(&raw, 1, "myhost"),
-            record(0xFFFF, b"", b"1", b"MIT-MAGIC-COOKIE-1", b"COOKIE-FOR-DPY-1")
+            record(0xFFFF, b"", b"", b"MIT-MAGIC-COOKIE-1", b"COOKIE-FOR-DPY-1")
         );
         assert!(filter_xauthority(&raw, 7, "myhost").is_empty());
         assert!(filter_xauthority(&raw, 0, "unknownhost").is_empty(), "no entry for this host: offer nothing");
         // An existing wildcard entry is honoured.
         let wild = record(0xFFFF, b"", b"0", b"MIT-MAGIC-COOKIE-1", b"WILDCARD-COOKIE!");
-        assert_eq!(filter_xauthority(&wild, 0, "anything"), wild);
+        assert_eq!(
+            filter_xauthority(&wild, 0, "anything"),
+            record(0xFFFF, b"", b"", b"MIT-MAGIC-COOKIE-1", b"WILDCARD-COOKIE!")
+        );
     }
 
     #[test]

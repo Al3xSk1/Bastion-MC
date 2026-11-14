@@ -3,6 +3,8 @@
 //! executed unless an Ed25519 key in the trust store signed for its exact SHA-256.
 
 pub mod author;
+pub mod capabilities;
 pub mod manifest;
 pub mod mods;
+pub mod packs;
 pub mod signing;

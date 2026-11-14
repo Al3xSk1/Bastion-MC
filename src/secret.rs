@@ -8,6 +8,19 @@
 //!   * never reallocated (fixed capacity), so no stale copies are left behind,
 //!   * wiped with `explicit_bzero` on [`Secret::wipe`] and on drop.
 //!
+//! Where the kernel offers it, the mapping is `memfd_secret` memory instead of anonymous
+//! memory: pages that are additionally removed from the kernel's own direct map. That
+//! closes the read paths that go *through the kernel* — `/proc/kcore`, `/dev/mem`,
+//! `process_vm_readv`, `ptrace(PEEKDATA)`, a kernel bug that reads arbitrary direct-map
+//! addresses — and the pages can never be swapped or dumped. It is not magic, and the
+//! limits are worth stating: the bytes are still ordinary cleartext RAM, so a kernel
+//! module or anyone who can run code in the kernel can map them again, and so can a
+//! cold-boot or DMA attack; and code running *inside this process* reads them like any
+//! other memory. `secretmem` can be switched off by the administrator
+//! (`secretmem.enable=0`) and is unavailable while hibernation is possible on some
+//! kernels; then the anonymous, locked mapping described above is used, as before.
+//! [`backing`] says which one this process got.
+//!
 //! If the pages cannot be locked the constructor fails: the launcher refuses to hold a token
 //! in swappable memory rather than degrade silently.
 //!
@@ -27,6 +40,64 @@ pub struct Secret {
     cap: usize,
 }
 
+/// What kind of memory secrets live in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backing {
+    /// `memfd_secret`: locked, and absent from the kernel's direct map.
+    SecretMem,
+    /// Anonymous memory, `mlock`ed, excluded from dumps, wiped on fork.
+    Locked,
+}
+
+/// Map `cap` bytes of `memfd_secret` memory, or `None` if this kernel will not.
+fn map_secretmem(cap: usize) -> Option<NonNull<u8>> {
+    // SAFETY: plain system call; flags 0 (the descriptor is close-on-exec'd below).
+    let fd = unsafe { libc::syscall(libc::SYS_memfd_secret, libc::O_CLOEXEC as libc::c_uint) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: a descriptor just returned by the kernel, owned by nothing else.
+    let fd = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd as i32) };
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+    // SAFETY: sizing our own fresh descriptor.
+    if unsafe { libc::ftruncate(raw, cap as libc::off_t) } != 0 {
+        return None;
+    }
+    // secretmem only supports shared mappings. Nobody else has the descriptor, and it is
+    // closed as soon as the mapping exists, so "shared" is shared with no one.
+    // SAFETY: a new mapping of our own descriptor, no address hint.
+    let addr =
+        unsafe { libc::mmap(std::ptr::null_mut(), cap, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, raw, 0) };
+    if addr == libc::MAP_FAILED {
+        return None;
+    }
+    // A shared mapping would be shared with a forked child (and "wipe on fork" exists only
+    // for private memory): the child must not get the mapping at all. Without that
+    // guarantee this kind of memory is not used.
+    // SAFETY: the mapping created above.
+    if unsafe { libc::madvise(addr, cap, libc::MADV_DONTFORK) } != 0 {
+        // SAFETY: unmapping our own, unused mapping.
+        unsafe { libc::munmap(addr, cap) };
+        return None;
+    }
+    // SAFETY: same mapping; best effort (secretmem is never dumped anyway).
+    unsafe { libc::madvise(addr, cap, libc::MADV_DONTDUMP) };
+    NonNull::new(addr.cast())
+}
+
+/// Which kind of memory a secret created now would get.
+pub fn backing() -> Backing {
+    static KIND: std::sync::OnceLock<Backing> = std::sync::OnceLock::new();
+    *KIND.get_or_init(|| match map_secretmem(page_size()) {
+        Some(ptr) => {
+            // SAFETY: unmapping the probe mapping, which nothing references.
+            unsafe { libc::munmap(ptr.as_ptr().cast(), page_size()) };
+            Backing::SecretMem
+        }
+        None => Backing::Locked,
+    })
+}
+
 // SAFETY: `Secret` exclusively owns its mapping; access goes through `&self`/`&mut self`.
 unsafe impl Send for Secret {}
 // SAFETY: shared access only ever reads.
@@ -44,6 +115,11 @@ impl Secret {
         let page = page_size();
         let cap =
             capacity.max(1).checked_next_multiple_of(page).ok_or_else(|| Error::Other("secret too large".into()))?;
+        if backing() == Backing::SecretMem
+            && let Some(ptr) = map_secretmem(cap)
+        {
+            return Ok(Secret { ptr, len: 0, cap });
+        }
         let len = NonZeroUsize::new(cap).expect("cap is at least one page");
         // SAFETY: fresh anonymous private mapping, no address hint, not shared with anything.
         let addr =
@@ -163,6 +239,67 @@ mod tests {
         assert_eq!(after, &[0u8; 7]);
     }
 
+    /// Whatever the backing: a forked child must not be able to read the secret, and the
+    /// parent's copy must be unaffected.
+    #[test]
+    fn a_forked_child_does_not_see_the_secret() {
+        let s = Secret::from_slice(b"fork-must-not-copy-this").unwrap();
+        let ptr = s.ptr.as_ptr();
+        // SAFETY: the child only reads memory (or faults) and exits without running any
+        // Rust runtime code; the parent waits for it.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // Anonymous backing: the page reads as zeros (wipe on fork). secretmem backing:
+            // the mapping does not exist and the read faults (SIGSEGV).
+            // SAFETY: deliberate read of a possibly unmapped address in a throw-away child.
+            let first = unsafe { std::ptr::read_volatile(ptr) };
+            // SAFETY: immediate exit, no destructors.
+            unsafe { libc::_exit(if first == 0 { 0 } else { 42 }) };
+        }
+        let mut status = 0;
+        // SAFETY: waiting for our own child.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        let leaked = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 42;
+        assert!(!leaked, "the child read the secret");
+        match backing() {
+            Backing::SecretMem => {
+                assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSEGV, "status {status}")
+            }
+            Backing::Locked => assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "status {status}"),
+        }
+        assert_eq!(s.expose(), b"fork-must-not-copy-this");
+    }
+
+    /// With secretmem the kernel refuses to read the pages on another process's behalf —
+    /// here on our own behalf, through the same interface a debugger would use.
+    #[test]
+    fn secretmem_pages_cannot_be_read_through_the_kernel() {
+        if backing() != Backing::SecretMem {
+            eprintln!("skipped: memfd_secret is not available here (secretmem.enable=0 or an old kernel)");
+            return;
+        }
+        let s = Secret::from_slice(b"not-through-the-kernel").unwrap();
+        let mut out = [0u8; 22];
+        let local = libc::iovec { iov_base: out.as_mut_ptr().cast(), iov_len: out.len() };
+        let remote = libc::iovec { iov_base: s.ptr.as_ptr().cast(), iov_len: out.len() };
+        // SAFETY: both iovecs describe memory of this process.
+        let n = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
+        assert_eq!(n, -1, "process_vm_readv returned the secret: {:?}", &out[..]);
+        assert_eq!(out, [0u8; 22]);
+        // An ordinary buffer can be read this way: the refusal is about the secret pages.
+        let plain = *b"an-ordinary-buffer-22b";
+        let remote = libc::iovec { iov_base: plain.as_ptr() as *mut libc::c_void, iov_len: plain.len() };
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) }, 22);
+        // And the ordinary uses still work: a system call that copies from the pages.
+        let (r, w) = nix::unistd::pipe().unwrap();
+        assert_eq!(nix::unistd::write(&w, s.expose()).unwrap(), 22);
+        let mut back = [0u8; 22];
+        assert_eq!(nix::unistd::read(&r, &mut back).unwrap(), 22);
+        assert_eq!(&back, b"not-through-the-kernel");
+    }
+
     #[test]
     fn never_grows() {
         let mut s = Secret::with_capacity(8).unwrap();
@@ -197,6 +334,9 @@ mod tests {
             .and_then(|v| v.split_whitespace().next())
             .and_then(|v| v.parse().ok())
             .unwrap();
-        assert!(locked_kb >= 4, "expected at least one locked page, VmLck = {locked_kb} kB");
+        // secretmem pages are unswappable by construction and are not counted as VmLck.
+        if backing() == Backing::Locked {
+            assert!(locked_kb >= 4, "expected at least one locked page, VmLck = {locked_kb} kB");
+        }
     }
 }

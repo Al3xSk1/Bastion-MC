@@ -55,6 +55,7 @@ async fn sandbox_self_test(jvm: &java::Jvm) -> Result<String, String> {
     })
     .map_err(|e| e.to_string())?;
     base.landlock.tcp = TcpPolicy::Ports(vec![]);
+    base.landlock.udp_send = Some(Vec::new());
     let mut argv = vec!["java".to_string(), "-Xmx64m".into()];
     argv.extend(java::hardening_flags(jvm.major, false));
     argv.push("-version".into());
@@ -88,6 +89,56 @@ async fn sandbox_self_test(jvm: &java::Jvm) -> Result<String, String> {
     }
 }
 
+/// What each display protection can do on this machine, independent of which one the
+/// current session would pick.
+fn display_isolation(r: &mut Report, cfg: &Config, paths: &Paths) {
+    use crate::config::IsolationMode;
+    let wayland_session = display::wayland_socket(paths);
+    match (&wayland_session, cfg.sandbox.wayland_security_context) {
+        (None, _) => r.info("Wayland security context", "no Wayland session socket in this session"),
+        (Some(_), IsolationMode::Off) => r.warn(
+            "Wayland security context",
+            "sandbox.wayland_security_context = \"off\": the game would get the session's own socket",
+        ),
+        (Some(socket), mode) => match sandbox::wayland::globals(socket) {
+            Ok(globals) if globals.iter().any(|g| g.interface == sandbox::wayland::MANAGER) => r.ok(
+                "Wayland security context",
+                "supported: the compositor withholds privileged interfaces (screen capture, input injection, …) \
+                 from the game's socket",
+            ),
+            Ok(_) if mode == IsolationMode::Require => r.fail(
+                "Wayland security context",
+                "not supported by this compositor, and sandbox.wayland_security_context = \"require\"",
+            ),
+            Ok(_) => r.warn(
+                "Wayland security context",
+                "not supported by this compositor: the game would get the session's socket, with every interface \
+                 the compositor offers ordinary clients",
+            ),
+            Err(e) => r.warn("Wayland security context", format!("could not ask the compositor: {e}")),
+        },
+    }
+    let nested = sandbox::nested::locate(&cfg.sandbox.nested_compositor_layers).and_then(|()| {
+        if Path::new("/dev/dri").is_dir() {
+            Ok(())
+        } else {
+            Err("gamescope renders with Vulkan and this machine exposes no GPU (/dev/dri)".to_string())
+        }
+    });
+    let x11_session = wayland_session.is_none() && display::x11_socket().is_some();
+    match (nested, cfg.sandbox.nested_compositor) {
+        (_, IsolationMode::Off) if x11_session => r.warn(
+            "nested compositor",
+            "sandbox.nested_compositor = \"off\": on this X11 session the game would share the session's display",
+        ),
+        (_, IsolationMode::Off) => r.info("nested compositor", "off (sandbox.nested_compositor = \"off\")"),
+        (Ok(()), _) => r.ok("nested compositor", "available: gamescope can give the game an X display of its own"),
+        (Err(why), IsolationMode::Require) => r.fail("nested compositor", why),
+        (Err(why), _) if x11_session => r.warn("nested compositor", format!("not available: {why}")),
+        (Err(why), _) => r.info("nested compositor", format!("not available ({why}); not needed on Wayland")),
+    }
+}
+
 pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
     let mut r = Report::default();
 
@@ -96,6 +147,17 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
     let abi = landlock::kernel_abi();
     if abi >= landlock::MIN_KERNEL_ABI {
         r.ok("Landlock", format!("ABI {abi} (minimum {})", landlock::MIN_KERNEL_ABI));
+        if abi >= landlock::UDP_ABI {
+            r.ok("Landlock UDP rules", "the sandbox can send datagrams only to the launcher's DNS port");
+        } else {
+            r.info(
+                "Landlock UDP rules",
+                format!(
+                    "need ABI {} (Linux 7.2); until then the private network namespace alone contains UDP",
+                    landlock::UDP_ABI
+                ),
+            );
+        }
     } else {
         r.fail(
             "Landlock",
@@ -157,6 +219,18 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
             "memory locking",
             format!("token buffers are mlock'd individually; RLIMIT_MEMLOCK ({limit}) is too small to lock the whole process"),
         );
+    }
+    match crate::secret::backing() {
+        crate::secret::Backing::SecretMem => r.ok(
+            "token memory",
+            "memfd_secret: tokens are locked in RAM and removed from the kernel's direct map (not readable \
+             through /proc/kcore, ptrace or process_vm_readv)",
+        ),
+        crate::secret::Backing::Locked => r.info(
+            "token memory",
+            "locked anonymous memory (never swapped or dumped). memfd_secret is not available: this kernel has \
+             it disabled (`secretmem.enable=0`) or does not provide it",
+        ),
     }
     match (cfg.launcher.confine, crate::confine::supported()) {
         (crate::config::ConfineMode::Off, _) => r.warn(
@@ -252,6 +326,7 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
         }
         Err(e) => r.warn("desktop", e.to_string()),
     }
+    display_isolation(&mut r, cfg, paths);
     match cfg.network.mode {
         NetworkMode::Filtered => r.ok("network", "filtered (private namespace, allowlisting relay)"),
         NetworkMode::None => r.ok("network", "none"),
@@ -296,10 +371,46 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
             "refresh token store",
             "kernel keyring: RAM only; readable by other programs in your login session, not by the sandbox",
         ),
-        StoreKind::Age => match crate::auth::store::check_age_program(&cfg.auth.age.program) {
-            Ok(p) => r.ok("refresh token store", format!("age vault via {}", p.display())),
-            Err(e) => r.fail("refresh token store", e.to_string()),
-        },
+        StoreKind::Age => {
+            match crate::auth::store::check_age_program(&cfg.auth.age.program) {
+                Ok(p) => r.ok("refresh token store", format!("age vault via {}", p.display())),
+                Err(e) => r.fail("refresh token store", e.to_string()),
+            }
+            use crate::auth::store::{IdentityKind, identity_kind};
+            let mut identities: Vec<(String, &std::path::Path)> = Vec::new();
+            if let Some(common) = &cfg.auth.age.identity_file {
+                identities.push(("vault key".into(), common));
+            }
+            for (label, keys) in &cfg.auth.age.accounts {
+                identities.push((format!("vault key of account {label}"), &keys.identity_file));
+            }
+            for (what, path) in identities {
+                match identity_kind(path) {
+                    IdentityKind::Plugin(name) => r.ok(
+                        &what,
+                        format!(
+                            "hardware-backed (age-plugin-{name}): every decryption needs the device, so the stored \
+                             token cannot be copied and used elsewhere"
+                        ),
+                    ),
+                    IdentityKind::Software => r.warn(
+                        &what,
+                        format!(
+                            "a software key in {}: it protects backups and other users, but any program running as \
+                             you can read the key and decrypt the vault. Use an age plugin identity (YubiKey, TPM, \
+                             FIDO2) to bind the vault to hardware",
+                            path.display()
+                        ),
+                    ),
+                    IdentityKind::PassphraseProtected => r.warn(
+                        &what,
+                        "a passphrase-protected identity: age will ask for the passphrase on the terminal at every \
+                         launch; a front end cannot answer that",
+                    ),
+                    IdentityKind::Unreadable(why) => r.fail(&what, format!("{}: {why}", path.display())),
+                }
+            }
+        }
         StoreKind::None => r.ok("refresh token store", "none (sign in on every launch)"),
     }
 

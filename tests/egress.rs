@@ -67,13 +67,16 @@ async fn run(net: NetworkConfig, body: &str) -> Run {
     let policy = egress::Policy::new(&net, &InstanceNetwork::default(), None).unwrap();
     let ns = policy.netns_spec();
     let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
+    // What a launch gives the game: the distribution's roots, written for the sandbox (the
+    // host's certificate directories are not mounted). No broker here, so no extra anchor.
+    let trust = bastion_mc::sandbox::trust::TrustStore::build(None).unwrap();
     let mut base = sandbox::base(&BaseOptions {
         tmp_size_mb: 64,
         jvm: None,
         exec_allow: std::slice::from_ref(&python),
         resolv: Resolv::Loopback,
         expose_timezone: false,
-        trust: None,
+        trust: Some(&trust),
     })
     .unwrap();
     base.landlock.tcp = TcpPolicy::Ports(policy.tcp_ports());

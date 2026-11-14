@@ -47,6 +47,8 @@ pub struct AgeVault {
     program: PathBuf,
     recipients_file: PathBuf,
     identity_file: PathBuf,
+    /// Accounts with keys of their own: label → (recipients, identity).
+    per_account: HashMap<String, (PathBuf, PathBuf)>,
     dir: PathBuf,
 }
 
@@ -149,8 +151,21 @@ impl AgeVault {
             program,
             recipients_file: cfg.recipients_file.clone().ok_or_else(|| missing("recipients_file"))?,
             identity_file: cfg.identity_file.clone().ok_or_else(|| missing("identity_file"))?,
+            per_account: cfg
+                .accounts
+                .iter()
+                .map(|(label, keys)| (label.clone(), (keys.recipients_file.clone(), keys.identity_file.clone())))
+                .collect(),
             dir,
         })
+    }
+
+    /// The recipients and identity files for `account`: its own, or the common ones.
+    fn keys(&self, account: &str) -> (&Path, &Path) {
+        match self.per_account.get(account) {
+            Some((recipients, identity)) => (recipients, identity),
+            None => (&self.recipients_file, &self.identity_file),
+        }
     }
 
     fn file(&self, account: &str) -> PathBuf {
@@ -175,7 +190,7 @@ impl AgeVault {
             .command()
             .arg("--encrypt")
             .arg("--recipients-file")
-            .arg(&self.recipients_file)
+            .arg(self.keys(account).0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -203,7 +218,7 @@ impl AgeVault {
             .command()
             .arg("--decrypt")
             .arg("--identity")
-            .arg(&self.identity_file)
+            .arg(self.keys(account).1)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -241,6 +256,71 @@ impl AgeVault {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Error::io("removing vault file", e)),
+        }
+    }
+}
+
+/// What kind of key an age identity file holds, judged by its content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityKind {
+    /// A plugin identity (`AGE-PLUGIN-<NAME>-1…`): the key lives in a device.
+    Plugin(String),
+    /// An ordinary age or SSH private key in the file itself.
+    Software,
+    /// Encrypted with a passphrase (`age -p`): a software key, but not usable as it lies.
+    PassphraseProtected,
+    Unreadable(String),
+}
+
+/// Look at an identity file without using it. Hardware-backed means: every decryption needs
+/// the device (and usually a touch or PIN); a software key can be copied by anything that
+/// can read the file.
+pub fn identity_kind(path: &Path) -> IdentityKind {
+    let bytes = match util::read_small_file(path, 64 * 1024) {
+        Ok(bytes) => bytes,
+        Err(e) => return IdentityKind::Unreadable(e.to_string()),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut software = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        if let Some(rest) = line.strip_prefix("AGE-PLUGIN-") {
+            // `AGE-PLUGIN-YUBIKEY-1Q…`, `AGE-PLUGIN-FIDO2-HMAC-1Q…`: the plugin's name ends at
+            // the last `-1`, the separator of the Bech32 data that follows.
+            let name = rest.rfind("-1").map(|at| &rest[..at]).unwrap_or("");
+            let plain = !name.is_empty()
+                && name.len() <= 32
+                && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-');
+            return IdentityKind::Plugin(if plain { name.to_ascii_lowercase() } else { "unknown".into() });
+        }
+        if line.starts_with("age-encryption.org/") || line.starts_with("-----BEGIN AGE ENCRYPTED FILE") {
+            return IdentityKind::PassphraseProtected;
+        }
+        if line.starts_with("AGE-SECRET-KEY-") || line.starts_with("-----BEGIN OPENSSH PRIVATE KEY") {
+            software = true;
+        }
+    }
+    if software { IdentityKind::Software } else { IdentityKind::Unreadable("no age identity found in the file".into()) }
+}
+
+impl TokenStore {
+    /// The identity file used for `account`, when the store is an age vault.
+    pub fn age_identity(&self, account: &str) -> Option<&Path> {
+        match self {
+            TokenStore::Age(vault) => Some(vault.keys(account).1),
+            _ => None,
+        }
+    }
+
+    /// Decrypt `account`'s vault file and encrypt it again to the recipients configured
+    /// now. This is how a vault follows a change of keys: add the new recipient to the
+    /// recipients file, re-seal with the old identity still present, then retire the old
+    /// one. Returns `false` when the account has no vault file (or the store is not age).
+    pub fn reseal(&self, account: &str) -> Result<bool> {
+        validate_id(account)?;
+        let TokenStore::Age(vault) = self else { return Ok(false) };
+        match vault.load(account)? {
+            Some(token) => vault.save(account, &token).map(|()| true),
+            None => Ok(false),
         }
     }
 }
@@ -299,6 +379,30 @@ mod tests {
     }
 
     #[test]
+    fn identity_files_are_classified_by_what_they_hold() {
+        let dir =
+            std::env::temp_dir().join(format!("bastion-idk-{}", util::hex_encode(&util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kind = |text: &str| {
+            let path = dir.join("identity");
+            std::fs::write(&path, text).unwrap();
+            identity_kind(&path)
+        };
+        assert_eq!(
+            kind("#       Serial: 1234, Slot: 1\n#   PIN policy: once\nAGE-PLUGIN-YUBIKEY-1QQPQQQQQQQQQ\n"),
+            IdentityKind::Plugin("yubikey".into())
+        );
+        assert_eq!(kind("AGE-PLUGIN-TPM-1QYQSZQGPQYQSZQGP\n"), IdentityKind::Plugin("tpm".into()));
+        assert_eq!(kind("AGE-PLUGIN-FIDO2-HMAC-1QQPQZ\n"), IdentityKind::Plugin("fido2-hmac".into()));
+        assert_eq!(kind("# created: 2026-01-01\nAGE-SECRET-KEY-1QQQQQQQQQQQQQQQQ\n"), IdentityKind::Software);
+        assert_eq!(kind("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"), IdentityKind::Software);
+        assert_eq!(kind("age-encryption.org/v1\n-> scrypt abc 18\n"), IdentityKind::PassphraseProtected);
+        assert!(matches!(kind("# only a comment\n"), IdentityKind::Unreadable(_)));
+        assert!(matches!(identity_kind(&dir.join("missing")), IdentityKind::Unreadable(_)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn none_store_never_persists() {
         let store = TokenStore::None;
         store.save("default", &Secret::from_slice(b"t").unwrap()).unwrap();
@@ -319,14 +423,26 @@ mod tests {
             &stub,
             "#!/usr/bin/python3 -I\nimport sys\nargs = sys.argv[1:]\nassert args[0] in ('--encrypt', '--decrypt'), args\n\
              assert args[1] in ('--recipients-file', '--identity') and len(args) == 3, args\n\
-             open(args[2]).close()\ndata = sys.stdin.buffer.read()\nsys.stdout.buffer.write(bytes(b ^ 0x5a for b in data))\n",
+             key = open(args[2], 'rb').read(1)[0]\ndata = sys.stdin.buffer.read()\nsys.stdout.buffer.write(bytes(b ^ key for b in data))\n",
         )
         .unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
         let keyfile = dir.join("key");
         std::fs::write(&keyfile, "k").unwrap();
-        let cfg =
-            AgeConfig { program: stub, recipients_file: Some(keyfile.clone()), identity_file: Some(keyfile.clone()) };
+        // The stand-in XORs with the first byte of the key file, so different keys give
+        // different ciphertexts and a vault opens only with the key it was sealed with.
+        let other_key = dir.join("other-key");
+        std::fs::write(&other_key, "o").unwrap();
+        let cfg = AgeConfig {
+            program: stub,
+            recipients_file: Some(keyfile.clone()),
+            identity_file: Some(keyfile.clone()),
+            accounts: [(
+                "work".to_string(),
+                crate::config::AgeAccountKeys { recipients_file: other_key.clone(), identity_file: other_key.clone() },
+            )]
+            .into(),
+        };
         let vault = TokenStore::Age(AgeVault::new(&cfg, dir.join("vault"), false).unwrap());
 
         assert!(vault.load("default").unwrap().is_none());
@@ -338,6 +454,24 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert_eq!(vault.load("default").unwrap().unwrap().expose(), b"refresh-token-123");
         assert!(vault.has("default").unwrap() && !vault.has("other").unwrap());
+
+        // An account with keys of its own is sealed with those, not with the common ones.
+        vault.save("work", &token).unwrap();
+        let common = std::fs::read(dir.join("vault/default.age")).unwrap();
+        let own = std::fs::read(dir.join("vault/work.age")).unwrap();
+        assert_ne!(common, own, "the same token under two different keys");
+        assert_eq!(own[0], b'r' ^ b'o');
+        assert_eq!(common[0], b'r' ^ b'k');
+        assert_eq!(vault.load("work").unwrap().unwrap().expose(), b"refresh-token-123");
+        vault.delete("work").unwrap();
+
+        // Re-sealing: the same token, encrypted again to whatever the recipients are now.
+        let sealed_before = std::fs::read(dir.join("vault/default.age")).unwrap();
+        std::fs::write(&keyfile, "k").unwrap();
+        assert!(vault.reseal("default").unwrap());
+        assert_eq!(std::fs::read(dir.join("vault/default.age")).unwrap(), sealed_before, "same key, same result");
+        assert!(!vault.reseal("nobody").unwrap(), "no vault file, nothing to do");
+        assert!(!TokenStore::Keyutils.reseal("default").unwrap());
 
         // A vault file writable by others is refused rather than decrypted.
         std::fs::set_permissions(dir.join("vault/default.age"), std::fs::Permissions::from_mode(0o666)).unwrap();

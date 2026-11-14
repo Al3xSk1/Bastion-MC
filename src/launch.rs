@@ -33,7 +33,7 @@ use crate::{
     confine::{self, Confinement},
     egress,
     error::{Context, Error, Result},
-    events::{Event, Phase, Reporter, Source, StopSignal},
+    events::{Event, Phase, Protection, Reporter, Shield, Source, StopSignal},
     instance::{self, Instance, Kind, WRITABLE_DIRS},
     java,
     mojang::{
@@ -45,7 +45,7 @@ use crate::{
     net::http::HttpClient,
     paths::{Paths, validate_file_name},
     persist,
-    profile::{manifest::ProfileManifest, mods},
+    profile::{manifest::ProfileManifest, mods, packs},
     sandbox::{
         self, BaseOptions, GAME_DIR, Mount, Network, Resolv, SUPPORT_DIR, SandboxSpec, cgroup, display, nested,
         policy::{InitPolicy, SeccompPolicy, TcpPolicy},
@@ -63,12 +63,21 @@ const SIGSYS_EXIT: i32 = 128 + libc::SIGSYS;
 /// few hundred MiB and a few dozen threads; what a game renders lives in GPU memory.
 const NESTED_MEMORY_MAX_MB: u64 = 2048;
 const NESTED_TASKS_MAX: u32 = 1024;
+/// gamescope composites on the GPU; two CPUs are ample, and a game that makes its display
+/// server spin cannot take the rest of the machine with it.
+const NESTED_CPU_QUOTA_PERCENT: u32 = 200;
 
 pub struct LaunchOptions {
     pub instance: String,
     pub account: String,
     /// Start the client in Mojang's built-in demo mode without signing in (no token exists).
     pub demo: bool,
+    /// A throw-away session for content you do not trust (a downloaded map, a resource
+    /// pack, a replay): no network at all, no sign-in and no token, and the instance's
+    /// worlds and settings are *copies* that are deleted afterwards — nothing the game
+    /// writes survives. The full game is started only for an account that passed the
+    /// ownership check at its last sign-in on this machine; otherwise Mojang's demo mode.
+    pub burner: bool,
     /// `host[:port]` to connect to on start; also allowlisted for this session.
     pub join: Option<String>,
     pub repair: bool,
@@ -82,7 +91,8 @@ pub struct LaunchOptions {
 pub fn http_client(cfg: &Config) -> Result<HttpClient> {
     let roots = crate::net::tls::load_system_roots()?;
     let pins = crate::net::tls::PinSet::from_config(&cfg.tls.pins, cfg.tls.builtin_pins)?;
-    Ok(HttpClient::new(crate::net::tls::client_config(roots, pins)?, &cfg.downloads.extra_hosts))
+    let proxy = cfg.network.launcher_proxy.as_deref().map(crate::config::parse_socks5).transpose()?;
+    Ok(HttpClient::new(crate::net::tls::client_config(roots, pins)?, &cfg.downloads.extra_hosts).with_socks5(proxy))
 }
 
 pub struct Prepared {
@@ -141,6 +151,32 @@ pub async fn prepare(
 
 // ---------------------------------------------------------------- logging
 
+/// Launch logs kept per instance. Each is capped in size (`MAX_LOG_BYTES`); this caps
+/// their number, so an instance's log directory is bounded however often it is started.
+const KEEP_LAUNCH_LOGS: usize = 20;
+
+/// Delete the oldest `launch-<unix time>.log` files in `dir` until at most `keep` remain.
+/// Only files with exactly that name shape are counted or touched.
+fn prune_logs(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut logs: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let stamp = name.to_str()?.strip_prefix("launch-")?.strip_suffix(".log")?;
+            let regular = entry.file_type().ok()?.is_file();
+            (regular && !stamp.is_empty() && stamp.len() <= 20 && stamp.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| Some((stamp.parse().ok()?, entry.path())))
+                .flatten()
+        })
+        .collect();
+    logs.sort();
+    let excess = logs.len().saturating_sub(keep);
+    for (_, path) in logs.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 struct Log {
     /// The file and the number of bytes written to it so far.
     file: Mutex<(File, u64)>,
@@ -152,6 +188,7 @@ impl Log {
     fn open(paths: &Paths, instance: &str, reporter: &Reporter) -> Result<(Arc<Self>, PathBuf)> {
         let dir = paths.logs().join(instance);
         util::create_private_dir_all(&dir)?;
+        prune_logs(&dir, KEEP_LAUNCH_LOGS - 1);
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = dir.join(format!("launch-{stamp}.log"));
         let file = OpenOptions::new()
@@ -207,6 +244,46 @@ async fn relay_output(stream: impl AsyncRead + Unpin, source: Source, log: Arc<L
 
 // ---------------------------------------------------------------- per-launch scratch
 
+/// Copy the regular files and directories under `src` to `dst`. Anything else — symbolic
+/// links, sockets, devices — is skipped: the source is a directory the game could write to.
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path, files: &mut u64, bytes: &mut u64) -> Result<()> {
+    const MAX_DEPTH: usize = 64;
+    fn walk(
+        src: &std::path::Path,
+        dst: &std::path::Path,
+        depth: usize,
+        files: &mut u64,
+        bytes: &mut u64,
+    ) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(Error::Other(format!("{} is nested too deeply to copy", src.display())));
+        }
+        util::create_private_dir_all(dst)?;
+        for entry in std::fs::read_dir(src).ctx(|| format!("reading {}", src.display()))? {
+            let entry = entry.ctx(|| format!("reading {}", src.display()))?;
+            let kind = entry.file_type().ctx(|| format!("examining {}", entry.path().display()))?;
+            let (from, to) = (entry.path(), dst.join(entry.file_name()));
+            if kind.is_dir() {
+                walk(&from, &to, depth + 1, files, bytes)?;
+            } else if kind.is_file() {
+                // Opened without following a link that replaced the file after the check.
+                let mut input = util::open_regular_nofollow(&from).ctx(|| format!("opening {}", from.display()))?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&to)
+                    .ctx(|| format!("creating {}", to.display()))?;
+                *bytes += std::io::copy(&mut input, &mut output).ctx(|| format!("copying {}", from.display()))?;
+                *files += 1;
+            }
+        }
+        Ok(())
+    }
+    walk(src, dst, 0, files, bytes)
+}
+
 /// The game root for one session, plus extracted natives. Removed on drop, whatever happens.
 struct Scratch {
     root: PathBuf,
@@ -231,11 +308,6 @@ impl Drop for Scratch {
             let _ = fs::remove_dir_all(n);
         }
     }
-}
-
-/// Is this an X11-only session (no Wayland socket advertised)? Only used for a notice.
-fn desktop_is_x11_hint() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_some()
 }
 
 // ---------------------------------------------------------------- the launch itself
@@ -275,12 +347,36 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             inst.id, manifest.serial, inst.minecraft
         )),
     }
+    // So that `bastion-mc scram` can find and stop this launch.
+    let _running = crate::running::Marker::create(paths, &inst.id)?;
+    let swept = crate::running::sweep_leftovers(paths, Duration::from_secs(60));
+    if swept > 0 {
+        say(&format!("removed {swept} leftover director(ies) of earlier launches that did not end properly"));
+    }
     if cfg.launcher.confine == ConfineMode::Require {
         // Known before anything is started: whether the kernel can confine a running,
         // multi-threaded process at all.
         confine::supported().map_err(|why| Error::Sandbox(format!("launcher.confine = \"require\", but {why}")))?;
     }
-    if !opts.demo && cfg.auth.client_id.is_none() {
+    if opts.burner && opts.join.is_some() {
+        return Err(Error::Usage("--burner has no network; it cannot be combined with --join".into()));
+    }
+    // A burner session of an owned account is the full game, offline; of anything else, the demo.
+    let burner_identity = if opts.burner && !opts.demo { auth::identity::recall(paths, &opts.account) } else { None };
+    let demo = opts.demo || (opts.burner && burner_identity.is_none());
+    if opts.burner {
+        say(&match &burner_identity {
+            Some(identity) => format!(
+                "burner session: offline, nothing is kept; full game for {} (ownership was verified at the last \
+                 sign-in of account {:?})",
+                identity.player, opts.account
+            ),
+            None => "burner session: offline, nothing is kept; demo mode (no signed-in account on this machine to \
+                     vouch for ownership)"
+                .to_string(),
+        });
+    }
+    if !demo && !opts.burner && cfg.auth.client_id.is_none() {
         return Err(Error::Config(
             "auth.client_id is not set. This launcher ships no client ID: register your own Azure application \
              and put its ID in config.toml (see README), or use --demo to test the sandbox without an account."
@@ -295,9 +391,24 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // Held until the game has exited: the compositor accepts on the game's socket only
     // while it is.
     let wayland_context = desktop.wayland_context.take();
+    let display_protection = if desktop.nested.is_some() {
+        (Shield::On, "nested compositor: a display server of the game's own, clipboard cut")
+    } else if wayland_context.is_some() {
+        (Shield::On, "Wayland security context: capture and input injection withheld")
+    } else if desktop.uses_x11 {
+        (Shield::Off, "the session's X11 display: the game can watch and type into other windows")
+    } else {
+        (Shield::Partial, "the session's Wayland socket, without a security context")
+    };
 
     // 2–3. Files present and verified.
     let http = http_client(cfg)?;
+    if let Some(proxy) = http.socks5() {
+        say(&format!(
+            "network: the launcher's own connections (sign-in, downloads, credential broker) go through the SOCKS5 \
+             proxy at {proxy}; the game's connections to multiplayer servers do not"
+        ));
+    }
     let prepared = prepare(paths, cfg, &http, &inst, opts.repair, reporter).await?;
     let installed = &prepared.installed;
 
@@ -309,6 +420,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     };
     if !verified_mods.is_empty() {
         say(&format!("mods: {} jar(s) match the signed manifest", verified_mods.len()));
+    }
+    // Resource and shader packs: exactly the ones the user imported, unchanged.
+    let verified_packs = packs::verify(&inst.dir)?;
+    for group in verified_packs.iter().filter(|g| !g.files.is_empty()) {
+        say(&format!("packs: {} {}(s) match the instance's pack list", group.files.len(), group.kind.noun()));
     }
 
     // 4. System JVM.
@@ -362,7 +478,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 
     // 6. Network, display, audio, GPU.
     let join: Option<ServerRule> = opts.join.as_deref().map(|j| parse_server(j, false)).transpose()?;
-    let mode = inst.config.network.mode.unwrap_or(cfg.network.mode);
+    let mode = if opts.burner { NetworkMode::None } else { inst.config.network.mode.unwrap_or(cfg.network.mode) };
     let (network, tcp, resolv, policy) = match mode {
         NetworkMode::Filtered => {
             let policy = egress::Policy::new(&cfg.network, &inst.config.network, join.clone())?;
@@ -380,11 +496,6 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             say(
                 "network: OPEN — the game shares the host network: no egress control, host loopback services reachable",
             );
-            if desktop_is_x11_hint() {
-                say(
-                    "network: with X11, abstract-socket scoping is also off in this mode (libxcb needs the server's abstract socket)",
-                );
-            }
             (Network::Open, TcpPolicy::AnyConnect, Resolv::Host, None)
         }
         NetworkMode::None => {
@@ -417,6 +528,18 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     rw_dirs.dedup();
     for d in &rw_dirs {
         instance::ensure_plain_dir(&inst.dir.join(d))?;
+    }
+    if opts.burner {
+        // Copies inside the per-launch scratch root, which is deleted when the launch ends.
+        let (mut files, mut bytes) = (0u64, 0u64);
+        for d in &rw_dirs {
+            copy_tree(&inst.dir.join(d), &scratch.root.join(d), &mut files, &mut bytes)?;
+        }
+        say(&format!(
+            "burner session: the game works on copies of {} ({files} files, {} MiB); they are deleted afterwards",
+            rw_dirs.join(", "),
+            bytes >> 20
+        ));
     }
 
     // The credential broker (filtered network only: it lives in the relay). Its certificate
@@ -497,8 +620,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     };
 
     mounts.push(Mount::Bind { src: scratch.root.clone(), dst: GAME_DIR.into() });
-    for d in &rw_dirs {
-        mounts.push(Mount::Bind { src: inst.dir.join(d), dst: format!("{GAME_DIR}/{d}").into() });
+    if !opts.burner {
+        for d in &rw_dirs {
+            mounts.push(Mount::Bind { src: inst.dir.join(d), dst: format!("{GAME_DIR}/{d}").into() });
+        }
     }
     if !verified_mods.is_empty() {
         // A tmpfs holding only the verified jars, then sealed read-only.
@@ -508,6 +633,16 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             mounts.push(Mount::RoBindFd { file: m.file, dst: format!("{mods_dst}/{}", m.file_name).into() });
         }
         mounts.push(Mount::RemountRo { dst: mods_dst.into() });
+    }
+    // Packs: always a sealed directory, also when it is empty — the game can read packs
+    // but never put one where the next session would load it.
+    for group in verified_packs {
+        let dst = format!("{GAME_DIR}/{}", group.kind.dir());
+        mounts.push(Mount::Tmpfs { dst: dst.clone().into(), size_bytes: Some(1 << 20), mode: 0o755 });
+        for pack in group.files {
+            mounts.push(Mount::RoBindFd { file: pack.file, dst: format!("{dst}/{}", pack.file_name).into() });
+        }
+        mounts.push(Mount::RemountRo { dst: dst.into() });
     }
     if let Some(tree) = resources_bind {
         mounts.push(Mount::RoBind { src: tree, dst: format!("{GAME_DIR}/resources").into() });
@@ -521,11 +656,21 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     landlock.tcp = tcp;
     // In open mode on X11, libxcb tries the server's abstract socket first and treats a
     // permission error as fatal instead of falling back to the socket file.
-    landlock.scope_abstract_unix = !(matches!(mode, NetworkMode::Open) && desktop.uses_x11);
+    // Always: an X11 client is given its display as a socket path (never an abstract name),
+    // so even with the host's network namespace there is no reason to reach an abstract
+    // socket outside the sandbox.
+    landlock.scope_abstract_unix = true;
+    // UDP: the launcher's DNS responder is the only thing a datagram can reach in filtered
+    // mode, and nothing at all in offline mode. (Landlock ABI 10; see `restrict_udp`.)
+    landlock.udp_send = match mode {
+        NetworkMode::Filtered => Some(vec![53]),
+        NetworkMode::None => Some(Vec::new()),
+        NetworkMode::Open => None,
+    };
 
     // Template variables.
     let mut features = Features::default();
-    if opts.demo {
+    if demo {
         features.set("is_demo_user");
     }
     let resolution = inst.config.width.zip(inst.config.height);
@@ -538,7 +683,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     }
 
     // 7. Authenticate — last thing before the sandbox starts.
-    let session = if opts.demo {
+    let session = if opts.burner {
+        say("auth: burner session — nobody is signed in, no token exists");
+        None
+    } else if demo {
         say("auth: demo mode — no account, no token");
         None
     } else {
@@ -557,6 +705,18 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         let identity =
             auth::identity::Identity { player: session.profile_name.clone(), uuid: session.profile_id.clone() };
         let _ = auth::identity::remember(paths, &opts.account, &identity);
+        let _ = auth::activity::record(paths, &opts.account, "launch", &inst.id);
+        // Did the account change behind our back? Checked before the token goes anywhere.
+        match canary_verdict(paths, cfg, &opts.account, &session.profile)? {
+            Ok(note) => say(&note),
+            Err(refusal) => {
+                if cfg.auth.canary_wipe {
+                    store.delete(&opts.account)?;
+                    say("canary: the stored refresh token for this account was deleted (auth.canary_wipe)");
+                }
+                return Err(refusal);
+            }
+        }
         Some(session)
     };
     // What the game is given as its "access token". With the broker (or with no network at
@@ -570,7 +730,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     let (player, uuid, token): (String, String, &Secret) = match &session {
         Some(s) if token_in_jvm => (s.profile_name.clone(), s.profile_id.clone(), &s.access_token),
         Some(s) => (s.profile_name.clone(), s.profile_id.clone(), &placeholder_token),
-        None => ("Player".into(), "0".repeat(32), &demo_token),
+        None => match &burner_identity {
+            // Name and id are public; the "token" is the same worthless constant as in demo mode.
+            Some(identity) => (identity.player.clone(), identity.uuid.clone(), &demo_token),
+            None => ("Player".into(), "0".repeat(32), &demo_token),
+        },
     };
     if token_in_jvm {
         say(match mode {
@@ -686,11 +850,18 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                     .memory_max_mb
                     .map(u64::from)
                     .unwrap_or_else(|| 2 * u64::from(memory) + u64::from(cfg.sandbox.tmp_size_mb) + 1024);
+                let cpu = match cfg.sandbox.cpu_quota_percent {
+                    Some(q) => format!(", CPU {q}%"),
+                    None => String::new(),
+                };
                 say(&format!(
-                    "limits: {memory_max} MiB of memory, no swap, {} tasks (systemd scope)",
+                    "limits: {memory_max} MiB of memory, no swap, {} tasks{cpu} (systemd scope)",
                     cfg.sandbox.tasks_max
                 ));
-                Some(cgroup::Limits::new(&inst.id, memory_max, cfg.sandbox.tasks_max)?)
+                Some(
+                    cgroup::Limits::new(&inst.id, memory_max, cfg.sandbox.tasks_max)?
+                        .with_cpu_quota(cfg.sandbox.cpu_quota_percent),
+                )
             }
             Err(why) if mode == CgroupMode::Require => {
                 return Err(Error::Sandbox(format!("sandbox.cgroup = \"require\", but {why}")));
@@ -714,8 +885,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             if limits.is_some() {
                 // Its own scope: the game cannot starve the session by way of its display
                 // server (X clients can make a server allocate on their behalf).
-                plan.limits =
-                    Some(cgroup::Limits::new(&format!("{}-display", inst.id), NESTED_MEMORY_MAX_MB, NESTED_TASKS_MAX)?);
+                plan.limits = Some(
+                    cgroup::Limits::new(&format!("{}-display", inst.id), NESTED_MEMORY_MAX_MB, NESTED_TASKS_MAX)?
+                        .with_cpu_quota(Some(NESTED_CPU_QUOTA_PERCENT)),
+                );
             }
             let sink = log.clone();
             let session =
@@ -752,6 +925,55 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // From here a stop request means "shut the game down cleanly", not "abandon the launch".
     opts.stop.supervise();
     reporter.phase(Phase::Starting);
+    {
+        let item = |aspect: &str, (shield, detail): (Shield, &str)| Protection {
+            aspect: aspect.into(),
+            shield,
+            detail: detail.into(),
+        };
+        let confined = cfg.launcher.confine != ConfineMode::Off && confine::supported().is_ok();
+        reporter.emit(Event::Protection {
+            items: vec![
+                item("display", display_protection),
+                item(
+                    "network",
+                    match mode {
+                        NetworkMode::Filtered => (Shield::On, "filtered: only allowlisted hosts, through the launcher"),
+                        NetworkMode::None => (Shield::On, "offline: no network at all"),
+                        NetworkMode::Open => (Shield::Off, "open: the host's network, no egress control"),
+                    },
+                ),
+                item(
+                    "credential",
+                    if session.is_none() {
+                        (Shield::On, "no account and no token in this session")
+                    } else if broker_on {
+                        (Shield::On, "broker: the game holds a placeholder, the token stays in the launcher")
+                    } else if token_in_jvm {
+                        (Shield::Partial, "the session token is inside the game process")
+                    } else {
+                        (Shield::On, "offline: the token is not given to the game")
+                    },
+                ),
+                item(
+                    "limits",
+                    if spec.limits.is_some() {
+                        (Shield::On, "memory, swap and task limits (systemd scope)")
+                    } else {
+                        (Shield::Off, "no resource limits")
+                    },
+                ),
+                item(
+                    "launcher",
+                    if confined {
+                        (Shield::On, "confines itself while the game runs")
+                    } else {
+                        (Shield::Partial, "not self-confined")
+                    },
+                ),
+            ],
+        });
+    }
     let frame = build_frame(&main_class, &game_templates, &vars)?;
     drop(vars);
     let mut running = sandbox::spawn(spec, &opts.program)?;
@@ -822,6 +1044,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             keep.write.push(inst.dir.clone()); // settings carried back at exit
             keep.write.push(paths.cache.clone()); // scratch and unpacked natives, removed at exit
             keep.tcp_connect.extend(outbound_ports);
+            // What the broker forwards to Mojang goes through the proxy, if one is set.
+            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
             match confine::apply(&keep) {
                 Ok(()) => log.line(
                     Source::Launcher,
@@ -904,8 +1128,15 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         }
     }
 
-    // 10. Settings the launcher carries back on the game's behalf.
-    for name in &cfg.sandbox.persist_files {
+    // 10. Settings the launcher carries back on the game's behalf. (Not from a burner
+    // session: nothing it wrote is kept.)
+    if opts.burner {
+        log.line(
+            Source::Launcher,
+            "burner session: worlds, settings and everything else the game wrote are deleted now",
+        );
+    }
+    for name in cfg.sandbox.persist_files.iter().filter(|_| !opts.burner) {
         // Back out: what the game left is untrusted. It is parsed and written out again;
         // what does not parse stays in the scratch directory and is deleted with it.
         match persist::carry(&scratch.root, &inst.dir, name) {
@@ -939,4 +1170,187 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     log.line(Source::Launcher, &format!("game exited with status {code}"));
     reporter.emit(Event::Exited { code });
     Ok(code)
+}
+
+/// Compare the profile just returned by Mojang with the pinned one.
+///
+/// The outer `Result` is a failure to check at all. Inside: a note for the log, or the
+/// refusal that stops the launch.
+pub fn canary_verdict(
+    paths: &Paths,
+    cfg: &Config,
+    account: &str,
+    profile: &auth::minecraft::Profile,
+) -> Result<std::result::Result<String, Error>> {
+    use crate::{auth::canary, config::CanaryMode};
+    if cfg.auth.canary == CanaryMode::Off {
+        return Ok(Ok("canary: off (auth.canary = \"off\")".into()));
+    }
+    let checked = match canary::check(paths, account, profile) {
+        Ok(checked) => checked,
+        Err(damaged) if cfg.auth.canary == CanaryMode::Enforce => return Ok(Err(damaged)),
+        Err(damaged) => return Ok(Ok(format!("canary: WARNING: {damaged}"))),
+    };
+    Ok(match checked {
+        canary::Check::First => {
+            canary::accept(paths, account, profile)?;
+            Ok(format!("canary: pinned this account's profile for the first time (player {})", profile.name))
+        }
+        canary::Check::Unchanged => {
+            // Records capes gained since; a no-op otherwise.
+            canary::accept(paths, account, profile)?;
+            Ok("canary: profile unchanged since it was pinned (name, skin, cape)".into())
+        }
+        canary::Check::Changed(differences) if cfg.auth.canary == CanaryMode::Enforce => {
+            Err(canary::refusal(account, &differences))
+        }
+        canary::Check::Changed(differences) => Ok(format!(
+            "canary: WARNING: the profile changed outside this launcher ({}); auth.canary = \"warn\", so the \
+             launch continues. `bastion-mc canary accept` pins the new state.",
+            differences.join("; ")
+        )),
+    })
+}
+
+#[cfg(test)]
+mod canary_tests {
+    use super::*;
+    use crate::{
+        auth::minecraft::{Profile, Skin, Variant},
+        config::CanaryMode,
+    };
+
+    fn profile(name: &str) -> Profile {
+        Profile {
+            id: "069a79f444e94726a5befca90e38aaf5".into(),
+            name: name.into(),
+            skins: vec![Skin {
+                id: "6a6e65e576dd4c3ca625162924514568".into(),
+                active: true,
+                variant: Variant::Classic,
+                texture: "1a4af718455d4aab".into(),
+            }],
+            capes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_canary_pins_first_then_enforces_warns_or_stays_out_of_it() {
+        let root = std::env::temp_dir()
+            .join(format!("bastion-cv-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        let paths = Paths {
+            config: root.join("config"),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            state: root.join("state"),
+            runtime: None,
+        };
+        paths.ensure().unwrap();
+        let mut cfg = Config::default();
+        assert_eq!(cfg.auth.canary, CanaryMode::Enforce, "enforcing is the default");
+
+        let first = canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().unwrap();
+        assert!(first.contains("first time"), "{first}");
+        let same = canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().unwrap();
+        assert!(same.contains("unchanged"), "{same}");
+
+        let refusal = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap_err();
+        assert!(matches!(refusal, Error::Policy(_)));
+        let text = refusal.to_string();
+        assert!(text.contains("Notch → Stolen") && text.contains("canary accept --account default"), "{text}");
+        // Refusing does not move the pin: the next launch is refused as well.
+        assert!(canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().is_err());
+
+        cfg.auth.canary = CanaryMode::Warn;
+        let warned = canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap();
+        assert!(warned.contains("WARNING") && warned.contains("Notch → Stolen"), "{warned}");
+        cfg.auth.canary = CanaryMode::Enforce;
+        assert!(
+            canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().is_err(),
+            "a warning pins nothing"
+        );
+
+        cfg.auth.canary = CanaryMode::Off;
+        assert!(canary_verdict(&paths, &cfg, "default", &profile("Stolen")).unwrap().unwrap().contains("off"));
+
+        // A damaged record stops an enforcing launch too.
+        cfg.auth.canary = CanaryMode::Enforce;
+        std::fs::write(paths.canaries().join("default.json"), "{}").unwrap();
+        assert!(canary_verdict(&paths, &cfg, "default", &profile("Notch")).unwrap().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn old_launch_logs_are_pruned_and_nothing_else_is_touched() {
+        let dir = std::env::temp_dir()
+            .join(format!("bastion-logs-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        std::fs::create_dir_all(&dir).unwrap();
+        for stamp in [5u64, 1, 9, 3, 7, 100, 20] {
+            std::fs::write(dir.join(format!("launch-{stamp}.log")), b"x").unwrap();
+        }
+        for other in ["launch-.log", "launch-12x.log", "notes.txt", "launch-4.log.bak", "crash-1.log"] {
+            std::fs::write(dir.join(other), b"keep").unwrap();
+        }
+        std::fs::create_dir(dir.join("launch-2.log")).unwrap(); // a directory with a log's name
+        prune_logs(&dir, 3);
+        let mut left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "crash-1.log",
+                "launch-.log",
+                "launch-100.log",
+                "launch-12x.log",
+                "launch-2.log",
+                "launch-20.log",
+                "launch-4.log.bak",
+                "launch-9.log",
+                "notes.txt"
+            ],
+            "the three newest by time stamp (numeric, not lexical) remain"
+        );
+        prune_logs(&dir, 3);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 9, "idempotent");
+        prune_logs(std::path::Path::new("/nonexistent/bastion"), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod burner_tests {
+    use super::*;
+
+    #[test]
+    fn a_burner_copy_takes_files_and_directories_and_nothing_else() {
+        let root = std::env::temp_dir()
+            .join(format!("bastion-burn-{}", crate::util::hex_encode(&crate::util::random_bytes::<6>().unwrap())));
+        let (src, dst) = (root.join("saves"), root.join("copy"));
+        std::fs::create_dir_all(src.join("World/region")).unwrap();
+        std::fs::write(src.join("World/level.dat"), b"level").unwrap();
+        std::fs::write(src.join("World/region/r.0.0.mca"), vec![7u8; 5000]).unwrap();
+        std::fs::write(root.join("outside-secret"), b"SECRET").unwrap();
+        std::os::unix::fs::symlink(root.join("outside-secret"), src.join("World/link-to-outside")).unwrap();
+        std::os::unix::fs::symlink("/etc", src.join("etc-link")).unwrap();
+        nix::unistd::mkfifo(&src.join("World/fifo"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        let (mut files, mut bytes) = (0, 0);
+        copy_tree(&src, &dst, &mut files, &mut bytes).unwrap();
+        assert_eq!((files, bytes), (2, 5005));
+        assert_eq!(std::fs::read(dst.join("World/level.dat")).unwrap(), b"level");
+        assert_eq!(std::fs::read(dst.join("World/region/r.0.0.mca")).unwrap().len(), 5000);
+        for skipped in ["World/link-to-outside", "etc-link", "World/fifo"] {
+            assert!(std::fs::symlink_metadata(dst.join(skipped)).is_err(), "{skipped} was copied");
+        }
+        // The copy is independent of the original.
+        std::fs::write(dst.join("World/level.dat"), b"changed by the game").unwrap();
+        assert_eq!(std::fs::read(src.join("World/level.dat")).unwrap(), b"level");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

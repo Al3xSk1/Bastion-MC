@@ -24,6 +24,13 @@
 //! session's display — instead of the display being handed over by design — and yields
 //! nothing beyond it.
 //!
+//! **The clipboard.** gamescope bridges the CLIPBOARD and PRIMARY selections between the
+//! session and its inner display, both ways, and has no switch for it. Left alone, the game
+//! could read whatever is copied in the session (passwords from a password manager) and
+//! plant text there. The launcher preloads a small library into the compositor
+//! (`native/noclip.c`, built with the launcher and embedded in it) that makes the four SDL
+//! calls carrying the bridge do nothing. `tests/nested.rs` checks both directions.
+//!
 //! How the launcher learns the inner display: gamescope starts one child once its display
 //! is ready. That child is this program again in a tiny mode ([`READY_ARG`]): it prints the
 //! `DISPLAY` it was given and then waits for its standard input to close. Closing it is how
@@ -63,6 +70,9 @@ const READY_PREFIX: &str = "bastion-mc-display ";
 /// with a single mapped id) the two calls can change nothing.
 const EXTRA_SYSCALLS: [&str; 2] = ["setgid", "setuid"];
 const X11_DIR: &str = "/tmp/.X11-unix";
+/// The clipboard cut-off, preloaded into the compositor.
+const NOCLIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libbastion_noclip.so"));
+const NOCLIP_PATH: &str = "/bastion/noclip.so";
 const STARTUP: Duration = Duration::from_secs(30);
 const RECENT_LINES: usize = 12;
 
@@ -142,6 +152,7 @@ impl Plan {
         // Before the session's socket, which is mounted inside it.
         mounts.push(Mount::Bind { src: self.dir, dst: X11_DIR.into() });
         mounts.extend(self.mounts);
+        mounts.push(Mount::RoData { data: NOCLIP.to_vec(), dst: NOCLIP_PATH.into(), mode: 0o444 });
 
         let mut landlock = base.landlock;
         landlock.devices.extend(self.devices);
@@ -149,11 +160,14 @@ impl Plan {
         // A display server creates sockets: the inner X display, its own Wayland socket.
         landlock.socket_dirs = vec![X11_DIR.into(), RUNTIME_DIR.into()];
         landlock.tcp = TcpPolicy::Ports(vec![]);
+        landlock.udp_send = Some(Vec::new());
 
         let mut env = base.env;
         env.extend(self.env);
         // Shader caches and the like go to the sandbox's own tmpfs.
         set_env(&mut env, "HOME", "/tmp");
+        // gamescope only: the library takes itself out of the environment once loaded.
+        set_env(&mut env, "LD_PRELOAD", NOCLIP_PATH);
 
         let mut seccomp = self.seccomp;
         for name in EXTRA_SYSCALLS {
@@ -312,8 +326,14 @@ impl Session {
     pub fn attach(&self, mounts: &mut Vec<Mount>, sockets: &mut Vec<PathBuf>, env: &mut Vec<(String, String)>) {
         let dst = PathBuf::from(format!("{X11_DIR}/X{}", self.display));
         mounts.push(Mount::RoBind { src: self.socket.clone(), dst: dst.clone() });
-        sockets.push(dst);
-        set_env(env, "DISPLAY", &format!(":{}", self.display));
+        sockets.push(dst.clone());
+        // The socket's path, not `:N`: for `:N` libxcb first tries the abstract socket
+        // `@/tmp/.X11-unix/XN`, and gives up without trying the file if that is refused.
+        // With the host's network namespace (`network.mode = "open"`) that abstract name
+        // can belong to a display of the *session*: Landlock's abstract-socket scoping
+        // refuses it, and the game would have no display at all. A path is only ever
+        // opened as a file. (`tests/nested.rs` covers both namespaces.)
+        set_env(env, "DISPLAY", &dst.display().to_string());
         set_env(env, "XDG_SESSION_TYPE", "x11");
     }
 

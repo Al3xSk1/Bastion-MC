@@ -559,6 +559,7 @@ pub fn base(opts: &BaseOptions<'_>) -> Result<Base> {
         write: vec!["/tmp".into(), "/dev/shm".into(), RUNTIME_DIR.into()],
         plain_devices: vec!["/dev".into()],
         read_if_present: vec!["/sys".into()],
+        udp_send: None,
         scope_abstract_unix: true,
         ..Default::default()
     };

@@ -92,6 +92,14 @@ impl Config {
             crate::paths::validate_file_name(name)
                 .map_err(|e| Error::Config(format!("sandbox persist/rw entry: {e}")))?;
         }
+        for name in &self.sandbox.extra_rw_dirs {
+            if matches!(name.as_str(), "mods" | "resourcepacks" | "shaderpacks") {
+                return Err(Error::Config(format!(
+                    "sandbox.extra_rw_dirs: {name:?} cannot be made writable for the game. Mods come from the signed \
+                     profile; resource and shader packs are added with `bastion-mc pack import`."
+                )));
+            }
+        }
         for name in &self.sandbox.persist_files {
             // Nothing crosses from the game to the instance as raw bytes: a persisted file
             // is parsed and written out again, so its format has to be one the launcher knows.
@@ -114,6 +122,11 @@ impl Config {
         if !(64..=1_000_000).contains(&self.sandbox.tasks_max) {
             return Err(Error::Config("sandbox.tasks_max must be between 64 and 1000000".into()));
         }
+        if let Some(q) = self.sandbox.cpu_quota_percent
+            && !(10..=100_000).contains(&q)
+        {
+            return Err(Error::Config("sandbox.cpu_quota_percent must be between 10 and 100000".into()));
+        }
         // These become gamescope's command line. `--` is where the launcher puts the one
         // program gamescope starts; an entry must not be able to move that.
         let args = &self.sandbox.nested_compositor_args;
@@ -135,12 +148,22 @@ impl Config {
                     .into(),
             ));
         }
+        if let Some(proxy) = &self.network.launcher_proxy {
+            parse_socks5(proxy)?;
+        }
         if self.auth.token_store == TokenStore::Age {
             let age = &self.auth.age;
             if age.recipients_file.is_none() || age.identity_file.is_none() {
                 return Err(Error::Config(
                     "auth.token_store = \"age\" requires auth.age.recipients_file and auth.age.identity_file".into(),
                 ));
+            }
+            for (label, keys) in &age.accounts {
+                crate::paths::validate_id(label)
+                    .map_err(|_| Error::Config(format!("auth.age.accounts: {label:?} is not an account label")))?;
+                if !keys.recipients_file.is_absolute() || !keys.identity_file.is_absolute() {
+                    return Err(Error::Config("auth.age paths must be absolute".into()));
+                }
             }
             for p in
                 [Some(&age.program), age.recipients_file.as_ref(), age.identity_file.as_ref()].into_iter().flatten()
@@ -166,7 +189,23 @@ pub struct AuthConfig {
     /// Accept accounts whose licence comes from Xbox Game Pass (not listed by the store
     /// entitlement endpoint). Off by default: the entitlement check is then strict.
     pub allow_game_pass: bool,
+    /// What to do when the account's profile (name, skin, cape) differs from what was
+    /// pinned at the last sign-in and the change was not made through this launcher.
+    pub canary: CanaryMode,
+    /// On a canary mismatch, also delete the stored refresh token of that account. Off by
+    /// default: it costs a new sign-in every time you change your skin elsewhere.
+    pub canary_wipe: bool,
     pub age: AgeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CanaryMode {
+    /// Refuse to launch until the change is accepted (`bastion-mc canary accept`).
+    Enforce,
+    /// Say so, launch anyway, keep the old pin.
+    Warn,
+    Off,
 }
 
 impl Default for AuthConfig {
@@ -176,6 +215,8 @@ impl Default for AuthConfig {
             flow: AuthFlow::Pkce,
             token_store: TokenStore::Keyutils,
             allow_game_pass: false,
+            canary: CanaryMode::Enforce,
+            canary_wipe: false,
             age: AgeConfig::default(),
         }
     }
@@ -207,11 +248,28 @@ pub struct AgeConfig {
     pub program: PathBuf,
     pub recipients_file: Option<PathBuf>,
     pub identity_file: Option<PathBuf>,
+    /// Keys of their own for single accounts (`[auth.age.accounts.<label>]`): that
+    /// account's vault file is encrypted to, and decrypted with, these instead — a
+    /// different hardware key per account, for instance. Accounts not listed use the two
+    /// files above.
+    pub accounts: std::collections::BTreeMap<String, AgeAccountKeys>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgeAccountKeys {
+    pub recipients_file: PathBuf,
+    pub identity_file: PathBuf,
 }
 
 impl Default for AgeConfig {
     fn default() -> Self {
-        AgeConfig { program: PathBuf::from("/usr/bin/age"), recipients_file: None, identity_file: None }
+        AgeConfig {
+            program: PathBuf::from("/usr/bin/age"),
+            recipients_file: None,
+            identity_file: None,
+            accounts: Default::default(),
+        }
     }
 }
 
@@ -315,6 +373,9 @@ pub struct SandboxConfig {
     pub memory_max_mb: Option<u32>,
     /// Most threads and processes the sandbox may have at once.
     pub tasks_max: u32,
+    /// CPU time ceiling for the sandbox in percent of one CPU (`400` = four CPUs).
+    /// Default: unbounded.
+    pub cpu_quota_percent: Option<u32>,
     /// On Wayland: give the game a socket of its own that the compositor knows to be a
     /// sandbox (`wp_security_context_v1`), so that it withholds screen capture, input
     /// injection and the other interfaces meant for trusted desktop components.
@@ -351,6 +412,7 @@ impl Default for SandboxConfig {
             cgroup: CgroupMode::Auto,
             memory_max_mb: None,
             tasks_max: 4096,
+            cpu_quota_percent: None,
             wayland_security_context: IsolationMode::Auto,
             nested_compositor: IsolationMode::Auto,
             nested_compositor_args: Vec::new(),
@@ -417,6 +479,25 @@ pub struct NetworkConfig {
     pub texture_gateway: bool,
     /// Keep the access token in the launcher and authenticate requests on the game's behalf.
     pub broker: BrokerConfig,
+    /// `socks5h://IP:PORT`: send everything the *launcher* itself sends — sign-in,
+    /// downloads, and what the credential broker forwards to Mojang — through this SOCKS5
+    /// proxy (Tor, for instance), which also resolves the names. Connections the game
+    /// makes to multiplayer servers are not affected: they still come from your address.
+    pub launcher_proxy: Option<String>,
+}
+
+/// `socks5h://<literal IP>:<port>`. A literal address, so that finding the proxy needs no
+/// name lookup; `socks5h` (not `socks5`) because the proxy does the resolving.
+pub fn parse_socks5(text: &str) -> Result<std::net::SocketAddr> {
+    let bad = || {
+        Error::Config(format!(
+            "network.launcher_proxy: {text:?} is not of the form socks5h://IP:PORT (for example \
+             socks5h://127.0.0.1:9050; IPv6 as socks5h://[::1]:9050)"
+        ))
+    };
+    let rest = text.strip_prefix("socks5h://").ok_or_else(bad)?;
+    let addr: std::net::SocketAddr = rest.parse().map_err(|_| bad())?;
+    if addr.port() == 0 { Err(bad()) } else { Ok(addr) }
 }
 
 impl Default for NetworkConfig {
@@ -427,6 +508,7 @@ impl Default for NetworkConfig {
             servers: Vec::new(),
             texture_gateway: true,
             broker: BrokerConfig::default(),
+            launcher_proxy: None,
         }
     }
 }
@@ -708,6 +790,43 @@ mod tests {
         assert!(b.enabled && b.join && b.chat_signing && b.account_read, "what playing needs");
         assert!(!b.friends && !b.settings && !b.reports && !b.telemetry, "what it does not");
         c.validate().unwrap();
+    }
+
+    /// `examples/config.toml` says "every value shown is the default": it must parse, be
+    /// valid, and describe exactly the built-in defaults — so that the file a user copies
+    /// changes nothing until they change it, and no key in it is stale.
+    #[test]
+    fn the_example_configuration_is_the_defaults() {
+        let text = include_str!("../examples/config.toml");
+        let example: Config = toml::from_str(text).expect("examples/config.toml must parse");
+        example.validate().unwrap();
+        assert_eq!(format!("{example:#?}"), format!("{:#?}", Config::default()));
+        // Every section and every documented switch appears in it (commented or not).
+        for key in [
+            "[auth]",
+            "[launcher]",
+            "[tls]",
+            "[java]",
+            "[sandbox]",
+            "[network]",
+            "[network.broker]",
+            "[downloads]",
+            "canary",
+            "canary_wipe",
+            "confine",
+            "nested_compositor",
+            "nested_compositor_args",
+            "wayland_security_context",
+            "cgroup",
+            "memory_max_mb",
+            "tasks_max",
+            "cpu_quota_percent",
+            "launcher_proxy",
+            "extra_token_endpoints",
+            "[auth.age.accounts.",
+        ] {
+            assert!(text.contains(key), "examples/config.toml does not mention {key}");
+        }
     }
 
     #[test]

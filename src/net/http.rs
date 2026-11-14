@@ -108,6 +108,63 @@ pub struct HttpClient {
     /// Test hook: dial this address instead of resolving the host. Certificate validation
     /// against the host name is unaffected.
     dial_override: Option<SocketAddr>,
+    /// Reach every host through this SOCKS5 proxy, which also resolves the name.
+    socks5: Option<SocketAddr>,
+}
+
+/// Open a tunnel to `host:443` through the SOCKS5 proxy on `stream` (RFC 1928, no
+/// authentication, CONNECT, address type "domain name"). The name is sent to the proxy as
+/// it is: this process does not resolve it, so nothing about the destination is visible to
+/// the local resolver or the local network.
+async fn socks5_connect(stream: &mut TcpStream, host: &str) -> std::result::Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let name = host.as_bytes();
+    if name.is_empty() || name.len() > 255 {
+        return Err("host name does not fit a SOCKS5 request".into());
+    }
+    let io = |e: std::io::Error| format!("talking to the SOCKS5 proxy: {e}");
+    // Greeting: version 5, one method offered: 0 (no authentication).
+    stream.write_all(&[5, 1, 0]).await.map_err(io)?;
+    let mut choice = [0u8; 2];
+    stream.read_exact(&mut choice).await.map_err(io)?;
+    if choice != [5, 0] {
+        return Err("the proxy is not a SOCKS5 proxy that accepts unauthenticated clients".into());
+    }
+    let mut request = vec![5, 1, 0, 3, name.len() as u8];
+    request.extend_from_slice(name);
+    request.extend_from_slice(&443u16.to_be_bytes());
+    stream.write_all(&request).await.map_err(io)?;
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await.map_err(io)?;
+    if head[0] != 5 {
+        return Err("malformed reply from the SOCKS5 proxy".into());
+    }
+    if head[1] != 0 {
+        let why = match head[1] {
+            1 => "general failure",
+            2 => "connection not allowed by the proxy's rules",
+            3 => "network unreachable",
+            4 => "host unreachable",
+            5 => "connection refused",
+            6 => "timed out",
+            _ => "request rejected",
+        };
+        return Err(format!("the SOCKS5 proxy could not connect: {why}"));
+    }
+    // The bound address that follows is of no use here; it only has to be consumed.
+    let rest = match head[3] {
+        1 => 4 + 2,
+        4 => 16 + 2,
+        3 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await.map_err(io)?;
+            usize::from(len[0]) + 2
+        }
+        _ => return Err("malformed reply from the SOCKS5 proxy".into()),
+    };
+    let mut skip = [0u8; 257];
+    stream.read_exact(&mut skip[..rest]).await.map_err(io)?;
+    Ok(())
 }
 
 impl HttpClient {
@@ -122,7 +179,20 @@ impl HttpClient {
             hosts: Arc::new(hosts),
             suffixes: Arc::new(Vec::new()),
             dial_override: None,
+            socks5: None,
         }
+    }
+
+    /// Route every connection through a SOCKS5 proxy (Tor, for instance). Names are
+    /// resolved by the proxy. Everything else is unchanged: the TLS session is still end
+    /// to end with the named host, TLS 1.3 only, with the same pins.
+    pub fn with_socks5(mut self, proxy: Option<SocketAddr>) -> Self {
+        self.socks5 = proxy;
+        self
+    }
+
+    pub fn socks5(&self) -> Option<SocketAddr> {
+        self.socks5
     }
 
     /// Also accept any host at or below these domains. Used by the credential broker, whose
@@ -176,9 +246,11 @@ impl HttpClient {
         self.check_host(host)?;
         let net = |m: String| Error::Net(format!("{host}: {m}"));
 
-        let addrs: Vec<SocketAddr> = match self.dial_override {
-            Some(a) => vec![a],
-            None => timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, 443)))
+        let addrs: Vec<SocketAddr> = match (self.socks5, self.dial_override) {
+            // The proxy resolves the name; this process must not.
+            (Some(proxy), _) => vec![proxy],
+            (None, Some(a)) => vec![a],
+            (None, None) => timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, 443)))
                 .await
                 .map_err(|_| net("DNS lookup timed out".into()))?
                 .map_err(|e| net(format!("DNS lookup failed: {e}")))?
@@ -196,8 +268,14 @@ impl HttpClient {
                 Err(_) => last_err = format!("{addr}: connect timed out"),
             }
         }
-        let tcp = tcp.ok_or_else(|| net(format!("cannot connect ({last_err})")))?;
+        let mut tcp = tcp.ok_or_else(|| net(format!("cannot connect ({last_err})")))?;
         let _ = tcp.set_nodelay(true);
+        if self.socks5.is_some() {
+            timeout(CONNECT_TIMEOUT, socks5_connect(&mut tcp, host))
+                .await
+                .map_err(|_| net("the SOCKS5 proxy did not answer in time".into()))?
+                .map_err(net)?;
+        }
 
         let name = ServerName::try_from(host.to_owned()).map_err(|_| net("not a valid TLS server name".into()))?;
         let tls = timeout(CONNECT_TIMEOUT, self.tls.connect(name, tcp))

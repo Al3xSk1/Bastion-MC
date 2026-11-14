@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    auth::{self, identity, msa, store::TokenStore},
+    auth::{self, identity, msa, registry, store::TokenStore},
     config::{AuthFlow, Config, validate_version_id},
     doctor,
     error::{Context, Error, Result},
@@ -27,7 +27,7 @@ use crate::{
     mojang::install::Store,
     paths::{Paths, validate_id},
     profile::{
-        author,
+        author, capabilities,
         manifest::LoaderKind,
         mods,
         signing::{PublicKey, SecretKey, TrustStore},
@@ -48,12 +48,33 @@ USAGE: bastion-mc [--events] <command> [options]
 
   login  [--device] [--account NAME]  sign in with your own Azure client ID
   logout [--account NAME]             forget the stored refresh token
+  account list                        every local account and its sign-in state
+  account default [NAME]              show or set the account used when --account is not given
+
+  vault reseal [--account NAME]       re-encrypt the age vault to the recipients configured now
+
+  skin show   [--account NAME]        the account's skins and capes, as Mojang reports them
+  skin set <file.png> [--slim] [--account NAME]   upload a skin (metadata is stripped first)
+  skin reset  [--account NAME]        back to the default skin
+  skin export <file.png> [--account NAME]         save the active skin
+  cape set <alias|none> [--account NAME]          wear one of the account's capes, or none
+  canary show   [--account NAME]      the pinned profile state and its history (no network)
+  canary accept [--account NAME]      pin the account's current profile after a change made elsewhere
+
+  scram [--yes]                       EMERGENCY: stop running games, remove every stored token (no network)
+  wiki scram [--links]                the built-in recovery runbook for a compromised account
+  export-proofs <file> [--account NAME]   what this launcher recorded that proves the account is yours
 
   versions [--snapshots] [--limit N]  list Minecraft versions from Mojang's manifest
   instance new <id> --minecraft <version>     create a vanilla instance
   instance list
   install <id> [--repair]             download and verify an instance's files without launching
-  launch  <id> [--account NAME] [--join HOST[:PORT]] [--demo] [--repair] [--quiet]
+  launch  <id> [--account NAME] [--join HOST[:PORT]] [--demo] [--burner] [--repair] [--quiet]
+
+  pack list   <id>                    resource and shader packs of an instance
+  pack import <id> <file.zip> [--shader] [--name NAME.zip]   check, hash and add a pack
+  pack remove <id> <NAME.zip> [--shader]
+  pack adopt  <id>                    record packs you copied into the instance by hand
 
   key generate <file>                 create an Ed25519 signing key (file mode 0600)
   key public <file>                   print the public half of a signing key
@@ -61,16 +82,22 @@ USAGE: bastion-mc [--events] <command> [options]
   key list                            show trusted keys and which store is authoritative
 
   profile new <id> --minecraft <version> (--fabric | --quilt) [--loader-version V]
-  profile lock <id>                   record the current mods/ directory in the manifest
+  profile lock <id>                   record the current mods/ directory in the manifest (and say which
+                                      sensitive Java APIs each updated mod newly refers to)
+  profile audit <id>                  list, per mod jar, the sensitive APIs its classes refer to
   profile sign <id> --key <file>      sign the manifest
   profile verify <id>                 verify signature and mods/ exactly as a launch would
 
   --help, --version
   --events    (first argument) report progress as JSON lines on standard output, for a front
-              end such as bastion-mc-gui: status, login, logout, versions, instance, install, launch
+              end such as bastion-mc-gui: status, login, logout, account, versions, instance, install, launch, scram
 
 --demo starts the client in Mojang's own demo mode with no account: useful for testing the
-sandbox before your Azure application is approved. No token exists in that mode.";
+sandbox before your Azure application is approved. No token exists in that mode.
+
+--burner is for content you do not trust (a downloaded world, a resource pack): no network,
+no sign-in, no token, and the game works on copies of the instance's worlds and settings
+that are deleted when it exits. Nothing it writes is kept.";
 
 fn usage(msg: impl Into<String>) -> Error {
     Error::Usage(format!("{}\n\nRun `bastion-mc --help` for usage.", msg.into()))
@@ -240,8 +267,27 @@ fn print_instances(instances: &[events::Instance]) {
     }
 }
 
-fn account_flag(args: &mut Args) -> Result<String> {
-    let mut account = "default".to_string();
+fn account_summaries(paths: &Paths, cfg: &Config) -> Event {
+    Event::Accounts {
+        default: registry::default_account(paths),
+        accounts: registry::list(paths).iter().map(|name| account_summary(paths, cfg, name)).collect(),
+    }
+}
+
+fn print_accounts(event: &Event) {
+    let Event::Accounts { default, accounts } = event else { return };
+    for a in accounts {
+        let state = match (a.signed_in, &a.player) {
+            (true, Some(player)) => format!("signed in as {player}"),
+            (true, None) => "signed in".to_string(),
+            (false, _) => "not signed in".to_string(),
+        };
+        println!("{}{}\t{state}", a.account, if &a.account == default { " (default)" } else { "" });
+    }
+}
+
+fn account_flag(args: &mut Args, paths: &Paths) -> Result<String> {
+    let mut account = registry::default_account(paths);
     args.flags(|name, a| {
         if name == "account" {
             account = a.value("--account")?;
@@ -255,7 +301,12 @@ fn account_flag(args: &mut Args) -> Result<String> {
 
 fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hardening) -> Result<i32> {
     let machine = reporter.is_events();
-    if machine && !matches!(command, "status" | "login" | "logout" | "versions" | "instance" | "install" | "launch") {
+    if machine
+        && !matches!(
+            command,
+            "status" | "login" | "logout" | "account" | "scram" | "versions" | "instance" | "install" | "launch"
+        )
+    {
         return Err(usage(format!("--events is not available for `{command}`")));
     }
     let stop = StopSignal::never();
@@ -264,12 +315,13 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
 
     match command {
         "status" => {
-            let account = account_flag(args)?;
+            let account = account_flag(args, &paths)?;
             let cfg = Config::load(&paths)?;
             let summary = account_summary(&paths, &cfg, &account);
             let instances = instance_summaries(&paths)?;
             if machine {
                 reporter.emit(Event::Account(summary));
+                reporter.emit(account_summaries(&paths, &cfg));
                 reporter.emit(Event::Instances { instances });
             } else {
                 match (summary.signed_in, &summary.player) {
@@ -299,7 +351,7 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
         }
         "login" => {
             let cfg = Config::load(&paths)?;
-            let (mut flow, mut account) = (cfg.auth.flow, "default".to_string());
+            let (mut flow, mut account) = (cfg.auth.flow, registry::default_account(&paths));
             args.flags(|name, a| {
                 match name {
                     "device" => flow = AuthFlow::Device,
@@ -311,14 +363,37 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             validate_id(&account)?;
             block_on(reporter, &stop, login(&paths, &cfg, flow, &account, reporter))?;
             reporter.emit(Event::Account(account_summary(&paths, &cfg, &account)));
+            reporter.emit(account_summaries(&paths, &cfg));
+        }
+        "account" => {
+            let cfg = Config::load(&paths)?;
+            match args.positional("`list` or `default`")?.as_str() {
+                "list" => args.flags(|_, _| Ok(false))?,
+                "default" => {
+                    if let Some(lexopt::Arg::Value(name)) = args.parser.next().map_err(|e| usage(e.to_string()))? {
+                        let name = name.into_string().map_err(|_| usage("account name is not valid UTF-8"))?;
+                        validate_id(&name)?;
+                        registry::set_default(&paths, &name)?;
+                        reporter.status(format!("default account is now {name}"));
+                    } else if !machine {
+                        println!("{}", registry::default_account(&paths));
+                        return Ok(0);
+                    }
+                }
+                other => return Err(usage(format!("unknown account subcommand {other:?}"))),
+            }
+            let accounts = account_summaries(&paths, &cfg);
+            if machine { reporter.emit(accounts) } else { print_accounts(&accounts) }
         }
         "logout" => {
-            let account = account_flag(args)?;
+            let account = account_flag(args, &paths)?;
             let cfg = Config::load(&paths)?;
             TokenStore::open(&cfg.auth, &paths)?.delete(&account)?;
             identity::forget(&paths, &account)?;
+            registry::clear_default_if(&paths, &account);
             reporter.status(format!("signed out ({account})"));
             reporter.emit(Event::Account(account_summary(&paths, &cfg, &account)));
+            reporter.emit(account_summaries(&paths, &cfg));
         }
         "versions" => {
             let cfg = Config::load(&paths)?;
@@ -390,8 +465,9 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             let id = args.positional("instance id")?;
             let mut opts = LaunchOptions {
                 instance: id,
-                account: "default".into(),
+                account: registry::default_account(&paths),
                 demo: false,
+                burner: false,
                 join: None,
                 repair: false,
                 stop: stop.clone(),
@@ -403,6 +479,7 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
                     "account" => opts.account = a.value("--account")?,
                     "join" => opts.join = Some(a.value("--join")?),
                     "demo" => opts.demo = true,
+                    "burner" => opts.burner = true,
                     "repair" => opts.repair = true,
                     "quiet" => quiet = true,
                     _ => return Ok(false),
@@ -414,6 +491,177 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             // `--quiet` only means something on a terminal; a front end always gets events.
             let reporter = if quiet && !machine { Reporter::human(true) } else { reporter.clone() };
             return block_on(&reporter, &stop, launch::launch(&paths, &cfg, &opts, &reporter));
+        }
+        "scram" => {
+            let mut yes = false;
+            args.flags(|name, _| {
+                if name == "yes" {
+                    yes = true;
+                    return Ok(true);
+                }
+                Ok(false)
+            })?;
+            if !yes {
+                if machine {
+                    return Err(usage("in event mode `scram` needs --yes (the front end asks the user)"));
+                }
+                eprintln!(
+                    "This stops every running game started by this launcher and removes all stored sign-ins\n\
+                     (refresh tokens in the kernel keyring, age vault files, remembered players) for every account.\n\
+                     You will have to sign in again. Nothing is revoked at Microsoft by this.\n\
+                     Type SCRAM and press Enter to continue; anything else cancels:"
+                );
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).ctx(|| "reading the confirmation")?;
+                if answer.trim() != "SCRAM" {
+                    eprintln!("cancelled; nothing was changed");
+                    return Ok(1);
+                }
+            }
+            let report = crate::scram::run(&paths)?;
+            for line in &report.lines {
+                if machine { reporter.status(line) } else { println!("{line}") }
+            }
+            if machine && let Ok(cfg) = Config::load(&paths) {
+                reporter.emit(account_summaries(&paths, &cfg));
+            }
+            return Ok(if report.incomplete { 1 } else { 0 });
+        }
+        "wiki" => {
+            use bastion_mc_proto::runbook;
+            match args.positional("topic (`scram`)")?.as_str() {
+                "scram" => {}
+                other => return Err(usage(format!("unknown wiki topic {other:?} (there is one: scram)"))),
+            }
+            let mut links = false;
+            args.flags(|name, _| {
+                if name == "links" {
+                    links = true;
+                    return Ok(true);
+                }
+                Ok(false)
+            })?;
+            if links {
+                for (link, what) in runbook::LINKS {
+                    println!("{link}\n    {what}");
+                }
+            } else {
+                print!("{}", runbook::SCRAM);
+            }
+        }
+        "export-proofs" => {
+            let out = PathBuf::from(args.positional("output file")?);
+            let account = account_flag(args, &paths)?;
+            let text = crate::proofs::bundle(&paths, &account, auth::canary::now())?;
+            // Never over an existing file, never through a symlink, readable by the user only.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&out)
+                .ctx(|| format!("creating {}", out.display()))?;
+            file.write_all(text.as_bytes())
+                .and_then(|_| file.sync_all())
+                .ctx(|| format!("writing {}", out.display()))?;
+            println!("written to {} (mode 0600). Read it, add the purchase details, then send it to", out.display());
+            println!("Minecraft Support only — the form is linked in `bastion-mc wiki scram`.");
+        }
+        "skin" | "cape" | "canary" => {
+            let sub = args.positional(&format!("{command} subcommand"))?;
+            profile_admin(args, &paths, command, &sub, reporter, &stop)?;
+        }
+        "vault" => {
+            match args.positional("vault subcommand (`reseal`)")?.as_str() {
+                "reseal" => {}
+                other => return Err(usage(format!("unknown vault subcommand {other:?}"))),
+            }
+            let mut only = None;
+            args.flags(|name, a| {
+                if name == "account" {
+                    only = Some(a.value("--account")?);
+                    return Ok(true);
+                }
+                Ok(false)
+            })?;
+            let cfg = Config::load(&paths)?;
+            let store = TokenStore::open(&cfg.auth, &paths)?;
+            if !matches!(store, TokenStore::Age(_)) {
+                return Err(Error::Config("auth.token_store is not \"age\": there is no vault to re-seal".into()));
+            }
+            let accounts = match only {
+                Some(account) => {
+                    validate_id(&account)?;
+                    vec![account]
+                }
+                None => registry::list(&paths),
+            };
+            let mut sealed = 0;
+            for account in &accounts {
+                // One decryption (a touch, with a hardware key) and one encryption each.
+                if store.reseal(account)? {
+                    println!("account {account}: vault re-encrypted to the current recipients");
+                    sealed += 1;
+                }
+            }
+            if sealed == 0 {
+                println!("no vault file found for {}", accounts.join(", "));
+            }
+        }
+        "pack" => {
+            use crate::profile::packs::{self, PackKind};
+            let sub = args.positional("pack subcommand")?;
+            let id = args.positional("instance id")?;
+            let dir = paths.instance(&id)?;
+            if !dir.is_dir() {
+                return Err(usage(format!("no instance called {id:?}")));
+            }
+            let operand = match sub.as_str() {
+                "import" => Some(args.positional("pack file")?),
+                "remove" => Some(args.positional("pack name")?),
+                "list" | "adopt" => None,
+                other => return Err(usage(format!("unknown pack subcommand {other:?}"))),
+            };
+            let (mut kind, mut name) = (PackKind::Resource, None);
+            args.flags(|flag, a| {
+                match (flag, sub.as_str()) {
+                    ("shader", "import" | "remove") => kind = PackKind::Shader,
+                    ("name", "import") => name = Some(a.value("--name")?),
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            match sub.as_str() {
+                "import" => {
+                    let entry =
+                        packs::import(&dir, kind, Path::new(operand.as_deref().expect("file")), name.as_deref())?;
+                    println!("added {} {} ({} bytes, sha256 {})", kind.noun(), entry.file, entry.size, entry.sha256);
+                    println!("The game sees it read-only from the next launch on; select it in the game's options.");
+                }
+                "remove" => {
+                    packs::remove(&dir, kind, operand.as_deref().expect("name"))?;
+                    println!("removed {} {}", kind.noun(), operand.as_deref().expect("name"));
+                }
+                "adopt" => {
+                    let lock = packs::adopt(&dir)?;
+                    println!(
+                        "recorded {} resource pack(s) and {} shader pack(s) as they are now",
+                        lock.resourcepacks.len(),
+                        lock.shaderpacks.len()
+                    );
+                }
+                _ => {
+                    let lock = packs::Lock::load(&dir)?.unwrap_or_default();
+                    for kind in PackKind::ALL {
+                        for entry in lock.entries(kind) {
+                            println!("{}\t{}\t{} bytes\tsha256 {}", kind.noun(), entry.file, entry.size, entry.sha256);
+                        }
+                    }
+                    if lock.resourcepacks.is_empty() && lock.shaderpacks.is_empty() {
+                        println!("no packs (add one with `bastion-mc pack import {id} <file.zip>`)");
+                    }
+                }
+            }
         }
         "key" => key_command(args, &paths)?,
         "profile" => {
@@ -444,6 +692,13 @@ async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, repor
     // surface at login rather than at the first launch.
     let session = auth::session_from_msa(&http, tokens.access_token, cfg.auth.allow_game_pass).await?;
     store.save(account, &refresh)?;
+    let _ = auth::activity::record(paths, account, "sign-in", "");
+    // A sign-in pins the profile the first time. A profile that differs from an existing
+    // pin is reported, not accepted: signing in again is exactly what a worried user does.
+    match launch::canary_verdict(paths, cfg, account, &session.profile)? {
+        Ok(note) => reporter.status(note),
+        Err(refusal) => reporter.status(format!("WARNING: {refusal}")),
+    }
     // Display-only; see `auth::identity`.
     let _ = identity::remember(
         paths,
@@ -452,6 +707,217 @@ async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, repor
     );
     reporter.status(format!("signed in as {} — refresh token stored in: {}", session.profile_name, store.describe()));
     Ok(())
+}
+
+/// Refresh token → session, with the rotated refresh token stored again. The session's
+/// Minecraft token lives until the caller drops it.
+async fn open_session(
+    paths: &Paths,
+    cfg: &Config,
+    http: &crate::net::http::HttpClient,
+    account: &str,
+) -> Result<auth::Session> {
+    let client_id = cfg
+        .auth
+        .client_id
+        .as_deref()
+        .ok_or_else(|| Error::Config("auth.client_id is not set; sign in first (`bastion-mc login`)".into()))?;
+    let store = TokenStore::open(&cfg.auth, paths)?;
+    let refresh = store
+        .load(account)?
+        .ok_or_else(|| Error::Auth(format!("not signed in (account {account:?}). Run `bastion-mc login` first.")))?;
+    let (session, next) = auth::authenticate(http, client_id, &refresh, cfg.auth.allow_game_pass).await?;
+    drop(refresh);
+    store.save(account, &next)?;
+    Ok(session)
+}
+
+fn date(unix: u64) -> String {
+    // Civil date from days since the epoch (Howard Hinnant's algorithm).
+    let z = (unix / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+}
+
+fn print_profile(profile: &auth::minecraft::Profile) {
+    println!("player: {} ({})", profile.name, profile.id);
+    match profile.active_skin() {
+        Some(skin) => println!("skin:   {} model, texture {}", skin.variant.name(), skin.texture),
+        None => println!("skin:   default"),
+    }
+    if profile.capes.is_empty() {
+        println!("capes:  none");
+    }
+    for cape in &profile.capes {
+        println!("cape:   {}{}", cape.alias, if cape.active { "  (worn)" } else { "" });
+    }
+}
+
+fn print_snapshot(label: &str, s: &auth::canary::Snapshot) {
+    let skin = match &s.skin {
+        Some((texture, variant)) => format!("{variant} {texture}"),
+        None => "default".into(),
+    };
+    let cape = s.cape.as_ref().map(|c| c.1.as_str()).unwrap_or("none");
+    println!(
+        "{label} {}  name {}  skin {skin}  cape {cape}  owned capes: {}",
+        date(s.recorded),
+        s.name,
+        if s.capes_owned.is_empty() { "none".to_string() } else { s.capes_owned.join(", ") }
+    );
+}
+
+/// `skin`, `cape` and `canary`: everything that reads or changes the account's profile.
+fn profile_admin(
+    args: &mut Args,
+    paths: &Paths,
+    command: &str,
+    sub: &str,
+    reporter: &Reporter,
+    stop: &StopSignal,
+) -> Result<()> {
+    use auth::{canary, minecraft};
+    // One positional where the subcommand takes one, then flags.
+    let operand = match (command, sub) {
+        ("skin", "set" | "export") => Some(args.positional("file")?),
+        ("cape", "set") => Some(args.positional("cape alias or `none`")?),
+        ("skin", "show" | "reset") | ("canary", "show" | "accept") => None,
+        _ => return Err(usage(format!("unknown {command} subcommand {sub:?}"))),
+    };
+    let (mut account, mut slim) = (registry::default_account(paths), false);
+    args.flags(|name, a| {
+        match name {
+            "account" => account = a.value("--account")?,
+            "slim" if (command, sub) == ("skin", "set") => slim = true,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    })?;
+    validate_id(&account)?;
+    let cfg = Config::load(paths)?;
+
+    if (command, sub) == ("canary", "show") {
+        match canary::load(paths, &account)? {
+            None => println!("nothing pinned for account {account} yet (it is pinned at the first sign-in or launch)"),
+            Some(record) => {
+                println!("account {account}, player id {}", record.current.uuid);
+                for old in &record.history {
+                    print_snapshot("  was   ", old);
+                }
+                print_snapshot("  pinned", &record.current);
+            }
+        }
+        return Ok(());
+    }
+
+    // Read and checked before anything is asked of the network.
+    let upload = match (command, sub, &operand) {
+        ("skin", "set", Some(file)) => {
+            let raw = util::read_small_file(Path::new(file), 4 * minecraft::MAX_SKIN_BYTES as u64)?;
+            let clean = minecraft::sanitize_skin_png(&raw)?;
+            if clean.len() != raw.len() {
+                reporter.status(format!(
+                    "skin: {} bytes of metadata removed from the file before upload ({} → {} bytes)",
+                    raw.len() - clean.len(),
+                    raw.len(),
+                    clean.len()
+                ));
+            }
+            Some(clean)
+        }
+        _ => None,
+    };
+
+    block_on(reporter, stop, async {
+        let http = launch::http_client(&cfg)?;
+        let session = open_session(paths, &cfg, &http, &account).await?;
+        let token = &session.access_token;
+        if (command, sub) == ("canary", "accept") {
+            match canary::check(paths, &account, &session.profile) {
+                Ok(canary::Check::Changed(differences)) => {
+                    println!("accepting these changes for account {account}:");
+                    for d in &differences {
+                        println!("  - {d}");
+                    }
+                }
+                Ok(canary::Check::Unchanged) => println!("the profile already matches what is pinned"),
+                Ok(canary::Check::First) => println!("pinning account {account} for the first time"),
+                Err(_) => println!("replacing a damaged canary record for account {account}"),
+            }
+            canary::accept(paths, &account, &session.profile)?;
+            print_profile(&session.profile);
+            return Ok(());
+        }
+        // A change made elsewhere must be looked at before more changes are stacked on it
+        // (and before this launcher re-pins the profile as its own doing).
+        launch::canary_verdict(paths, &cfg, &account, &session.profile)??;
+        match (command, sub) {
+            ("skin", "show") => {
+                print_profile(&session.profile);
+                return Ok(());
+            }
+            ("skin", "export") => {
+                let skin = session.profile.active_skin().ok_or_else(|| {
+                    Error::Usage("this account uses the default skin; there is nothing to export".into())
+                })?;
+                let bytes =
+                    http.get(&minecraft::texture_url(&skin.texture), 4 * minecraft::MAX_SKIN_BYTES as u64).await?;
+                // The same check as for uploads: only an image is written to disk.
+                let png = minecraft::sanitize_skin_png(&bytes)?;
+                let out = PathBuf::from(operand.as_deref().expect("file operand"));
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&out)
+                    .ctx(|| format!("creating {}", out.display()))?;
+                file.write_all(&png).ctx(|| format!("writing {}", out.display()))?;
+                println!("active skin ({} model) written to {}", skin.variant.name(), out.display());
+                return Ok(());
+            }
+            ("skin", "set") => {
+                let variant = if slim { minecraft::Variant::Slim } else { minecraft::Variant::Classic };
+                minecraft::upload_skin(&http, token, upload.as_deref().expect("checked skin"), variant).await?;
+            }
+            ("skin", "reset") => minecraft::reset_skin(&http, token).await?,
+            ("cape", "set") => {
+                let wanted = operand.as_deref().expect("cape operand");
+                let id = if wanted.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    let cape = session
+                        .profile
+                        .capes
+                        .iter()
+                        .find(|c| c.alias.eq_ignore_ascii_case(wanted) || c.id == wanted)
+                        .ok_or_else(|| {
+                            let owned: Vec<&str> = session.profile.capes.iter().map(|c| c.alias.as_str()).collect();
+                            Error::Usage(format!(
+                                "this account has no cape called {wanted:?} (it has: {})",
+                                if owned.is_empty() { "none".to_string() } else { owned.join(", ") }
+                            ))
+                        })?;
+                    Some(cape.id.clone())
+                };
+                minecraft::set_active_cape(&http, token, id.as_deref()).await?;
+            }
+            _ => unreachable!("subcommands were checked above"),
+        }
+        // What Mojang now says the profile is — not what was asked for — is shown and pinned:
+        // this change was made here, by the user.
+        let after = minecraft::profile(&http, token).await?;
+        if cfg.auth.canary != crate::config::CanaryMode::Off {
+            canary::accept(paths, &account, &after)?;
+        }
+        print_profile(&after);
+        Ok(())
+    })
 }
 
 async fn versions(paths: &Paths, cfg: &Config, snapshots: bool, limit: usize, reporter: &Reporter) -> Result<()> {
@@ -582,7 +1048,62 @@ fn profile_command(args: &mut Args, paths: &Paths, sub: &str, id: &str) -> Resul
             for m in &manifest.mods {
                 println!("  {}  {:>10} bytes  {}", m.sha256, m.size, m.file);
             }
+            // What the jars can reach, compared with the previous lock. Informational: a
+            // jar that cannot be scanned still locks, and says so.
+            let dir = paths.instance(id)?;
+            match capabilities::scan_mods(&dir.join("mods")) {
+                Ok(scanned) => {
+                    let before = capabilities::Recorded::load(&dir);
+                    let changes = capabilities::changes(&before, &scanned);
+                    if !changes.is_empty() {
+                        println!(
+                            "\nSince the last lock (static scan of the class files; a signal for review, not proof):"
+                        );
+                        for line in &changes {
+                            println!("  {line}");
+                        }
+                        println!("`bastion-mc profile audit {id}` shows the full picture.");
+                    }
+                    capabilities::Recorded::of(&scanned).save(&dir)?;
+                }
+                Err(e) => println!("\nnote: the mods could not be scanned for API use: {e}"),
+            }
             println!("The previous signature (if any) was removed. Review the manifest, then sign it.");
+        }
+        "audit" => {
+            args.flags(|_, _| Ok(false))?;
+            let dir = paths.instance(id)?;
+            let scanned = capabilities::scan_mods(&dir.join("mods"))?;
+            if scanned.is_empty() {
+                println!("{id}: no mod jars");
+            }
+            for (identity, (file, report)) in &scanned {
+                println!("{identity}  ({file}: {} classes, {} nested jar(s))", report.classes, report.nested.len());
+                if report.capabilities.is_empty() && report.natives.is_empty() {
+                    println!("    nothing on the watch list");
+                }
+                for (capability, classes) in &report.capabilities {
+                    let total = report.counts.get(capability).copied().unwrap_or(classes.len());
+                    let meaning = capabilities::describe(capability.trim_end_matches(" (named in a string)"));
+                    println!("    {capability} — {meaning}");
+                    println!(
+                        "        {}{}",
+                        classes.join(", "),
+                        if total > classes.len() { format!(", … {total} classes in all") } else { String::new() }
+                    );
+                }
+                for native in &report.natives {
+                    println!("    bundled native library: {native}");
+                }
+                for problem in &report.unreadable {
+                    println!("    could not be read: {problem}");
+                }
+            }
+            println!(
+                "\nThis is a static scan of what the class files refer to by name. Reflection, classes defined at\n\
+                 run time and native code can hide anything else — that is why those are listed. It informs the\n\
+                 decision to sign; it enforces nothing (the sandbox does)."
+            );
         }
         "sign" => {
             let mut key = None;
@@ -626,4 +1147,17 @@ fn profile_command(args: &mut Args, paths: &Paths, sub: &str, id: &str) -> Resul
         other => return Err(usage(format!("unknown profile subcommand {other:?}"))),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::date;
+
+    #[test]
+    fn dates_are_civil_dates() {
+        assert_eq!(date(0), "1970-01-01");
+        assert_eq!(date(951_782_400), "2000-02-29");
+        assert_eq!(date(1_794_528_000), "2026-11-13");
+        assert_eq!(date(1_798_761_599), "2026-12-31");
+    }
 }

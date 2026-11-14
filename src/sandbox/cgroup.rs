@@ -18,6 +18,9 @@
 //!   desktop responsive, this is what keeps the JVM heap (and the session token in it) off
 //!   the swap device.
 //! * `TasksMax` — a fork bomb ends at this many threads and processes.
+//! * `CPUQuota` (optional) — the most CPU time the group may use, in percent of one CPU
+//!   (`400%` = four CPUs). Off by default for the game, which legitimately uses many cores
+//!   for chunk generation; set `sandbox.cpu_quota_percent` to bound a miner or a busy loop.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -35,6 +38,8 @@ pub const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 pub struct Limits {
     pub memory_max_bytes: u64,
     pub tasks_max: u32,
+    /// `CPUQuota=` in percent of one CPU; `None` leaves CPU time unbounded.
+    pub cpu_quota_percent: Option<u32>,
     /// Unit name without the `.scope` suffix: `[A-Za-z0-9:_.\-]` only.
     pub unit: String,
 }
@@ -45,8 +50,14 @@ impl Limits {
         Ok(Limits {
             memory_max_bytes: memory_max_mb.saturating_mul(1 << 20),
             tasks_max,
+            cpu_quota_percent: None,
             unit: format!("bastion-mc-{instance}-{unique}"),
         })
+    }
+
+    pub fn with_cpu_quota(mut self, percent: Option<u32>) -> Self {
+        self.cpu_quota_percent = percent;
+        self
     }
 
     /// `systemd-run` arguments that put `program args…` into the scope.
@@ -63,11 +74,15 @@ impl Limits {
         .collect();
         argv.push(format!("--unit={}", self.unit).into());
         argv.push("--description=Minecraft in the bastion-mc sandbox".into());
-        for property in [
+        let mut properties = vec![
             format!("MemoryMax={}", self.memory_max_bytes),
             "MemorySwapMax=0".to_string(),
             format!("TasksMax={}", self.tasks_max),
-        ] {
+        ];
+        if let Some(percent) = self.cpu_quota_percent {
+            properties.push(format!("CPUQuota={percent}%"));
+        }
+        for property in properties {
             argv.push("-p".into());
             argv.push(property.into());
         }
@@ -134,7 +149,12 @@ mod tests {
 
     #[test]
     fn the_scope_command_carries_the_limits_and_then_the_program_verbatim() {
-        let limits = Limits { memory_max_bytes: 6 << 30, tasks_max: 2048, unit: "bastion-mc-vanilla-0a1b2c3d".into() };
+        let limits = Limits {
+            memory_max_bytes: 6 << 30,
+            tasks_max: 2048,
+            cpu_quota_percent: None,
+            unit: "bastion-mc-vanilla-0a1b2c3d".into(),
+        };
         let argv = limits
             .command(OsStr::new("/usr/bin/bwrap"), &["--args".into(), "7".into(), "--".into(), "/bastion/init".into()]);
         let text: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
@@ -162,6 +182,18 @@ mod tests {
                 "/bastion/init",
             ]
         );
+    }
+
+    #[test]
+    fn a_cpu_quota_is_one_more_property() {
+        let limits = Limits::new("x", 1024, 64).unwrap().with_cpu_quota(Some(250));
+        let argv = limits.command(OsStr::new("/usr/bin/true"), &[]);
+        let text: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+        let at = text.iter().position(|a| *a == "CPUQuota=250%").expect("CPUQuota property");
+        assert_eq!(text[at - 1], "-p");
+        assert!(at < text.iter().position(|a| *a == "--").unwrap());
+        let none = Limits::new("x", 1024, 64).unwrap().command(OsStr::new("/usr/bin/true"), &[]);
+        assert!(!none.iter().any(|a| a.to_str().unwrap().starts_with("CPUQuota")));
     }
 
     #[test]

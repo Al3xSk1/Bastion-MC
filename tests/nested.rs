@@ -72,6 +72,17 @@ struct Output {
 /// Run one program the way the game is run — same base system, same Landlock and seccomp —
 /// with the nested session's display attached.
 async fn client(session: &nested::Session, cfg: &SandboxConfig, paths: &Paths, program: &str, argv: &[&str]) -> Output {
+    client_in(session, cfg, paths, program, argv, Network::None).await
+}
+
+async fn client_in(
+    session: &nested::Session,
+    cfg: &SandboxConfig,
+    paths: &Paths,
+    program: &str,
+    argv: &[&str],
+    network: Network,
+) -> Output {
     let exec = std::fs::canonicalize(program).unwrap_or_else(|e| panic!("{program}: {e}"));
     // The game's share of the desktop: the GPU. Its display is the nested session's.
     let desktop = display::plan(cfg, paths, "nested-test").expect("display plan");
@@ -94,7 +105,7 @@ async fn client(session: &nested::Session, cfg: &SandboxConfig, paths: &Paths, p
     session.attach(&mut base.mounts, &mut base.landlock.unix_sockets, &mut env);
     let spec = SandboxSpec {
         mounts: base.mounts,
-        network: Network::None,
+        network,
         cwd: "/tmp".into(),
         limits: None,
         policy: InitPolicy {
@@ -171,11 +182,10 @@ async fn the_game_talks_to_a_display_server_of_its_own() {
     println!("inner display :{}", session.display);
     assert_ne!(session.display.to_string(), host_number, "a display of its own, not the session's");
     assert!(dir.join(format!("X{}", session.display)).exists());
-    // Nothing new appeared where the session's displays live.
-    assert!(
-        !Path::new(&format!("/tmp/.X11-unix/X{}", session.display)).exists()
-            || session.display.to_string() == host_number
-    );
+    // The inner display's socket lives in the compositor's private directory. (Whether the
+    // same *number* exists in the host's `/tmp/.X11-unix` says nothing: when this test runs
+    // on a private display, the inner `:0` and an unrelated host `:0` can coexist.)
+    assert!(!dir.starts_with("/tmp/.X11-unix"));
 
     // 1. What the game's sandbox contains.
     let script = INSIDE.replace("@HOST@", &host_number);
@@ -190,7 +200,11 @@ async fn the_game_talks_to_a_display_server_of_its_own() {
     };
     assert_eq!(line("x11_dir="), format!("X{}", session.display), "one display socket: the inner one");
     assert_eq!(line("runtime="), "", "nothing of the compositor's or the session's runtime directory");
-    assert_eq!(line("display="), format!(":{}", session.display));
+    assert_eq!(
+        line("display="),
+        format!("/tmp/.X11-unix/X{}", session.display),
+        "a socket path: no abstract socket is tried"
+    );
     assert_eq!(line("xauthority="), "", "no cookie of the session");
     assert_ne!(line("session_socket_file="), "connected");
     assert_ne!(line("session_socket_abstract="), "connected");
@@ -216,6 +230,14 @@ async fn the_game_talks_to_a_display_server_of_its_own() {
     assert!(game_root.ok && game_root.stdout.contains("GAMESCOPE_"));
     assert!(!game_root.stdout.contains(&marker), "the game read a property of the session's root window");
     assert!(!game_root.stdout.contains("_NET_CLIENT_LIST"), "the game can enumerate windows:\n{}", game_root.stdout);
+
+    // 2b. The same with the host's network namespace (`network.mode = "open"`). There the
+    // abstract socket `@/tmp/.X11-unix/X<n>` that libxcb tries first can belong to a
+    // display of the *session* with the same number; the game must still end up on the
+    // inner display, and only there.
+    let open = client_in(&session, &cfg, &paths, "/usr/bin/xprop", &["xprop", "-root"], Network::Open).await;
+    assert!(open.ok, "xprop with the host network failed:\n{}\n{}", open.stdout, open.stderr);
+    assert!(open.stdout.contains("GAMESCOPE_"), "not gamescope's root window:\n{}", open.stdout);
 
     // 3. Hardware rendering through the inner display.
     if Path::new("/usr/bin/glxinfo").exists() {
@@ -261,8 +283,9 @@ async fn a_compositor_that_goes_away_is_noticed() {
     let _ = std::fs::remove_dir_all(paths.cache.parent().unwrap());
 }
 
-/// An X11 client in Python (ctypes + libX11) that either owns the CLIPBOARD selection with
-/// a given text for a while (`own <text> <seconds>`) or reads it (`read <seconds>`).
+/// An X11 client in Python (ctypes + libX11) that either owns a selection (CLIPBOARD or
+/// PRIMARY) with a given text for a while (`own <selection> <text> <seconds>`) or reads it
+/// (`read <selection> <seconds>`).
 const SELECTION: &str = r#"
 import ctypes, sys, time
 from ctypes import POINTER, byref, c_char_p, c_int, c_long, c_uint, c_ulong, c_void_p
@@ -297,7 +320,7 @@ if not d:
     sys.exit(1)
 w = XCreateSimpleWindow(d, XDefaultRootWindow(d), 0, 0, 1, 1, 0, 0, 0)
 atom = lambda name: XInternAtom(d, name, 0)
-CLIPBOARD, UTF8, TARGETS, PROP = atom(b"CLIPBOARD"), atom(b"UTF8_STRING"), atom(b"TARGETS"), atom(b"BASTION_PROBE")
+CLIPBOARD, UTF8, TARGETS, PROP = atom(sys.argv[2].encode()), atom(b"UTF8_STRING"), atom(b"TARGETS"), atom(b"BASTION_PROBE")
 TEXT = [UTF8, 31, atom(b"TEXT"), atom(b"text/plain;charset=utf-8"), atom(b"text/plain")]
 event = ctypes.create_string_buffer(192)
 
@@ -312,7 +335,7 @@ def pump(seconds, handle):
     return False
 
 if sys.argv[1] == "own":
-    data = sys.argv[2].encode()
+    data = sys.argv[3].encode()
     XSetSelectionOwner(d, CLIPBOARD, w, 0)
     XFlush(d)
     print("owning=" + str(XGetSelectionOwner(d, CLIPBOARD) == w), flush=True)
@@ -334,9 +357,9 @@ if sys.argv[1] == "own":
         XSendEvent(d, r.requestor, 0, 0, answer)
         XFlush(d)
         return False
-    pump(float(sys.argv[3]), serve)
+    pump(float(sys.argv[4]), serve)
 else:
-    found, owner, end = "", 0, time.time() + float(sys.argv[2])
+    found, owner, end = "", 0, time.time() + float(sys.argv[3])
     while time.time() < end and not found:
         owner = XGetSelectionOwner(d, CLIPBOARD)
         if owner:
@@ -363,17 +386,20 @@ fn value<'a>(output: &'a str, key: &str) -> &'a str {
     output.lines().find_map(|l| l.strip_prefix(key)).unwrap_or_else(|| panic!("no {key} in:\n{output}"))
 }
 
-/// What crosses the nested compositor besides pixels and input: the clipboard.
+/// What crosses the nested compositor besides pixels and input: the selections.
 ///
-/// This test takes over the CLIPBOARD selection of the display it runs against, so it has
-/// its own switch (`BASTION_NESTED_CLIPBOARD_TEST=1`) and belongs on a throw-away display.
+/// gamescope bridges CLIPBOARD and PRIMARY between the session and its inner display, in
+/// both directions; the launcher preloads `native/noclip.c` into it to cut that. This test
+/// checks that neither selection crosses in either direction. It takes over the selections
+/// of the display it runs against, so it has its own switch
+/// (`BASTION_NESTED_CLIPBOARD_TEST=1`) and belongs on a throw-away display.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_clipboard_and_the_nested_compositor() {
+async fn no_selection_crosses_the_nested_compositor() {
     if !enabled() {
         return;
     }
     if std::env::var_os("BASTION_NESTED_CLIPBOARD_TEST").is_none() {
-        eprintln!("skipped: set BASTION_NESTED_CLIPBOARD_TEST=1 (replaces the display's clipboard owner)");
+        eprintln!("skipped: set BASTION_NESTED_CLIPBOARD_TEST=1 (replaces the display's selection owners)");
         return;
     }
     let _serial = SERIAL.lock().await;
@@ -383,51 +409,61 @@ async fn the_clipboard_and_the_nested_compositor() {
     let plan = desktop.nested.take().expect("nested plan");
     let session = nested::start(plan, Path::new(LAUNCHER), Arc::new(|_| {})).await.expect("start");
     let python = ["python3", "-I", "-c", SELECTION];
+    let mut crossed = Vec::new();
 
-    // 1. Session → game: something is copied in the session while the game runs.
-    let secret = format!("copied-in-the-session-{}", std::process::id());
-    let mut owner = std::process::Command::new("/usr/bin/python3")
-        .args(["-I", "-c", SELECTION, "own", &secret, "12"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("clipboard owner on the session");
-    {
-        use std::io::BufRead;
-        let mut line = String::new();
-        std::io::BufReader::new(owner.stdout.take().unwrap()).read_line(&mut line).unwrap();
-        assert_eq!(line.trim(), "owning=True", "could not take the session's clipboard");
+    for selection in ["CLIPBOARD", "PRIMARY"] {
+        // 1. Session → game: something is copied in the session while the game runs.
+        let secret = format!("copied-in-the-session-{selection}-{}", std::process::id());
+        let mut owner = std::process::Command::new("/usr/bin/python3")
+            .args(["-I", "-c", SELECTION, "own", selection, &secret, "12"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("selection owner on the session");
+        {
+            use std::io::BufRead;
+            let mut line = String::new();
+            std::io::BufReader::new(owner.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "owning=True", "could not take the session's {selection}");
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let mut argv = python.to_vec();
+        argv.extend(["read", selection, "6"]);
+        let seen = client(&session, &cfg, &paths, "/usr/bin/python3", &argv).await;
+        let _ = owner.kill();
+        let _ = owner.wait();
+        assert!(seen.ok, "{}\n{}", seen.stdout, seen.stderr);
+        let into_game = value(&seen.stdout, "clipboard_text=").to_string();
+        println!(
+            "{selection} session → game: owner in the inner display: {}, text read by the game: {into_game:?}",
+            value(&seen.stdout, "clipboard_owner=")
+        );
+        if into_game.contains(&secret) {
+            crossed.push(format!("{selection}: session → game"));
+        }
+
+        // 2. Game → session: the game puts something on its display's selection.
+        let planted = format!("planted-by-the-game-{selection}-{}", std::process::id());
+        let mut argv = python.to_vec();
+        argv.extend(["own", selection, &planted, "8"]);
+        let (inside, outside) = tokio::join!(client(&session, &cfg, &paths, "/usr/bin/python3", &argv), async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::process::Command::new("/usr/bin/python3")
+                .args(["-I", "-c", SELECTION, "read", selection, "4"])
+                .output()
+                .await
+                .expect("selection reader on the session")
+        });
+        assert!(inside.ok, "{}\n{}", inside.stdout, inside.stderr);
+        assert_eq!(value(&inside.stdout, "owning="), "True", "the game could not own its own {selection}");
+        let outside = String::from_utf8_lossy(&outside.stdout).into_owned();
+        let into_session = value(&outside, "clipboard_text=").to_string();
+        println!("{selection} game → session: text read in the session: {into_session:?}");
+        if into_session.contains(&planted) {
+            crossed.push(format!("{selection}: game → session"));
+        }
     }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let mut argv = python.to_vec();
-    argv.extend(["read", "6"]);
-    let seen = client(&session, &cfg, &paths, "/usr/bin/python3", &argv).await;
-    let _ = owner.kill();
-    let _ = owner.wait();
-    assert!(seen.ok, "{}\n{}", seen.stdout, seen.stderr);
-    let into_game = value(&seen.stdout, "clipboard_text=").to_string();
-    println!(
-        "session → game: owner in the inner display: {}, text read by the game: {into_game:?}",
-        value(&seen.stdout, "clipboard_owner=")
-    );
-
-    // 2. Game → session: the game puts something on its display's clipboard.
-    let planted = format!("planted-by-the-game-{}", std::process::id());
-    let mut argv = python.to_vec();
-    argv.extend(["own", &planted, "8"]);
-    let (inside, outside) = tokio::join!(client(&session, &cfg, &paths, "/usr/bin/python3", &argv), async {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        tokio::process::Command::new("/usr/bin/python3")
-            .args(["-I", "-c", SELECTION, "read", "4"])
-            .output()
-            .await
-            .expect("clipboard reader on the session")
-    });
-    assert!(inside.ok, "{}\n{}", inside.stdout, inside.stderr);
-    let outside = String::from_utf8_lossy(&outside.stdout).into_owned();
-    let into_session = value(&outside, "clipboard_text=").to_string();
-    println!("game → session: text read in the session: {into_session:?}");
 
     session.stop().await;
     let _ = std::fs::remove_dir_all(paths.cache.parent().unwrap());
-    println!("RESULT session_to_game={} game_to_session={}", into_game == secret, into_session == planted);
+    assert!(crossed.is_empty(), "selections crossed the nested compositor: {crossed:?}");
 }

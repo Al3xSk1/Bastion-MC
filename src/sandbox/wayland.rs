@@ -35,7 +35,7 @@ use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 
 use crate::error::{Context, Error, Result};
 
-const MANAGER: &str = "wp_security_context_manager_v1";
+pub const MANAGER: &str = "wp_security_context_manager_v1";
 /// Identifies this launcher to the compositor (reverse-DNS in form, as the protocol asks;
 /// it is a name, not a claim to a domain).
 pub const SANDBOX_ENGINE: &str = "org.bastion-mc";
@@ -246,6 +246,22 @@ impl Connection {
         })?;
         Ok(globals)
     }
+}
+
+/// Run the event reader over `bytes` as if a compositor had sent them (and then hung up).
+/// For the robustness tests and fuzz targets: whatever the bytes are, this returns.
+#[doc(hidden)]
+pub fn read_events_from(bytes: &[u8]) -> Result<Vec<Global>> {
+    use std::io::Write;
+    let (ours, mut theirs) = UnixStream::pair().ctx(|| "creating a socket pair")?;
+    ours.set_read_timeout(Some(Duration::from_millis(200))).ctx(|| "configuring the socket")?;
+    ours.set_write_timeout(Some(Duration::from_millis(200))).ctx(|| "configuring the socket")?;
+    // Socket buffers hold far more than the reader accepts (64 messages of 4 KiB).
+    let _ = theirs.write_all(&bytes[..bytes.len().min(128 * 1024)]);
+    let _ = theirs.shutdown(std::net::Shutdown::Write);
+    let result = Connection { stream: ours, buffer: Vec::new() }.globals();
+    drop(theirs);
+    result
 }
 
 /// What the compositor behind `socket` offers a client connecting there.

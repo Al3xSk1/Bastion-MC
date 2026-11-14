@@ -27,7 +27,7 @@ use std::{
 };
 
 pub use bastion_mc_proto::{
-    Account, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, STOP_COMMAND, Source, Unit, Version,
+    Account, EVENTS_FLAG, Event, Instance, PROTOCOL, Phase, Protection, STOP_COMMAND, Shield, Source, Unit, Version,
 };
 
 /// Game output beyond this many queued lines is dropped until the reader catches up.
