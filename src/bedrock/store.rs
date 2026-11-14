@@ -1163,11 +1163,14 @@ pub fn instance_version(paths: &Paths, instance: &str) -> Result<Option<String>>
 }
 
 /// Running launches (by their markers) of Bedrock instances that name `id`, and launches whose
-/// instance cannot be read (they might).
+/// instance cannot be read (they might). A Bedrock launch marks itself as one of its own kind
+/// (`running::Marker::bedrock`); a launch marker of the Java kind is looked at too, since only
+/// the instance's file can tell what it runs.
 fn launches_using(paths: &Paths, id: &str) -> Vec<String> {
+    use crate::running::Activity;
     let mut found = Vec::new();
     for running in crate::running::list(paths) {
-        let crate::running::Activity::Launch(instance) = &running.activity else { continue };
+        let (Activity::Bedrock(instance) | Activity::Launch(instance)) = &running.activity else { continue };
         match instance_version(paths, instance) {
             Ok(Some(version)) if version == id => found.push(format!("instance {instance} (process {})", running.pid)),
             Ok(_) => {}

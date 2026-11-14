@@ -296,9 +296,11 @@ pub struct Stub {
 
 impl Stub {
     /// Open `program` (this executable) for the stub's own path and for every path in
-    /// `webview_paths` that exists on the host. A path that does not exist on the host does
-    /// not exist in the sandbox either (everything outside the generated directories is a
-    /// read-only view of the host), so there is nothing there for the client to find.
+    /// `webview_paths` — the installed webviews (`Client::installed_webviews`: the places that
+    /// exist, links resolved to the files they lead to, since a bind mount follows a link in
+    /// its destination). A path that does not exist on the host does not exist in the sandbox
+    /// either (everything outside the generated directories is a read-only view of the host),
+    /// so there is nothing there for the client to find.
     pub fn open(program: &Path, webview_paths: &[PathBuf]) -> Result<Stub> {
         let open = || File::open(program).ctx(|| format!("opening {}", program.display()));
         let mut covers = Vec::new();
@@ -419,7 +421,11 @@ pub fn build(base: Base, mut input: Inputs<'_>) -> Result<Profile> {
 
     // The environment, from scratch (the base's), with the stub's directory first in PATH and
     // HOME inside the data root, so that whatever writes below HOME is part of the session.
-    set(&mut env, "PATH", &format!("{SANDBOX_BIN}:/usr/bin"));
+    // PATH is exactly the stub's directory and the store package's `SANDBOX_PATH_DIRS` — the
+    // directories its discovery searched for installed webviews — with no empty entry (the
+    // client's PATH search takes an empty entry for the working directory). XDG_DATA_DIRS
+    // stays unset: the client then searches only /usr/local/share and /usr/share (read-only).
+    set(&mut env, "PATH", &sandbox_path());
     set(&mut env, "HOME", SANDBOX_DATA);
     set(&mut env, "XDG_CACHE_HOME", SANDBOX_CACHE);
 
@@ -438,7 +444,22 @@ pub fn build(base: Base, mut input: Inputs<'_>) -> Result<Profile> {
     if let Some((width, height)) = input.window {
         argv.extend(["-ww".into(), width.to_string(), "-wh".into(), height.to_string()]);
     }
-    Ok(Profile { exec: program.clone(), argv, env, mounts, landlock, cwd: SANDBOX_DATA.into() })
+    // The working directory is read-only and holds nothing the client could take for its own
+    // (`PathHelper` takes a working directory that holds `lib/<abi>/libminecraftpe.so` for its
+    // data directory): `/`, as on Android, where an app's working directory is `/` as well.
+    Ok(Profile { exec: program.clone(), argv, env, mounts, landlock, cwd: SANDBOX_CWD.into() })
+}
+
+/// The client's working directory (see [`build`]).
+pub const SANDBOX_CWD: &str = "/";
+
+/// The client's `PATH`: the stub's directory, then the store package's
+/// `runtime::SANDBOX_PATH_DIRS`.
+pub fn sandbox_path() -> String {
+    std::iter::once(SANDBOX_BIN.to_string())
+        .chain(crate::bedrock::runtime::SANDBOX_PATH_DIRS.iter().map(|dir| format!("/{dir}")))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn set(env: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -571,7 +592,7 @@ mod tests {
                     version_dir: open_path(&self.version, true).unwrap(),
                     session,
                     kept,
-                    stub: Stub::open(&program, &self.client.webview_paths).unwrap(),
+                    stub: Stub::open(&program, &self.client.installed_webviews()).unwrap(),
                     bridge_socket: Some(self.root.join("signin.sock")),
                     window,
                 },
@@ -691,13 +712,16 @@ mod tests {
                 "720"
             ]
         );
-        assert_eq!(profile.cwd, Path::new(SANDBOX_DATA));
+        assert_eq!(profile.cwd, Path::new("/"), "read-only, and nothing the client takes for its own");
         let get = |k: &str| {
             let all: Vec<&String> = profile.env.iter().filter(|(key, _)| key == k).map(|(_, v)| v).collect();
             assert!(all.len() <= 1, "{k} set twice: {all:?}");
             all.first().map(|v| v.as_str())
         };
         assert_eq!(get("PATH"), Some("/bastion/bin:/usr/bin"), "the stub's directory first");
+        assert!(sandbox_path().split(':').all(|d| d.starts_with('/') && d.len() > 1), "no empty or relative entry");
+        assert_eq!(get("XDG_DATA_DIRS"), None, "the client's data search stays on /usr");
+        assert_eq!(get("XDG_DATA_HOME"), None);
         assert_eq!(get("HOME"), Some(SANDBOX_DATA));
         assert_eq!(get("XDG_CACHE_HOME"), Some(SANDBOX_CACHE));
         assert_eq!(get("DBUS_SESSION_BUS_ADDRESS"), None);

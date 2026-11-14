@@ -323,7 +323,10 @@ pub async fn launch_with(
         _ => None,
     };
     let bridge_socket = bridge.as_ref().map(|(b, _)| b.socket_dir().join(signin::SOCKET_NAME));
-    let stub = profile::Stub::open(&opts.program, &client.webview_paths)?;
+    // Every installed webview the client could find (the store package's discovery: its own
+    // directory, the sandbox's PATH, pacman's records, a manual install's tree; links resolved
+    // to the files they lead to) is covered by the stub.
+    let stub = profile::Stub::open(&opts.program, &client.installed_webviews())?;
     if !stub.covers.is_empty() {
         say(&format!(
             "sign-in: the installed webview at {} is covered by bastion-mc's bridge stub",
@@ -346,7 +349,9 @@ pub async fn launch_with(
         profile::Inputs {
             client: &client,
             client_file,
-            version_dir: setup.version.dir,
+            // A duplicate: the version itself (`setup.version`, with the shared lock on its
+            // directory that makes `bedrock remove` refuse) is kept until the session is over.
+            version_dir: setup.version.dir.try_clone().ctx(|| "duplicating the version's descriptor")?,
             session: &session,
             kept: &mut kept,
             stub,
@@ -684,6 +689,8 @@ pub async fn launch_with(
     }
     drop(session);
     drop(kept);
+    // Only now may the version be removed (`bedrock remove` takes its lock exclusively).
+    drop(setup.version);
 
     let code = status.code().unwrap_or(1);
     if interrupted {

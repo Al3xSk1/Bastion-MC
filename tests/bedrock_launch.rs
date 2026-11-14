@@ -4,10 +4,12 @@
 //!
 //! Three sessions of one instance, in order:
 //!
-//! 1. filtered network: the stand-in writes a world, settings and sign-in tokens, fetches
+//! 1. filtered network, on a version imported into the store and opened by `store::open` (as
+//!    a real launch does): the stand-in writes a world, settings and sign-in tokens, fetches
 //!    HTTPS from a stand-in host through the relay (libcurl, the sandbox's CA bundle with the
-//!    stand-in's CA appended the way the network package's CA will be), runs the webview the
-//!    way the client does, and tries what must fail;
+//!    stand-in's CA appended after the network package's), runs the webview the way the client
+//!    does, and tries what must fail; after the session the version can be removed again (the
+//!    session held it);
 //! 2. `[network] mode = "none"`, after a crashed session was simulated: the leftover is
 //!    deleted before the start, the world and settings are still there, the tokens are not;
 //! 3. filtered again, with the launcher confining itself — which confines this test process
@@ -30,7 +32,7 @@ use bastion_mc::{
     bedrock::{
         launch::{Setup, launch_with, profile},
         runtime::Client,
-        store::open_dir_unverified,
+        store::{self, OpenedVersion, open_dir_unverified},
     },
     config::{CgroupMode, Config, ConfineMode},
     events::{Reporter, StopSignal},
@@ -169,9 +171,9 @@ impl World {
         cfg
     }
 
-    /// Run one session; the game's `key=value` lines, the status lines, every event.
-    async fn session(&self, number: u32, confine: ConfineMode) -> Session {
-        let probes = [
+    /// What the stand-in is to do and look at in session `number`.
+    fn probes(&self, number: u32) -> String {
+        [
             format!("session={number}"),
             format!("host_path={}", self.paths.data.display()),
             format!("host_path={}", self.paths.config.display()),
@@ -180,8 +182,19 @@ impl World {
             format!("host_path={}", self.root.join("instance-dir-marker").display()),
             format!("https=https://{HOST}/standin"),
             "denied=https://api.minecraftservices.com/minecraft/profile".to_string(),
-        ];
-        std::fs::write(self.version.join("standin-probes.txt"), probes.join("\n")).unwrap();
+        ]
+        .join("\n")
+    }
+
+    /// Run one session on the test's own version directory (opened without the store's check).
+    async fn session(&self, number: u32, confine: ConfineMode) -> Session {
+        std::fs::write(self.version.join("standin-probes.txt"), self.probes(number)).unwrap();
+        let version = open_dir_unverified("1.26.62.1-standin", &self.version).unwrap();
+        self.session_with(version, confine).await
+    }
+
+    /// Run one session on `version`; the game's `key=value` lines, the status lines, every event.
+    async fn session_with(&self, version: OpenedVersion, confine: ConfineMode) -> Session {
         let reporter = Reporter::capture();
         let opts = LaunchOptions {
             instance: INSTANCE.into(),
@@ -196,7 +209,7 @@ impl World {
         let inst = instance::load(&self.paths, INSTANCE).expect("instance");
         let setup = Setup {
             client: self.client.clone(),
-            version: open_dir_unverified("1.26.62.1-standin", &self.version).unwrap(),
+            version,
             desktop: Some(Desktop::default()),
             extra_trust_pem: self.ca_pem.clone().into_bytes(),
         };
@@ -354,13 +367,22 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     let curl = Path::new("/usr/lib/libcurl.so.4").exists();
 
     // ---------------------------------------------------------------- session 1
-    let one = world.session(1, ConfineMode::Off).await;
+    // A version as the store keeps it: written as mcpelauncher-ui extracts one (with the
+    // stand-in's instructions among its assets), imported, and opened with its check — the
+    // instance names it ("1.26.62.1").
+    let source = root.join("download");
+    store::write_stand_in_version(&source).unwrap();
+    std::fs::write(source.join("assets/standin-probes.txt"), world.probes(1)).unwrap();
+    store::import(&paths, &source, None, &Reporter::capture()).expect("importing the stand-in version");
+    let library = std::fs::metadata(source.join("lib/x86_64/libminecraftpe.so")).unwrap().len();
+    let one =
+        world.session_with(store::open(&paths, "1.26.62.1").expect("the imported version"), ConfineMode::Off).await;
     if std::env::var_os("BASTION_TEST_VERBOSE").is_some() {
         println!("{}", one.dump());
     }
     assert_eq!(one.outcome, Ok(0), "{}", one.dump());
     one.expect("argv", "-dg /bastion/game -dd /bastion/data -dc /bastion/cache");
-    one.expect("game.read", "4096");
+    one.expect("game.read", &library.to_string());
     one.refused("game.write");
     // The data root is writable; the mod directory is not; nothing written can be executed.
     for key in ["write.world", "write.options", "write.settings", "write.token.external", "write.token.root"] {
@@ -419,6 +441,10 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert!(files_named(&kept, "libjnivmsupport.so").is_empty());
     assert!(profile::session_dirs(&paths).is_empty(), "{:?}", profile::session_dirs(&paths));
     assert!(files_named(&runtime, "signin.sock").is_empty(), "the bridge socket's name is gone");
+    // The session held the version until it ended; now it can be removed (and the instance
+    // that names it is named).
+    let notes = store::remove(&paths, "1.26.62.1").expect("the version is free once the session is over");
+    assert!(notes.iter().any(|n| n.contains(INSTANCE)), "{notes:?}");
 
     // ---------------------------------------------------------------- session 2
     // A session that crashed a moment ago left its data root (and its sign-in) behind.

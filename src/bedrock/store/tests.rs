@@ -544,6 +544,9 @@ fn remove_refuses_while_a_marked_launch_of_a_bedrock_instance_names_the_version(
         other => panic!("expected a refusal, got {other:?}"),
     };
     assert!(message.contains(&format!("instance bedrock-main (process {})", child.id())), "{message}");
+    // The marker a Bedrock launch writes (`running::Marker::bedrock`) holds it the same way.
+    fs::write(&marker, format!("{start}\nbedrock:bedrock-main\n{comm}\n")).unwrap();
+    assert!(matches!(remove(&paths, "in-use"), Err(Error::Policy(m)) if m.contains("instance bedrock-main")));
 
     // A running launch of another instance does not hold the version.
     fs::write(&marker, format!("{start}\nlaunch:vanilla\n{comm}\n")).unwrap();
@@ -551,6 +554,12 @@ fn remove_refuses_while_a_marked_launch_of_a_bedrock_instance_names_the_version(
     // One whose instance cannot be read might: refused, with the reason.
     fs::write(&marker, format!("{start}\nlaunch:gone\n{comm}\n")).unwrap();
     assert!(launches_using(&paths, "in-use")[0].contains("cannot be read"));
+
+    // The instance file the launch package writes (`instance new --bedrock`) is read the same way.
+    crate::instance::create_bedrock(&paths, "made-by-instance-new", "in-use").unwrap();
+    assert_eq!(instance_version(&paths, "made-by-instance-new").unwrap().as_deref(), Some("in-use"));
+    fs::write(&marker, format!("{start}\nbedrock:made-by-instance-new\n{comm}\n")).unwrap();
+    assert!(launches_using(&paths, "in-use")[0].contains("instance made-by-instance-new"));
 
     child.kill().unwrap();
     let _ = child.wait();

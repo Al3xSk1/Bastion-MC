@@ -89,9 +89,12 @@ fn main() {
     say("standin", "done");
 }
 
-/// The test's instructions, put into the (test-made) game directory.
+/// The test's instructions, put into the (test-made) game directory — or, for a version the
+/// store imported (which holds nothing unlisted), into its `assets/`.
 fn read_probes() -> Vec<(String, String)> {
-    let text = std::fs::read_to_string("/bastion/game/standin-probes.txt").unwrap_or_default();
+    let text = std::fs::read_to_string("/bastion/game/standin-probes.txt")
+        .or_else(|_| std::fs::read_to_string("/bastion/game/assets/standin-probes.txt"))
+        .unwrap_or_default();
     text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
