@@ -134,23 +134,26 @@ fn a_bedrock_launch_is_gated_and_refuses_the_java_launch_options() {
     let home = Home::new("launch");
     assert!(home.run(&["instance", "new", "phone", "--bedrock", "1.26.62.1"]).status.success());
     // Without the user's acceptance of the licence substitution: refused, and the reason named.
-    let gated = home.run(&["launch", "phone"]);
-    assert!(!gated.status.success());
-    assert!(text(&gated).contains("accept_licence_substitution"), "{}", text(&gated));
-    // The Java launch options, each with what to do instead.
+    // The gate comes first, before anything else of Bedrock is looked at — the options too.
+    for args in [&["launch", "phone"][..], &["launch", "phone", "--burner"], &["launch", "phone", "--demo"]] {
+        let gated = home.run(args);
+        assert!(!gated.status.success(), "{args:?}");
+        assert!(text(&gated).contains("accept_licence_substitution"), "{args:?}: {}", text(&gated));
+    }
+    // Accepted: the Java launch options, each refused with what to do instead.
+    home.config("[bedrock]\naccept_licence_substitution = true\n");
     for (flag, says) in [("--burner", "mode = \"none\""), ("--repair", "bedrock import")] {
         let out = home.run(&["launch", "phone", flag]);
         assert!(!out.status.success() && text(&out).contains(says), "{flag}: {}", text(&out));
     }
     let join = home.run(&["launch", "phone", "--join", "play.example.org"]);
     assert!(!join.status.success() && text(&join).contains("[bedrock] servers"), "{}", text(&join));
-    // `--demo` asks for nothing a Bedrock launch does not do anyway: it gets as far as the gate.
-    let demo = home.run(&["launch", "phone", "--demo"]);
-    assert!(!demo.status.success() && text(&demo).contains("accept_licence_substitution"), "{}", text(&demo));
-    // Accepted, the launch goes on to find the installed client (another package's part).
-    home.config("[bedrock]\naccept_licence_substitution = true\n");
+    // And the launch goes on to find the installed client (the store package's discovery; there
+    // is none on this machine).
     let accepted = home.run(&["launch", "phone"]);
-    assert!(!text(&accepted).contains("accept_licence_substitution = true` in config.toml"), "{}", text(&accepted));
+    assert!(!accepted.status.success());
+    assert!(!text(&accepted).contains("accept_licence_substitution"), "{}", text(&accepted));
+    assert!(text(&accepted).contains("mcpelauncher-client"), "{}", text(&accepted));
 }
 
 #[test]
