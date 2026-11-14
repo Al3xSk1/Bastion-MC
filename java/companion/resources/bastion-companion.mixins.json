@@ -1,0 +1,14 @@
+{
+  "required": false,
+  "package": "bastion.companion.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "CameraMixin",
+    "HudMixin",
+    "LightmapMixin",
+    "MouseHandlerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

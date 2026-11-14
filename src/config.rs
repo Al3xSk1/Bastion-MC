@@ -34,6 +34,8 @@ pub struct Config {
     pub network: NetworkConfig,
     pub downloads: DownloadsConfig,
     pub launcher: LauncherConfig,
+    /// The companion mod for Fabric instances (see `companion`).
+    pub companion: crate::companion::CompanionConfig,
 }
 
 impl Config {
@@ -169,6 +171,7 @@ impl Config {
         if let Some(proxy) = &self.network.launcher_proxy {
             parse_socks5(proxy)?;
         }
+        self.companion.validate()?;
         if self.auth.token_store == TokenStore::Age {
             let age = &self.auth.age;
             if age.recipients_file.is_none() || age.identity_file.is_none() {
@@ -837,6 +840,8 @@ pub struct InstanceConfig {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub network: InstanceNetwork,
+    /// This instance's own companion settings, on top of the global `[companion]`.
+    pub companion: crate::companion::CompanionOverride,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -869,6 +874,7 @@ impl InstanceConfig {
         for s in &cfg.network.servers {
             s.to_rule()?;
         }
+        cfg.companion.validate()?;
         Ok(cfg)
     }
 }
@@ -939,6 +945,12 @@ mod tests {
             "voice = ",
             "extra_token_endpoints",
             "[auth.age.accounts.",
+            "[companion]",
+            "zoom_key",
+            "zoom_factor",
+            "zoom_wheel",
+            "hud",
+            "fullbright_gamma",
         ] {
             assert!(text.contains(key), "examples/config.toml does not mention {key}");
         }

@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod cli;
+pub mod companion;
 pub mod config;
 pub mod confine;
 pub mod doctor;

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "bastion-companion",
+  "version": "@VERSION@",
+  "name": "Bastion Companion",
+  "description": "Zoom and other conveniences from the bastion-mc launcher, which adds this mod to Fabric instances itself. It enforces nothing: whatever protects you is in the launcher, outside the game.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "bastion.companion.CompanionMod"
+    ]
+  },
+  "mixins": [
+    "bastion-companion.mixins.json"
+  ]
+}

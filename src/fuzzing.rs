@@ -143,6 +143,14 @@ pub fn udp(data: &[u8]) {
     udp::fuzz_table(data);
 }
 
+/// The companion channel: what code inside the game writes to the launcher's socket. The
+/// same log lines and counts must result however the bytes are cut into reads, the reader
+/// never holds more than one bounded line, and nothing it would log contains a control
+/// character.
+pub fn companion(data: &[u8]) {
+    crate::companion::channel::fuzz(data);
+}
+
 /// A harness: arbitrary bytes in, a panic if a property does not hold.
 pub type Harness = fn(&[u8]);
 
@@ -157,4 +165,5 @@ pub const ALL: &[(&str, Harness)] = &[
     ("profile", profile),
     ("zipdir", zipdir),
     ("udp", udp),
+    ("companion", companion),
 ];

@@ -80,3 +80,10 @@ path = "fuzz_targets/udp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "companion"
+path = "fuzz_targets/companion.rs"
+test = false
+doc = false
+bench = false

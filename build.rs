@@ -1,6 +1,9 @@
 //! Also compiles `native/noclip.c`, the clipboard cut-off preloaded into the nested
 //! compositor (see `src/sandbox/nested.rs`), with the C compiler Rust already links with.
 //!
+//! Also compiles and packs the companion Fabric mod (`java/companion`) with the same javac;
+//! the recipe is `src/companion/jar.rs`, shared with the tests that reproduce it.
+//!
 //! Compiles `java/BastionBootstrap.java` with the *system* javac and embeds the class file.
 //!
 //! No precompiled binary blob is checked into the repository: the bootstrap that handles the
@@ -9,6 +12,9 @@
 //! back to the oldest level they still support (and the launcher then refuses older JVMs).
 
 use std::{env, fs, path::PathBuf, process::Command};
+
+#[path = "src/companion/jar.rs"]
+mod companion_jar;
 
 fn main() {
     println!("cargo:rerun-if-changed=java/BastionBootstrap.java");
@@ -20,6 +26,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     build_noclip(&out_dir);
     let javac = env::var_os("JAVAC").unwrap_or_else(|| "javac".into());
+    build_companion(&out_dir, &javac);
     let class_file = out_dir.join("BastionBootstrap.class");
 
     let mut last_err = String::new();
@@ -64,6 +71,22 @@ fn main() {
         format!("/// Lowest Java feature release able to load the embedded bootstrap class.\npub const BOOTSTRAP_MIN_JAVA: u32 = {min_java};\n"),
     )
     .expect("write bootstrap_meta.rs");
+}
+
+/// The companion mod's jar, embedded by `src/companion/mod.rs`. Built from source on every
+/// build, like the bootstrap class: no binary of it is checked in.
+fn build_companion(out_dir: &std::path::Path, javac: &std::ffi::OsStr) {
+    for input in ["java/companion", "java/stubs", "src/companion/jar.rs", "LICENSE"] {
+        println!("cargo:rerun-if-changed={input}");
+    }
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let built = companion_jar::build(&root, javac, &version, &out_dir.join("companion"))
+        .unwrap_or_else(|why| panic!("building the companion mod failed: {why}"));
+    for line in built.warnings.lines().filter(|line| !line.trim().is_empty()) {
+        println!("cargo:warning=companion mod (javac): {line}");
+    }
+    fs::write(out_dir.join("bastion-companion.jar"), built.jar).expect("write bastion-companion.jar");
 }
 
 fn build_noclip(out_dir: &std::path::Path) {

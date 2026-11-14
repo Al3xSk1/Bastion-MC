@@ -128,3 +128,18 @@ extra_token_endpoints = [] # "METHOD host/path", for game versions newer than th
 extra_hosts = []
 verify_assets_on_launch = true
 parallel = 8
+
+# The companion mod: zoom and a few other conveniences, built into the launcher and added to
+# Fabric profiles for the session (Minecraft 26.3; the signed mods directory is not
+# touched). It enforces nothing. An instance can set any of these keys for itself under
+# [companion] in its instance.toml.
+[companion]
+enabled = true
+force = false              # also add it for Minecraft versions it was not tested with
+zoom = true                # hold the key to zoom; the mouse wheel changes the factor meanwhile
+zoom_key = "key.keyboard.c"   # a keyboard key by Minecraft's name for it (see options.txt); "c" works too
+zoom_factor = 4.0          # 1.1 to 50: the field of view is divided by this
+zoom_wheel = true
+hud = false                # frames per second, position and facing in a corner
+fullbright = false         # brighten dark places. Some servers do not allow this.
+fullbright_gamma = 15.0    # 1 to 100; the game's own brightness slider ends at 1

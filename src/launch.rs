@@ -34,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use crate::{
     BOOTSTRAP_CLASS, BOOTSTRAP_CLASS_NAME,
     auth::{self, store::TokenStore},
+    companion,
     config::{CgroupMode, Config, ConfineMode, NetworkMode, ServerRule, parse_server},
     confine::{self, Confinement},
     egress,
@@ -716,6 +717,12 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         jvm_extra.push(argument.replace("${path}", &dst));
     }
 
+    // The companion mod, for Fabric profiles of tested versions (see `companion`): its jar
+    // and settings as read-only files outside the signed mods directory, the one property
+    // that makes Fabric Loader pick the jar up, and a socket back to the launcher.
+    let companion = companion::plan(&cfg.companion, &inst, jvm.major, paths)?;
+    companion.attach(&mut mounts, &mut jvm_extra, &mut base.landlock.unix_sockets);
+
     // Natives: old versions ship them in jars the launcher must unpack (from the verified
     // descriptors, into a directory the game cannot write); new versions unpack their own
     // into a scratch directory.
@@ -971,6 +978,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             game_templates.iter().map(|t| render_redacted(t, &vars)).collect::<Vec<_>>().join(" ")
         ),
     );
+    log.line(Source::Launcher, &companion.describe());
 
     // Resource limits. Asked of the user manager now, so that "it cannot" is known before
     // the game starts rather than discovered as a sandbox that fails to come up.
@@ -1139,6 +1147,12 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     if let (Some(context), Some(_)) = (&wayland_context, payload) {
         context.unlink();
     }
+    // The companion channel's socket likewise — and now, while this process can still
+    // remove a name in the runtime directory (step 9 takes that away). Reading from the
+    // socket starts in step 10.
+    if payload.is_some() {
+        companion.release_name();
+    }
 
     // 9. Not assumed: looked at. First the resource limits, read back from the kernel for the
     // program in the sandbox (and for its display server); a scope that was created is not
@@ -1299,6 +1313,15 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     };
     let out = tokio::spawn(relay_output(running.child.stdout.take().expect("piped"), Source::Game, log.clone()));
     let err = tokio::spawn(relay_output(running.child.stderr.take().expect("piped"), Source::Game, log.clone()));
+    // The companion's channel (its socket's name on the host went in step 8). What arrives
+    // on it was written by something inside the game and is logged as such.
+    let companion_channel = companion.serve({
+        let sink = log.clone();
+        Arc::new(move |voice, line: String| match voice {
+            companion::channel::Voice::Launcher => sink.line(Source::Launcher, &line),
+            companion::channel::Voice::Claimed => sink.line(Source::Game, &line),
+        })
+    });
 
     let mut interrupted = false;
     let status = tokio::select! {
@@ -1372,6 +1395,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 ),
             );
         }
+    }
+
+    if let Some(channel) = companion_channel {
+        log.line(Source::Launcher, &channel.finish());
     }
 
     // 11. Settings the launcher carries back on the game's behalf, into the one directory of

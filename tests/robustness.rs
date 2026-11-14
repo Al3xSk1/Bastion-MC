@@ -379,6 +379,18 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
                 ]),
             ]
         }
+        "companion" => vec![
+            text("hello 1 0.1.0 zoom,hud,fullbright\n"),
+            text("hello 1 0.1.0 -\ndiag zoom disabled: lookup failed (NoSuchMethodException: Camera.calculateFov)\n"),
+            text("diag hud disabled: the HUD hook failed (ClassCastException)\r\ndiag fullbright off\n\n"),
+            {
+                // A line far beyond the limit, then an ordinary one.
+                let mut v = vec![b'A'; 3000];
+                v.extend_from_slice(b"\nhello 1 0.1.0 zoom\n");
+                v
+            },
+            text("diag zoom \u{1b}[2J\u{1b}]0;title\u{7}\u{202e}text\n").repeat(40),
+        ],
         other => panic!("no seeds for {other}"),
     }
 }
@@ -423,7 +435,7 @@ fn run(name: &str) {
 
 #[test]
 fn every_harness_has_a_test_here() {
-    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp"];
+    let tested = ["persist", "sni", "dns", "broker", "xauthority", "wayland", "profile", "zipdir", "udp", "companion"];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
     let mut expected = tested.to_vec();
@@ -476,6 +488,11 @@ fn datagram_relay_decisions() {
     run("udp");
 }
 
+#[test]
+fn companion_channel_reader() {
+    run("companion");
+}
+
 /// Mutation only explores a parser if it starts from inputs the parser accepts.
 #[test]
 fn the_starting_points_are_accepted_by_their_parsers() {
@@ -517,4 +534,14 @@ fn the_starting_points_are_accepted_by_their_parsers() {
     // every ending are among the starting points.
     let outcomes: Vec<(u64, u64)> = seeds("udp").iter().map(|s| bastion_mc::egress::udp::fuzz_table(s)).collect();
     assert_eq!(outcomes, [(3, 0), (6, 4), (3, 6), (4, 1)]);
+    use bastion_mc::companion::channel::{self, Message};
+    for seed in &seeds("companion")[..3] {
+        for line in seed.split(|b| *b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)).filter(|l| !l.is_empty()) {
+            assert!(channel::parse_line(line).is_some(), "{:?}", String::from_utf8_lossy(line));
+        }
+    }
+    assert!(matches!(
+        channel::parse_line(b"hello 1 0.1.0 zoom,hud,fullbright"),
+        Some(Message::Hello { protocol: 1, ref features, .. }) if features.len() == 3
+    ));
 }
