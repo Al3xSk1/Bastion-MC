@@ -4,6 +4,28 @@ How the Minecraft access token gets from the launcher into the game without ever
 in `/proc/<pid>/cmdline`, the environment, a file, or any other place another process can
 look — and exactly where that guarantee ends.
 
+## What travels on this path today
+
+The mechanism below was built to carry the access token, and still does when the token has
+to be in the game. By default it no longer has to be: in `filtered` network mode the
+**credential broker** is on, the launcher keeps the real token, and what is written into
+the launch frame as `--accessToken` is a **placeholder** — `bastion-placeholder-` and 32
+random hexadecimal digits, new at every launch, worth nothing anywhere else. The launcher
+terminates the game's HTTPS to Mojang's API (a per-session certificate authority that
+exists only in the sandbox's trust store) and puts the real token on the requests that are
+switched on; see `THREAT_MODEL.md`, row J13.
+
+| Launch | What the frame carries as the access token | Where the real token is |
+|---|---|---|
+| `filtered` network, broker on (default) | the placeholder | in the launcher, in secret memory, for the length of the session; never in the sandbox |
+| `--demo` | the constant `0` | there is none |
+| `--burner`, `network.mode = "none"` | the constant `0` or the placeholder | not minted (burner), or in no process once the frame is written |
+| `open` network, or `network.broker.enabled = false` | **the real token** | in the JVM; the launcher forgets it as described below. The launch log and the front end say so. |
+
+Everything that follows — no command line, no environment, a socketpair on fd 0 — applies
+to all four rows: a placeholder that leaked would still be an unnecessary gift, and the
+last row is why the path exists.
+
 ## The problem
 
 The vanilla client takes its session as program arguments:
@@ -86,14 +108,16 @@ disappears with its last descriptor.
 
 | Concern | Measure |
 |---|---|
-| Swap | every token lives in its own `mlock`ed mapping; allocation fails rather than fall back to pageable memory |
+| Swap | every token lives in its own locked mapping — `memfd_secret` pages where the kernel offers them, an `mlock`ed anonymous mapping otherwise; allocation fails rather than fall back to pageable memory |
+| Reads through the kernel (`/proc/<pid>/mem`, `process_vm_readv`, ptrace, `/proc/kcore`) | with `memfd_secret` the pages are not in the kernel's direct map: such reads fail even for a process that is allowed to attach. Not a defence against code in the kernel, or against cold-boot and DMA attacks |
 | Core dumps | `PR_SET_DUMPABLE=0`, `MADV_DONTDUMP`, `RLIMIT_CORE=1` (not 0: with a piped `core_pattern` the kernel ignores 0) |
-| fork/exec window | `MADV_WIPEONFORK`: a forked child sees zero pages |
+| fork/exec window | `MADV_WIPEONFORK` (a forked child sees zero pages) or, for `memfd_secret`, `MADV_DONTFORK` (the child does not have the mapping at all) |
 | Copies in buffers we do not own (rustls records, hyper buffers, serde scratch, `Vec` growth) | a global allocator that `explicit_bzero`s **every** block on free and implements `realloc` as alloc-copy-wipe-free |
 | JSON parsing | token fields deserialise straight into locked memory (`impl Deserialize for Secret`); request bodies carrying tokens are built as bytes, never formatted into a `String` |
 | Debug output | `Secret`'s `Debug` prints a length only; `Authorization` headers are marked sensitive |
 | Peeking at the launcher | non-dumpable + Yama: `/proc/<pid>/mem`, `process_vm_readv` and ptrace are refused for other same-UID processes, including the parent shell |
-| Lifetime | Microsoft token → dropped after the Xbox call; Xbox token → after XSTS; XSTS → after Minecraft login; Minecraft token → after the frame is written |
+| Lifetime | Microsoft token → dropped after the Xbox call; Xbox token → after XSTS; XSTS → after Minecraft login; Minecraft token → with the broker: held until the game exits, then wiped; without: wiped once the frame is written |
+| While the game runs | the launcher confines itself (Landlock on all threads): no program execution, no file access outside the instance and the cache, TCP only to the ports it relays to |
 
 ## What other processes see
 
@@ -130,9 +154,13 @@ Stating these plainly is part of the design:
   `kernel.yama.ptrace_scope=1` and even if the JVM were non-dumpable, because the JVM lives
   in a user namespace your UID owns. This was reproduced (`process_vm_readv` succeeded).
   Only `ptrace_scope=3` or a dedicated UNIX account prevents it.
-* The structural fix for all three is a **credential-injecting broker**: the game gets a
-  placeholder, and the launcher's relay swaps in the real token on the few Mojang API calls
-  that need it. That is described in `THREAT_MODEL.md` §8 and is not implemented.
+* The structural fix for all three is the **credential broker**: the game gets a
+  placeholder, and the launcher swaps in the real token on the few Mojang API calls that
+  need it. It is built and on by default in `filtered` mode (the table at the top). The
+  three points above describe a launch *without* it. With it, what remains is that code in
+  the game can make the requests the broker is willing to authenticate — one server join
+  per open game connection, and reads of the account's privileges and block list — but
+  cannot take the credential out of the sandbox, because it was never in it.
 
 ## Checking it yourself
 
