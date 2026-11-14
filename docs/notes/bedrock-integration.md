@@ -251,8 +251,9 @@ an Arch container.
 covers `/usr/bin/{bwrap,ffmpeg,xdg-dbus-proxy,firefox,systemd-run}` and `/usr/lib/firefox/firefox`
 with an empty file in a mount namespace of their own (made by bubblewrap before it is itself
 covered), unsets `XDG_RUNTIME_DIR`, the display and the bus, and gives a fresh `HOME`
-(`target/int-logs/ci-tests-hidden.sh`). Result: `--lib` 590 passed, 20 failed, 1 ignored; proto 13,
-GUI 137, `--test site` 5 passed. **Every one of the 20 failures is an artefact of the method**, not
+(`target/int-logs/ci-tests-hidden.sh`). Result (phase 1): `--lib` 590 passed, 20 failed, 1 ignored;
+proto 13, GUI 137, `--test site` 5 passed; on the final tree: `--lib` 597 passed, the same 20 failed,
+1 ignored; proto 13, GUI 138, site 5. **Every one of the 20 failures is an artefact of the method**, not
 of a missing program: in an unprivileged user namespace root is not mapped, so root-owned files read
 as uid 65534 and every test that checks root ownership fails ("must be owned by root … uid 65534":
 the CA bundle for 17 of them, `/` for the store package's two production-policy tests, the JDK for
@@ -515,6 +516,22 @@ Phase 1 (before the scheme handler), on the tree of the phase-1 commit:
 `optin-r5.sh` leaves out `optin-r4.sh`'s first step (the whole workspace with
 `BASTION_NET_TESTS=1`), which reaches Mojang's and Microsoft's live services.
 
+**The final tree** (after phase 2; code as of `7d0cfde`, documents as of the last commit):
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check`, and of `fuzz/` | clean |
+| `cargo clippy --workspace --all-targets` | no warnings |
+| `cargo test --workspace --no-fail-fast` (fresh XDG roots, no display, no session bus) | 44 result lines, **986 passed, 0 failed, 2 ignored** (the two ignored: the terminal reader's pty probe, and the usage snippet in `realms/answers.rs`'s documentation, an `ignore` doc-test) — the library's unit tests 617 (1 ignored), the GUI 131 + 5 (emulated) + 2 (live, without its variables), the protocol 13 |
+| the Bedrock suites (in that run) | `bedrock_launch` 1 (three sessions: the sign-in pasted in session 1, handed back by the real `bastion-mc bedrock hand-back` in session 3 with the launcher confined), `bedrock_sandbox` 3, `signin_stub` 4, `bedrock_store` 3, `bedrock_net` 7, `bedrock_cli` 4, `robustness` 40, `scram` 15, `events` 6 — all passed |
+| opt-in suites again (`optin-r5.sh` on the final binary, `:77`) | `nested` 4, `wayland` 2, `nested_game` 1, `companion_game` ×3 1 each, `browser_game` 1, `clips_game` 2 — all passed; the three demo launches reached the texture atlases with the launcher confined on all threads (12, 12 and 14 atlas lines), stopped with SIGINT (exit 130) |
+| the CI simulation (`target/int-logs/ci-sim-r5.sh`: `ci-sim.sh` with the CI's `--test site` step added and `cargo deny --offline`; a clean target directory, a fresh `HOME`, no XDG variables, no runtime directory, display or session bus) | every step exit 0: fmt, fmt of `fuzz/`, `clippy -D warnings`, the test build, `--lib` **617 passed, 0 failed**, proto 13, GUI 138, `--test site` 5, `cargo check` of `fuzz/`, deny |
+| the CI's test steps with bubblewrap, ffmpeg, xdg-dbus-proxy, Firefox and `systemd-run` hidden (`ci-tests-hidden.sh`) | `--lib` 597 passed, 20 failed, 1 ignored — the same 20 root-ownership artefacts as in phase 1 (decision 9), none for a missing program; proto 13, GUI 138, site 5 |
+| `cargo deny --offline --locked check` | advisories ok, bans ok, licenses ok, sources ok; no dependency was added in round 5 (`Cargo.toml` and `Cargo.lock` unchanged since `c25c3c4`) |
+| `python3 -I site/build.py --check` | passed: 12 pages, 916 internal links, 81 outbound links, two runs byte-identical |
+| `target/int-logs/makepkg.sh` (the real PKGBUILD on a `git archive` of HEAD, `makepkg -f -d`) | exit 0; three packages built; `check()`: `--lib` 617 passed (1 ignored), proto 13, GUI 131, the hardening check of both binaries all "ok" (PIE, RELRO, immediate binding, NX stack, no W+X segment, no RPATH, no text relocations); the `bastion-mc` package holds `usr/share/applications/bastion-mc-bedrock-signin.desktop` and `usr/share/doc/bastion-mc/docs/BEDROCK.md`, and names desktop-file-utils among its optional dependencies (the only warning: makepkg's "Skipping dependency checks", from `-d`) |
+| the handler's desktop entry (E37) | `desktop-file-validate`: valid; `update-desktop-database`, `xdg-mime`, `gio mime` and `gio open` in isolated directories, section 3 |
+
 ## 7. Not verified
 
 * **Anything with the real client, the game, a Google Play purchase or a Microsoft account** —
@@ -534,7 +551,10 @@ Phase 1 (before the scheme handler), on the tree of the phase-1 commit:
 * **Resource limits** for a Bedrock session (the tests use `cgroup = "off"`), and the default memory
   ceiling against the real game.
 * **Chromium-based browsers**: where they show the final address.
-* **The CI on GitHub** with this tree (simulated locally, section 6).
+* **The CI on GitHub** with this tree (simulated locally, section 6), and its manual integration
+  workflow.
+* **The packages installed** (`makepkg` built them; nothing was installed with pacman, so the
+  pacman hook was read, not run on this package).
 * The libFuzzer targets were compiled (`cargo check` of `fuzz/`), not run (no nightly toolchain).
 
 ## 8. Open
