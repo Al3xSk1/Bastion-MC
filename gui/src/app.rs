@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bastion_mc_proto::{Account, Event, Instance, PROTOCOL, Phase, Source, Unit, Version};
+use bastion_mc_proto::{Account, Event, Instance, PROTOCOL, Phase, Protection, Source, Unit, Version, runbook};
 use iced::{
     Subscription, Task,
     futures::{StreamExt, stream},
@@ -148,6 +148,17 @@ pub struct NewInstance {
     pub snapshots: bool,
 }
 
+/// The emergency panel.
+#[derive(Debug, Default)]
+pub struct Emergency {
+    pub open: bool,
+    /// "Scram" was pressed once and waits for the confirmation.
+    pub confirming: bool,
+    pub running: bool,
+    /// What the last scram reported.
+    pub report: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Something from the backend worker, tagged with the job it belongs to.
@@ -157,6 +168,12 @@ pub enum Message {
         device_code: bool,
     },
     SignOut,
+    /// Switch to another local account (an existing label, or a new one to sign in to).
+    AccountSelected(String),
+    NewAccountName(String),
+    AddAccount,
+    /// Make the current account the launcher's default.
+    MakeDefaultAccount,
     /// Stop the game, or abandon a sign-in.
     Stop,
     InstanceSelected(InstanceChoice),
@@ -168,6 +185,15 @@ pub enum Message {
     Copy(String),
     OpenLink(String),
     LinkOpened(Result<(), String>),
+    /// Show or hide the emergency panel (runbook, scram).
+    ToggleEmergency,
+    /// Open one of the runbook's links (only those; see `runbook::LINKS`).
+    OpenRunbookLink(String),
+    /// First press of "Scram": ask. Second (`ConfirmScram`): do it.
+    AskScram,
+    CancelScram,
+    ConfirmScram,
+    ScramFinished(Result<Vec<String>, String>),
     DismissNotice,
     ToggleNewInstance,
     NewInstanceId(String),
@@ -184,6 +210,12 @@ pub struct App {
     pub account_name: String,
     /// `None` until the launcher has reported once.
     pub account: Option<Account>,
+    /// Every local account label the launcher knows, plus the current one.
+    pub accounts: Vec<String>,
+    /// The launcher's default account, once it has said.
+    pub default_account: Option<String>,
+    /// Text of the "new account" field.
+    pub new_account: String,
     pub login: Option<LoginPrompt>,
     pub instances: Vec<InstanceChoice>,
     pub selected: Option<InstanceChoice>,
@@ -198,6 +230,9 @@ pub struct App {
     pub notice: Option<Notice>,
     pub console: Console,
     pub new_instance: NewInstance,
+    /// What the launch in progress (or the last one) runs with.
+    pub protection: Vec<Protection>,
+    pub emergency: Emergency,
     pub now: Instant,
     /// The window was asked to close while a game was running: stop it, then exit.
     closing: bool,
@@ -256,6 +291,9 @@ impl App {
             launcher,
             account_name,
             account: None,
+            accounts: Vec::new(),
+            default_account: None,
+            new_account: String::new(),
             login: None,
             instances: Vec::new(),
             selected: None,
@@ -268,6 +306,8 @@ impl App {
             notice: None,
             console: Console::default(),
             new_instance: NewInstance::default(),
+            protection: Vec::new(),
+            emergency: Emergency::default(),
             now: Instant::now(),
             closing: false,
             select_when_listed: None,
@@ -284,6 +324,31 @@ impl App {
 
     fn status_request(&self) -> Request {
         Request::Status { account: self.account_name.clone() }
+    }
+
+    pub fn can_add_account(&self) -> bool {
+        !self.busy() && is_valid_id(&self.new_account) && self.new_account != self.account_name
+    }
+
+    /// Show another account. Nothing is signed in or out by this; each label has its own
+    /// stored token, and the launcher is asked afresh about the one now shown.
+    fn switch_account(&mut self, name: String) -> Task<Message> {
+        if self.busy() || !is_valid_id(&name) || name == self.account_name {
+            return Task::none();
+        }
+        self.account_name = name;
+        self.account = None;
+        self.login = None;
+        self.notice = None;
+        self.remember_current_account();
+        self.start(JobKind::Refresh, self.status_request())
+    }
+
+    fn remember_current_account(&mut self) {
+        if !self.account_name.is_empty() && !self.accounts.contains(&self.account_name) {
+            self.accounts.push(self.account_name.clone());
+            self.accounts.sort();
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -385,6 +450,20 @@ impl App {
                 let request = Request::SignOut { account: self.account_name.clone() };
                 return self.request(JobKind::SignOut, request);
             }
+            Message::AccountSelected(name) => return self.switch_account(name),
+            Message::NewAccountName(text) => self.new_account = text.to_ascii_lowercase(),
+            Message::AddAccount => {
+                if self.can_add_account() {
+                    let name = std::mem::take(&mut self.new_account);
+                    return self.switch_account(name);
+                }
+            }
+            Message::MakeDefaultAccount => {
+                if !self.account_name.is_empty() {
+                    let request = Request::DefaultAccount { account: self.account_name.clone() };
+                    return self.request(JobKind::Refresh, request);
+                }
+            }
             Message::Stop => self.stop_job(),
             Message::InstanceSelected(choice) => self.selected = Some(choice),
             Message::DemoToggled(on) => self.demo = on,
@@ -400,6 +479,7 @@ impl App {
                 };
                 self.notice = None;
                 self.progress = None;
+                self.protection.clear();
                 self.status.clear();
                 self.console.new_session();
                 self.launch_status = "Starting…".into();
@@ -418,6 +498,51 @@ impl App {
             Message::LinkOpened(result) => {
                 if let Err(why) = result {
                     self.notify(Severity::Warning, format!("Could not open a browser ({why}). Copy the link instead."));
+                }
+            }
+            Message::ToggleEmergency => {
+                self.emergency.open = !self.emergency.open;
+                self.emergency.confirming = false;
+            }
+            Message::OpenRunbookLink(url) => {
+                if runbook::is_runbook_link(&url) {
+                    return Task::perform(open_link(url), Message::LinkOpened);
+                }
+                self.notify(Severity::Warning, "That address is not one of the runbook's links; it was not opened.");
+            }
+            Message::AskScram => self.emergency.confirming = !self.emergency.running,
+            Message::CancelScram => self.emergency.confirming = false,
+            Message::ConfirmScram => {
+                // Only as the answer to the question, and only once at a time.
+                if self.emergency.confirming && !self.emergency.running {
+                    self.emergency.confirming = false;
+                    self.emergency.running = true;
+                    self.emergency.report.clear();
+                    return Task::perform(backend::scram(self.launcher.clone()), Message::ScramFinished);
+                }
+            }
+            Message::ScramFinished(result) => {
+                self.emergency.running = false;
+                match result {
+                    Ok(lines) => {
+                        for line in &lines {
+                            self.console.push(Source::Launcher, line.clone());
+                        }
+                        self.emergency.report = lines;
+                        self.account = None;
+                        self.login = None;
+                        self.notify(
+                            Severity::Warning,
+                            "Scram done: stored sign-ins on this machine are removed. Nothing is revoked at Microsoft \
+                             yet — follow the runbook, from another device if this one may be compromised.",
+                        );
+                        // Show the new state as soon as nothing else is running.
+                        if !self.busy() {
+                            return self.start(JobKind::Refresh, self.status_request());
+                        }
+                    }
+                    Err(why) => self
+                        .notify(Severity::Error, format!("Scram failed: {why}. Run `bastion-mc scram` in a terminal.")),
                 }
             }
             Message::DismissNotice => self.notice = None,
@@ -538,10 +663,22 @@ impl App {
                     Some(LoginPrompt::Browser { url, expires_at: self.now + Duration::from_secs(timeout_secs) });
             }
             Event::Account(account) => {
+                if self.account_name.is_empty() && is_valid_id(&account.account) {
+                    // Started without a label: this is the launcher's default account.
+                    self.account_name = account.account.clone();
+                }
                 if account.account == self.account_name {
                     self.account = Some(account);
                 }
             }
+            Event::Accounts { default, accounts } => {
+                self.accounts = accounts.into_iter().map(|a| a.account).filter(|name| is_valid_id(name)).collect();
+                self.accounts.sort();
+                self.accounts.dedup();
+                self.default_account = Some(default).filter(|name| is_valid_id(name));
+                self.remember_current_account();
+            }
+            Event::Protection { items } => self.protection = items,
             Event::Instances { instances } => self.set_instances(instances),
             Event::Versions { versions, .. } => {
                 self.new_instance.versions = versions.into_iter().map(VersionChoice).collect();
@@ -1006,5 +1143,181 @@ mod tests {
         let p = Progress { label: "assets".into(), done: 9, total: 4, unit: Unit::Files };
         assert_eq!(p.fraction(), 1.0);
         assert_eq!(p.caption(), "Downloading assets: 9 of 4 files (100%)");
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::{testing::*, *};
+
+    fn named(name: &str, signed_in: bool) -> Account {
+        Account { account: name.into(), ..account(signed_in) }
+    }
+
+    #[test]
+    fn without_a_label_the_launchers_default_account_is_adopted() {
+        let (mut app, _task) = App::boot(PathBuf::from("/nonexistent/bastion-mc"), String::new());
+        feed(
+            &mut app,
+            events([
+                Event::Account(named("work", true)),
+                Event::Accounts { default: "work".into(), accounts: vec![named("alt", false), named("work", true)] },
+            ]),
+        );
+        finish(&mut app, 0);
+        assert_eq!(app.account_name, "work");
+        assert!(app.signed_in());
+        assert_eq!(app.accounts, ["alt", "work"]);
+        assert_eq!(app.default_account.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn switching_asks_the_launcher_about_the_other_account_and_shows_nothing_stale() {
+        let mut app = ready(true);
+        feed_idle_accounts(&mut app);
+        let _ = app.update(Message::AccountSelected("alt".into()));
+        assert_eq!(app.account_name, "alt");
+        assert!(app.account.is_none() && !app.signed_in(), "the previous account's state is not shown for this one");
+        assert_eq!(app.job_kind(), Some(JobKind::Refresh));
+        // An answer about the old account is not taken for the new one.
+        feed(&mut app, events([Event::Account(named("default", true))]));
+        assert!(app.account.is_none());
+        feed(&mut app, events([Event::Account(named("alt", false))]));
+        finish(&mut app, 0);
+        assert!(!app.signed_in());
+        assert_eq!(
+            app.play_blocker(),
+            Some("Sign in, or tick demo mode."),
+            "the other account's sign-in does not count"
+        );
+    }
+
+    fn feed_idle_accounts(app: &mut App) {
+        let _ = app.update(Message::Refresh);
+        feed(
+            app,
+            events([Event::Accounts {
+                default: "default".into(),
+                accounts: vec![named("alt", false), named("default", true)],
+            }]),
+        );
+        finish(app, 0);
+    }
+
+    #[test]
+    fn a_new_account_needs_a_valid_label_and_an_idle_launcher() {
+        let mut app = ready(false);
+        for bad in ["", "..", "a/b", "default"] {
+            let _ = app.update(Message::NewAccountName(bad.into()));
+            assert!(!app.can_add_account(), "{bad:?}");
+            let _ = app.update(Message::AddAccount);
+            assert_eq!(app.account_name, "default");
+        }
+        let _ = app.update(Message::NewAccountName("Alt".into()));
+        assert_eq!(app.new_account, "alt", "labels are lower case");
+        let _ = app.update(Message::AddAccount);
+        assert_eq!(app.account_name, "alt");
+        assert!(app.accounts.contains(&"alt".to_string()));
+        assert!(app.new_account.is_empty());
+        // Busy now (refreshing): no further switch.
+        let _ = app.update(Message::AccountSelected("default".into()));
+        assert_eq!(app.account_name, "alt");
+    }
+
+    #[test]
+    fn account_labels_from_the_launcher_are_checked_before_they_are_shown() {
+        let mut app = ready(true);
+        let _ = app.update(Message::Refresh);
+        feed(
+            &mut app,
+            events([Event::Accounts {
+                default: "../x".into(),
+                accounts: vec![named("ok", false), named("\u{1b}[31mbad", false)],
+            }]),
+        );
+        assert_eq!(app.accounts, ["default", "ok"]);
+        assert_eq!(app.default_account, None);
+    }
+}
+
+#[cfg(test)]
+mod emergency_tests {
+    use super::{testing::*, *};
+
+    #[test]
+    fn scram_needs_the_question_answered_and_runs_once() {
+        let mut app = ready(true);
+        // Without the question having been asked, a confirmation does nothing.
+        let _ = app.update(Message::ConfirmScram);
+        assert!(!app.emergency.running);
+        let _ = app.update(Message::AskScram);
+        assert!(app.emergency.confirming);
+        let _ = app.update(Message::CancelScram);
+        let _ = app.update(Message::ConfirmScram);
+        assert!(!app.emergency.running, "cancelled");
+        let _ = app.update(Message::AskScram);
+        let _ = app.update(Message::ConfirmScram);
+        assert!(app.emergency.running && !app.emergency.confirming);
+        // While it runs it cannot be asked for again.
+        let _ = app.update(Message::AskScram);
+        assert!(!app.emergency.confirming);
+
+        let lines = vec!["removed the refresh token of account default from the kernel keyring".to_string()];
+        let _ = app.update(Message::ScramFinished(Ok(lines.clone())));
+        assert!(!app.emergency.running);
+        assert_eq!(app.emergency.report, lines);
+        assert!(app.account.is_none() && !app.signed_in(), "the old sign-in state is not shown any more");
+        assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("Nothing is revoked at Microsoft")));
+        assert_eq!(app.job_kind(), Some(JobKind::Refresh), "the launcher is asked for the new state");
+    }
+
+    #[test]
+    fn scram_works_while_a_game_is_running_and_failures_are_said() {
+        let mut app = ready(true);
+        let _ = app.update(Message::Play);
+        assert_eq!(app.job_kind(), Some(JobKind::Launch));
+        let _ = app.update(Message::AskScram);
+        let _ = app.update(Message::ConfirmScram);
+        assert!(app.emergency.running, "a running game does not block it");
+        let _ = app.update(Message::ScramFinished(Err("no such file".into())));
+        assert!(app.notice.as_ref().is_some_and(|n| n.severity == Severity::Error && n.text.contains("no such file")));
+        assert_eq!(app.job_kind(), Some(JobKind::Launch), "the game's job is left to end by itself");
+    }
+
+    #[test]
+    fn only_runbook_links_are_opened_from_the_emergency_panel() {
+        let mut app = ready(true);
+        for bad in ["https://account.live.com/", "https://evil.example/", "file:///etc/passwd", ""] {
+            app.notice = None;
+            let _ = app.update(Message::OpenRunbookLink(bad.into()));
+            assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("not one of the runbook's links")), "{bad:?}");
+        }
+        // A sign-in link is not a runbook link and the other way round: two separate lists.
+        assert!(!runbook::is_runbook_link("https://login.microsoftonline.com/x"));
+        assert!(!is_sign_in_link("https://help.minecraft.net/hc/en-us/requests/new"));
+    }
+
+    #[test]
+    fn a_new_launch_starts_without_the_previous_launchs_protections() {
+        let mut app = ready(true);
+        let _ = app.update(Message::Play);
+        feed(
+            &mut app,
+            events([Event::Protection {
+                items: vec![Protection {
+                    aspect: "network".into(),
+                    shield: bastion_mc_proto::Shield::On,
+                    detail: "filtered".into(),
+                }],
+            }]),
+        );
+        assert_eq!(app.protection.len(), 1);
+        finish(&mut app, 0);
+        assert_eq!(app.protection.len(), 1, "still shown after the game ended");
+        if app.busy() {
+            finish(&mut app, 0); // the status refresh that follows a launch
+        }
+        let _ = app.update(Message::Play);
+        assert!(app.protection.is_empty());
     }
 }

@@ -9,6 +9,8 @@
 //! Compatibility: events carry a `"event"` tag. A front end must ignore tags it does not
 //! know ([`Event::Unknown`]) and should check [`Event::Hello`] before trusting the rest.
 
+pub mod runbook;
+
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever an existing event changes meaning. New events do not need a bump.
@@ -60,6 +62,11 @@ pub enum Event {
     },
     /// Sign-in state of one account. Never contains a credential.
     Account(Account),
+    /// Every local account, and which one is used when none is named.
+    Accounts {
+        default: String,
+        accounts: Vec<Account>,
+    },
     Instances {
         instances: Vec<Instance>,
     },
@@ -67,6 +74,10 @@ pub enum Event {
         latest_release: String,
         latest_snapshot: String,
         versions: Vec<Version>,
+    },
+    /// Which protections this launch runs with. Sent once, just before the game starts.
+    Protection {
+        items: Vec<Protection>,
     },
     /// One sanitised line of output (printable characters only, bounded length).
     Log {
@@ -144,6 +155,27 @@ pub struct Account {
     pub device_flow: bool,
 }
 
+/// How well one aspect of a launch is protected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shield {
+    /// The protection is in force.
+    On,
+    /// Weaker than it could be on this machine or with this configuration.
+    Partial,
+    /// Not protected: the user accepted a risk, or the machine cannot do it.
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Protection {
+    /// `display`, `network`, `credential`, `limits` or `launcher`.
+    pub aspect: String,
+    pub shield: Shield,
+    /// A few words: what is in force.
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     pub id: String,
@@ -206,10 +238,21 @@ mod tests {
             },
             Event::BrowserLogin { url: "https://login.microsoftonline.com/x?a=b&c=d".into(), timeout_secs: 300 },
             Event::Account(Account { account: "default".into(), signed_in: true, ..Default::default() }),
+            Event::Accounts {
+                default: "work".into(),
+                accounts: vec![Account { account: "work".into(), ..Default::default() }],
+            },
             Event::Instances {
                 instances: vec![Instance { id: "a".into(), kind: "vanilla".into(), ..Default::default() }],
             },
             Event::Versions { latest_release: "26.3".into(), latest_snapshot: "26.4-s1".into(), versions: vec![] },
+            Event::Protection {
+                items: vec![Protection {
+                    aspect: "display".into(),
+                    shield: Shield::Partial,
+                    detail: "session socket".into(),
+                }],
+            },
             Event::Log { source: Source::Game, line: "[12:00:00] [Render thread/INFO]: hi \u{1F600}".into() },
             Event::Exited { code: 130 },
             Event::Error { message: "nope".into(), code: 4 },

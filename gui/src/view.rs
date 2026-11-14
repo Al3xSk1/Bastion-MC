@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use bastion_mc_proto::{Phase, Source};
+use bastion_mc_proto::{Phase, Shield, Source, runbook};
 use iced::{
     Center, Element, Fill, Font, Length, Theme,
     widget::{
@@ -39,18 +39,102 @@ pub fn root(app: &App) -> Element<'_, Message> {
 }
 
 fn sections(app: &App) -> Element<'_, Message> {
-    let mut all = column![header()].spacing(GAP);
+    let mut all = column![header(app)].spacing(GAP);
     if let Some(notice) = &app.notice {
         all = all.push(notice_banner(notice));
+    }
+    if app.emergency.open {
+        all = all.push(emergency(app));
     }
     all.push(account(app)).push(instances(app)).push(launch(app)).into()
 }
 
-fn header<'a>() -> Element<'a, Message> {
-    row![text("bastion-mc").size(24), text("sandboxed Minecraft launcher").size(13).style(theme::muted),]
-        .spacing(10)
-        .align_y(iced::Bottom)
+fn header(app: &App) -> Element<'_, Message> {
+    row![
+        text("bastion-mc").size(24),
+        text("sandboxed Minecraft launcher").size(13).style(theme::muted),
+        space().width(Fill),
+        button(text(if app.emergency.open { "Close emergency help" } else { "Emergency…" }).size(13))
+            .style(button::text)
+            .on_press(Message::ToggleEmergency),
+    ]
+    .spacing(10)
+    .align_y(iced::Bottom)
+    .into()
+}
+
+// ------------------------------------------------------------------ emergency
+
+/// The runbook, its links (the compiled-in list, nothing else), and the scram button.
+fn emergency(app: &App) -> Element<'_, Message> {
+    let state = &app.emergency;
+    let scram: Element<'_, Message> = if state.running {
+        text("Removing stored sign-ins…").style(text::warning).into()
+    } else if state.confirming {
+        row![
+            text("Stop every running game and remove all stored sign-ins on this machine?").width(Fill),
+            button("Yes, scram").style(button::danger).on_press(Message::ConfirmScram),
+            button("Cancel").style(button::secondary).on_press(Message::CancelScram),
+        ]
+        .spacing(8)
+        .align_y(Center)
         .into()
+    } else {
+        row![
+            column![
+                text("Scram: remove everything this launcher stores about your sign-ins"),
+                small("Stops running games, deletes refresh tokens and vault files. Revokes nothing at Microsoft."),
+            ]
+            .spacing(3)
+            .width(Fill),
+            button("Scram…").style(button::danger).on_press(Message::AskScram),
+        ]
+        .spacing(8)
+        .align_y(Center)
+        .into()
+    };
+    let mut content = column![
+        text(
+            "If this computer itself may be compromised, do the account steps from another device — \
+             a compromised machine can show you fake pages."
+        )
+        .style(text::warning),
+        scram,
+    ]
+    .spacing(10);
+    if !state.report.is_empty() {
+        let mut report = column![].spacing(2);
+        for line in &state.report {
+            report = report.push(text(line.as_str()).font(Font::MONOSPACE).size(12));
+        }
+        content = content.push(container(report).padding(8).width(Fill).style(theme::well));
+    }
+    let mut links =
+        column![small("The only pages this window will open (taken from Microsoft's own help articles):")].spacing(4);
+    for (link, what) in runbook::LINKS {
+        links = links.push(
+            row![
+                column![text(*what).size(13), small(*link)].spacing(1).width(Fill),
+                button(text("Open").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::OpenRunbookLink((*link).to_string())),
+                button(text("Copy").size(13)).style(button::text).on_press(Message::Copy((*link).to_string())),
+            ]
+            .spacing(8)
+            .align_y(Center),
+        );
+    }
+    content = content.push(links);
+    content = content.push(
+        container(
+            scrollable(text(runbook::SCRAM).font(Font::MONOSPACE).size(12).wrapping(text::Wrapping::WordOrGlyph))
+                .height(Length::Fixed(260.0)),
+        )
+        .padding(8)
+        .width(Fill)
+        .style(theme::well),
+    );
+    card("EMERGENCY — ACCOUNT COMPROMISED?", content)
 }
 
 fn card<'a>(title: &'a str, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -143,10 +227,49 @@ fn account(app: &App) -> Element<'_, Message> {
     }
 
     let mut content = column![row![summary, space().width(Fill), actions].spacing(10).align_y(Center)].spacing(GAP);
+    content = content.push(account_picker(app));
     if let Some(prompt) = &app.login {
         content = content.push(login_prompt(prompt, app.now));
     }
     card("ACCOUNT", content)
+}
+
+/// Which local account is shown, and a field to start another one. Accounts are labels:
+/// each has its own stored token, and switching signs nobody in or out.
+fn account_picker(app: &App) -> Element<'_, Message> {
+    let idle = !app.busy();
+    let current = (!app.account_name.is_empty()).then_some(&app.account_name);
+    let chooser: Element<'_, Message> = if idle {
+        pick_list(app.accounts.as_slice(), current, Message::AccountSelected)
+            .placeholder("Account")
+            .width(Length::Fixed(180.0))
+            .into()
+    } else {
+        container(text(app.account_name.as_str())).padding([6, 10]).width(Length::Fixed(180.0)).into()
+    };
+    let is_default = app.default_account.as_deref() == Some(app.account_name.as_str());
+    let default: Element<'_, Message> = if is_default {
+        small("default account").into()
+    } else {
+        button(text("Make default").size(13))
+            .style(button::text)
+            .on_press_maybe((idle && current.is_some()).then_some(Message::MakeDefaultAccount))
+            .into()
+    };
+    let can_add = app.can_add_account();
+    row![
+        chooser,
+        default,
+        space().width(Fill),
+        text_input("another account, e.g. alt", &app.new_account)
+            .on_input(Message::NewAccountName)
+            .on_submit_maybe(can_add.then_some(Message::AddAccount))
+            .width(Length::Fixed(210.0)),
+        button("Add").style(button::secondary).on_press_maybe(can_add.then_some(Message::AddAccount)),
+    ]
+    .spacing(8)
+    .align_y(Center)
+    .into()
 }
 
 fn countdown(prompt: &LoginPrompt, now: Instant) -> String {
@@ -327,10 +450,35 @@ fn launch(app: &App) -> Element<'_, Message> {
     if let Some(line) = footnote {
         content = content.push(small(line));
     }
+    if !app.protection.is_empty() {
+        content = content.push(protection(app));
+    }
     card("PLAY", content)
 }
 
 // ------------------------------------------------------------------ console
+
+/// What the launch runs with, one line per aspect: green when the protection is in force,
+/// amber when it is weaker than it could be, red when it is off.
+fn protection(app: &App) -> Element<'_, Message> {
+    let mut lines = column![].spacing(2);
+    for item in &app.protection {
+        let (mark, style): (&str, fn(&Theme) -> text::Style) = match item.shield {
+            Shield::On => ("protected", text::success),
+            Shield::Partial => ("reduced", text::warning),
+            Shield::Off => ("NOT protected", text::danger),
+        };
+        lines = lines.push(
+            row![
+                text(item.aspect.as_str()).size(12).style(theme::label).width(Length::Fixed(80.0)),
+                text(mark).size(12).style(style).width(Length::Fixed(100.0)),
+                text(item.detail.as_str()).size(12).style(theme::muted),
+            ]
+            .spacing(8),
+        );
+    }
+    lines.into()
+}
 
 fn console_line(line: &Line) -> Element<'_, Message> {
     // Colour says who is talking (launcher, relay, game) and how loudly.
@@ -398,7 +546,7 @@ mod tests {
     //! clicks them and renders them in software.
     use std::path::PathBuf;
 
-    use bastion_mc_proto::{Event, Unit};
+    use bastion_mc_proto::{Event, Protection, Unit};
     use iced::Size;
     use iced_test::{Simulator, simulator};
 
@@ -423,6 +571,46 @@ mod tests {
     fn shows(app: &App, text: &str) -> bool {
         let _one = exclusive();
         simulator(root(app)).find(text).is_ok()
+    }
+
+    #[test]
+    fn the_emergency_panel_asks_before_scram_and_offers_only_the_runbook_links() {
+        let mut app = ready(true);
+        assert!(!shows(&app, "Scram…"), "closed until asked for");
+        assert!(matches!(clicked(&app, "Emergency…").as_slice(), [Message::ToggleEmergency]));
+        let _ = app.update(Message::ToggleEmergency);
+        assert!(shows(&app, "Minecraft Support: submit a request"));
+        assert!(shows(&app, "https://account.live.com/proofs/manage/additional"));
+        // One press only asks.
+        assert!(matches!(clicked(&app, "Scram…").as_slice(), [Message::AskScram]));
+        assert!(!shows(&app, "Yes, scram"));
+        let _ = app.update(Message::AskScram);
+        assert!(matches!(clicked(&app, "Yes, scram").as_slice(), [Message::ConfirmScram]));
+        assert!(matches!(clicked(&app, "Cancel").as_slice(), [Message::CancelScram]));
+        let _ = app.update(Message::CancelScram);
+        assert!(shows(&app, "Scram…") && !shows(&app, "Yes, scram"));
+    }
+
+    #[test]
+    fn protections_of_a_launch_are_listed_by_the_play_button() {
+        let mut app = ready(true);
+        assert!(!shows(&app, "NOT protected"));
+        launching(&mut app);
+        feed(
+            &mut app,
+            events([Event::Protection {
+                items: vec![
+                    Protection {
+                        aspect: "display".into(),
+                        shield: Shield::Off,
+                        detail: "the session's X11 display".into(),
+                    },
+                    Protection { aspect: "network".into(), shield: Shield::On, detail: "filtered".into() },
+                ],
+            }]),
+        );
+        assert!(shows(&app, "NOT protected") && shows(&app, "the session's X11 display"));
+        assert!(shows(&app, "protected") && shows(&app, "filtered"));
     }
 
     fn launching(app: &mut App) {
@@ -599,6 +787,29 @@ mod tests {
                 },
             ]),
         );
+        feed(
+            &mut running,
+            events([Event::Protection {
+                items: vec![
+                    Protection {
+                        aspect: "display".into(),
+                        shield: Shield::On,
+                        detail: "nested compositor: a display server of the game's own, clipboard cut".into(),
+                    },
+                    Protection {
+                        aspect: "network".into(),
+                        shield: Shield::On,
+                        detail: "filtered: only allowlisted hosts, through the launcher".into(),
+                    },
+                    Protection {
+                        aspect: "credential".into(),
+                        shield: Shield::Partial,
+                        detail: "the session token is inside the game process".into(),
+                    },
+                    Protection { aspect: "limits".into(), shield: Shield::Off, detail: "no resource limits".into() },
+                ],
+            }]),
+        );
         // What a current client really prints: one log4j XML document per message.
         for line in [
             r#"<log4j:Event logger="net.minecraft.client.Minecraft" timestamp="1" level="INFO" thread="Render thread">"#,
@@ -646,7 +857,12 @@ mod tests {
         );
         finish(&mut refused, 5);
 
+        let mut emergency = ready(true);
+        let _ = emergency.update(Message::ToggleEmergency);
+        let _ = emergency.update(Message::AskScram);
+
         for (name, app) in [
+            ("emergency", &emergency),
             ("idle", &idle),
             ("device-code", &signing_in),
             ("downloading", &downloading),

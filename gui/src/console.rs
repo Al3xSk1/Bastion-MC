@@ -218,6 +218,80 @@ mod tests {
         console.lines().map(|l| (l.level, l.text.clone())).collect()
     }
 
+    /// Generated game output: fragments of log4j events in every order, with broken tags,
+    /// odd characters and missing ends. The folder must take all of it (the game's output
+    /// is not trusted), stay within its window, never invent or lose a visible character
+    /// class, and be back in step as soon as a well-formed event follows.
+    #[test]
+    fn folding_survives_arbitrary_game_output() {
+        const PIECES: [&str; 22] = [
+            r#"<log4j:Event logger="a.B" timestamp="1" level="INFO" thread="Render thread">"#,
+            r#"<log4j:Event logger="a.B" timestamp="1" level="ERROR" thread="main">"#,
+            r#"<log4j:Event level="WARN" thread="&quot;x&amp;y&lt;&gt;&apos;">"#,
+            r#"<log4j:Event level="INFO" thread="unterminated"#,
+            r#"<log4j:Event >"#,
+            "<log4j:Event ",
+            "  <log4j:Message><![CDATA[one line]]></log4j:Message>",
+            "  <log4j:Message><![CDATA[first of several",
+            "  <log4j:Message><![CDATA[]]></log4j:Message>",
+            "  <log4j:Throwable><![CDATA[java.lang.RuntimeException: boom",
+            "\tat a.B.c(B.java:1)",
+            "]]></log4j:Throwable>",
+            "]]></log4j:Message>",
+            "</log4j:Event>",
+            "</log4j:Event></log4j:Event>",
+            "plain output from a native library",
+            "",
+            "   ",
+            "]]>",
+            "<![CDATA[",
+            "\u{1F600} é \u{202e}rtl \u{0}nul \u{7f}",
+            "level=\"ERROR\" thread=\"not a tag\"",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: usize| {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_f491_4f6c_dd1d) % n as u64) as usize
+        };
+        for _ in 0..400 {
+            let mut console = Console::default();
+            let count = 1 + next(120);
+            let mut fed = 0usize;
+            for _ in 0..count {
+                let mut line = PIECES[next(PIECES.len())].to_string();
+                match next(6) {
+                    0 => line
+                        .truncate(line.char_indices().nth(next(line.chars().count() + 1)).map_or(line.len(), |c| c.0)),
+                    1 => line.push_str(PIECES[next(PIECES.len())]),
+                    2 => line.insert_str(0, "  \t"),
+                    3 => line = line.repeat(1 + next(40)),
+                    _ => {}
+                }
+                fed += line.chars().count();
+                console.push(Source::Game, line);
+            }
+            assert!(console.len() <= CAPACITY && console.len() <= count * 2);
+            let shown: usize = console.lines().map(|l| l.text.chars().count()).sum();
+            assert!(shown <= fed + console.len() * 64, "the folder produced {shown} characters from {fed}");
+            assert!(console.lines().all(|l| l.source == Source::Game));
+            // Whatever state that left it in — inside an event, inside an unterminated
+            // message or stack trace — the closing lines of both kinds of block and of the
+            // event return it to the top level; after that a well-formed event is folded as
+            // usual. (Nothing else may: text inside a block is arbitrary, chat included.)
+            console.push(Source::Game, "]]></log4j:Message>");
+            console.push(Source::Game, "]]></log4j:Throwable>");
+            console.push(Source::Game, "</log4j:Event>");
+            console.clear();
+            for line in [PIECES[1], "  <log4j:Message><![CDATA[in step again]]></log4j:Message>", "</log4j:Event>"] {
+                console.push(Source::Game, line);
+            }
+            let lines: Vec<_> = console.lines().map(|l| (l.level, l.text.clone())).collect();
+            assert_eq!(lines, [(Level::Error, "[main/ERROR] in step again".to_string())]);
+        }
+    }
+
     #[test]
     fn keeps_only_the_most_recent_lines() {
         let mut console = Console::default();

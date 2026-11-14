@@ -26,7 +26,7 @@ pub use app::{App, Message};
 pub struct Options {
     /// The `bastion-mc` binary to drive.
     pub launcher: PathBuf,
-    /// Local account label (the launcher's `--account`).
+    /// Local account label (the launcher's `--account`); empty for the launcher's default.
     pub account: String,
 }
 

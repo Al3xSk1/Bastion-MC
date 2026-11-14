@@ -49,6 +49,10 @@ pub enum Request {
     Status {
         account: String,
     },
+    /// Make `account` the one the launcher uses when none is named.
+    DefaultAccount {
+        account: String,
+    },
     SignIn {
         account: String,
         device_code: bool,
@@ -74,16 +78,24 @@ impl Request {
     /// The launcher command line for this request (after the `--events` switch).
     pub fn args(&self) -> Vec<String> {
         let owned = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        // An empty label means "whichever account the launcher uses by default".
+        let with_account = |mut args: Vec<String>, account: &String| {
+            if !account.is_empty() {
+                args.extend(["--account".to_string(), account.clone()]);
+            }
+            args
+        };
         match self {
-            Request::Status { account } => owned(&["status", "--account", account]),
+            Request::Status { account } => with_account(owned(&["status"]), account),
+            Request::DefaultAccount { account } => owned(&["account", "default", account]),
             Request::SignIn { account, device_code } => {
-                let mut args = owned(&["login", "--account", account]);
+                let mut args = with_account(owned(&["login"]), account);
                 if *device_code {
                     args.push("--device".into());
                 }
                 args
             }
-            Request::SignOut { account } => owned(&["logout", "--account", account]),
+            Request::SignOut { account } => with_account(owned(&["logout"]), account),
             Request::Versions { snapshots } => {
                 let mut args = owned(&["versions", "--limit", "400"]);
                 if *snapshots {
@@ -93,7 +105,7 @@ impl Request {
             }
             Request::CreateInstance { id, minecraft } => owned(&["instance", "new", id, "--minecraft", minecraft]),
             Request::Launch { instance, account, demo } => {
-                let mut args = owned(&["launch", instance, "--account", account]);
+                let mut args = with_account(owned(&["launch", instance]), account);
                 if *demo {
                     args.push("--demo".into());
                 }
@@ -147,6 +159,40 @@ pub fn test_handle(stop: mpsc::Sender<()>) -> Handle {
 /// Where the launcher binary is: next to this program (true both for `/usr/bin` and for a
 /// cargo target directory), else the packaged location. `$PATH` is deliberately not
 /// searched.
+/// Run `bastion-mc --events scram --yes` to its end and return what it reported, one line
+/// per entry. This is deliberately not a [`Request`]: it must work while another command
+/// (a running game) holds the one job slot — stopping that game is part of what it does.
+pub async fn scram(launcher: PathBuf) -> Result<Vec<String>, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        Command::new(&launcher)
+            .arg(EVENTS_FLAG)
+            .args(["scram", "--yes"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "the launcher did not finish within a minute".to_string())?
+    .map_err(|e| format!("cannot run {}: {e}", launcher.display()))?;
+    let mut lines = Vec::new();
+    let mut failure = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        match Event::parse_line(line) {
+            Some(Event::Status { text }) => lines.push(text),
+            Some(Event::Error { message, .. }) => failure = Some(message),
+            _ => {}
+        }
+    }
+    match failure {
+        Some(message) => Err(message),
+        None if lines.is_empty() => Err(format!("the launcher reported nothing ({})", output.status)),
+        None => Ok(lines),
+    }
+}
+
 pub fn default_launcher() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -324,6 +370,8 @@ mod tests {
         assert_eq!(args(Request::SignIn { account: "a".into(), device_code: true }), "login --account a --device");
         assert_eq!(args(Request::SignIn { account: "a".into(), device_code: false }), "login --account a");
         assert_eq!(args(Request::SignOut { account: "a".into() }), "logout --account a");
+        assert_eq!(args(Request::Status { account: String::new() }), "status", "the launcher's default account");
+        assert_eq!(args(Request::DefaultAccount { account: "work".into() }), "account default work");
         assert_eq!(args(Request::Versions { snapshots: true }), "versions --limit 400 --snapshots");
         assert_eq!(
             args(Request::CreateInstance { id: "survival".into(), minecraft: "26.3".into() }),

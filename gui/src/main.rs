@@ -11,14 +11,14 @@ USAGE: bastion-mc-gui [--launcher PATH] [--account NAME]
 
   --launcher PATH   the bastion-mc binary to drive (default: the one next to this program,
                     else /usr/bin/bastion-mc; $PATH is not searched)
-  --account NAME    local account label, as for `bastion-mc --account` (default: default)
+  --account NAME    local account label, as for `bastion-mc --account` (default: the launcher's default account)
   --help, --version
 
 Rendering uses the GPU when one is usable and falls back to software otherwise; set
 ICED_BACKEND=tiny-skia to force software rendering.";
 
 fn main() -> ExitCode {
-    let mut options = Options { launcher: backend::default_launcher(), account: "default".into() };
+    let mut options = Options { launcher: backend::default_launcher(), account: String::new() };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         let value = |args: &mut dyn Iterator<Item = std::ffi::OsString>| args.next();
