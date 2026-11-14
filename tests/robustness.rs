@@ -630,6 +630,70 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             }
             vec![tree, property, ids, xauth_record(0xffff, [b"", b"", b"MIT-MAGIC-COOKIE-1", &[9; 16]])]
         }
+        "websocket" => {
+            // Server frames as Firefox's remote control sends them: unmasked text, a message
+            // in fragments with a ping between them, a 16-bit and a 64-bit length, a close.
+            let frame = |fin: bool, opcode: u8, payload: &[u8]| {
+                let mut v = vec![if fin { 0x80 } else { 0 } | opcode];
+                match payload.len() {
+                    n if n < 126 => v.push(n as u8),
+                    n if n <= 0xffff => {
+                        v.push(126);
+                        v.extend_from_slice(&(n as u16).to_be_bytes());
+                    }
+                    n => {
+                        v.push(127);
+                        v.extend_from_slice(&(n as u64).to_be_bytes());
+                    }
+                }
+                v.extend_from_slice(payload);
+                v
+            };
+            let reply = br#"{"type":"success","id":1,"result":{"sessionId":"x","capabilities":{}}}"#;
+            vec![
+                frame(true, 1, reply),
+                [frame(false, 1, b"{\"type\":"), frame(true, 9, b"p"), frame(true, 0, b"\"event\"}")].concat(),
+                frame(true, 1, &vec![b'a'; 300]),
+                frame(true, 2, &vec![7u8; 70_000]),
+                [frame(true, 1, reply), frame(true, 8, &1000u16.to_be_bytes())].concat(),
+                text(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+                ),
+            ]
+        }
+        "bidi" => vec![
+            text(
+                r#"{"type":"event","method":"network.beforeRequestSent","params":{"context":"c1","isBlocked":true,"navigation":"n1","redirectCount":0,"request":{"request":"8-ab","url":"https://chat.example/x","method":"GET","destination":"","initiatorType":"fetch"}}}"#,
+            ),
+            text(
+                r#"{"type":"event","method":"network.beforeRequestSent","params":{"context":"c1","isBlocked":true,"navigation":null,"request":{"request":"9","url":"wss://img.cdn.example/?v=9","destination":"script","initiatorType":"script"}}}"#,
+            ),
+            text(
+                r#"{"type":"success","id":12,"result":{"data":"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="}}"#,
+            ),
+            text(
+                r#"{"type":"error","id":3,"error":"no such frame","message":"Browsing context with id c9 not found"}"#,
+            ),
+            text(
+                r#"{"type":"event","method":"browsingContext.load","params":{"context":"c1","navigation":"n1","timestamp":1,"url":"https://chat.example/"}}"#,
+            ),
+            // A JPEG's start: SOI, APP0, SOF0 (800 by 600).
+            [
+                &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10][..],
+                b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0",
+                &[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1],
+            ]
+            .concat(),
+        ],
+        "browser_command" => vec![
+            text("browser open discord"),
+            text("browser mouse down 120 48 right"),
+            text("browser scroll -40 2000"),
+            text("browser size 400 700"),
+            text("browser key ctrl-v"),
+            text("browser text -- héllo 👩\u{200d}💻"),
+            text("browser frames on"),
+        ],
         other => panic!("no seeds for {other}"),
     }
 }
@@ -700,6 +764,9 @@ fn every_harness_has_a_test_here() {
         "picture",
         "clips",
         "x11",
+        "websocket",
+        "bidi",
+        "browser_command",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
@@ -794,6 +861,44 @@ fn phone_frames_and_dispatch() {
 #[test]
 fn mod_registry_answers() {
     run("registry");
+}
+
+#[test]
+fn browser_websocket_frames() {
+    run("websocket");
+}
+
+#[test]
+fn browser_bidi_messages_and_pictures() {
+    run("bidi");
+}
+
+#[test]
+fn browser_commands_from_the_phone() {
+    run("browser_command");
+}
+
+/// The starting points of the browser's harnesses are what their parsers accept.
+#[test]
+fn the_browser_starting_points_are_accepted() {
+    use bastion_mc::browser::{bidi, ws};
+    let frames = seeds("websocket");
+    assert_eq!(ws::fuzz(&frames[0]), 1);
+    assert_eq!(ws::fuzz(&frames[1]), 2, "a ping between the fragments, then the message");
+    assert_eq!(ws::fuzz(&frames[4]), 2, "a message, then the close");
+    let messages = seeds("bidi");
+    let Some(bidi::Incoming::Event { params, .. }) = bidi::parse_incoming(std::str::from_utf8(&messages[0]).unwrap())
+    else {
+        panic!("an event")
+    };
+    let paused = bidi::paused(&params).expect("a paused request");
+    assert!(paused.navigation && paused.api_call);
+    assert_eq!(bidi::jpeg_size(&messages[5]), Some((800, 600)));
+    for line in seeds("browser_command") {
+        let command = bastion_mc::phone::Command::parse(&line).expect("the grammar");
+        let sites = ["discord".to_string()];
+        bastion_mc::browser::app::BrowserCommand::parse(&command, &sites).expect("the browser's words");
+    }
 }
 
 /// The starting points of the registry harness are answers its parsers accept in full.

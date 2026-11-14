@@ -4,6 +4,7 @@
 //! what it does not.
 
 pub mod auth;
+pub mod browser;
 pub mod cli;
 pub mod clips;
 pub mod companion;

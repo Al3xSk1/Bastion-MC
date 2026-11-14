@@ -260,19 +260,20 @@ pub fn sealed_memfd(name: &str, data: &[u8]) -> Result<OwnedFd> {
     Ok(fd)
 }
 
+/// bubblewrap's option list as it is built (shared with the browser's sandbox, `browser::sandbox`).
 #[derive(Default)]
-struct Args {
-    list: Vec<OsString>,
+pub(crate) struct Args {
+    pub(crate) list: Vec<OsString>,
     /// Descriptors the child chain must inherit (close-on-exec is cleared after fork).
-    inherit: Vec<OwnedFd>,
+    pub(crate) inherit: Vec<OwnedFd>,
 }
 
 impl Args {
-    fn push(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn push(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.list.push(arg.as_ref().to_os_string());
         self
     }
-    fn fd(&mut self, fd: OwnedFd) -> &mut Self {
+    pub(crate) fn fd(&mut self, fd: OwnedFd) -> &mut Self {
         self.list.push(fd.as_raw_fd().to_string().into());
         self.inherit.push(fd);
         self
@@ -282,7 +283,7 @@ impl Args {
     }
 }
 
-fn mount_args(args: &mut Args, mount: Mount) -> Result<()> {
+pub(crate) fn mount_args(args: &mut Args, mount: Mount) -> Result<()> {
     match mount {
         Mount::RoBind { src, dst } => args.push("--ro-bind").push(src).push(dst),
         Mount::RoBindTry { src, dst } => args.push("--ro-bind-try").push(src).push(dst),

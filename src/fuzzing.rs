@@ -205,4 +205,25 @@ pub const ALL: &[(&str, Harness)] = &[
     ("picture", crate::spotify::picture::fuzz),
     ("clips", crate::clips::fuzz),
     ("x11", crate::clips::x11::fuzz),
+    // The phone's browser: what Firefox sends over the bridge (WebSocket frames, then BiDi
+    // messages and the pictures in them), and the browser app's words from the phone.
+    ("websocket", websocket),
+    ("bidi", bidi),
+    ("browser_command", browser_command),
 ];
+
+/// The WebSocket decoder of the browser's remote control.
+pub fn websocket(data: &[u8]) {
+    crate::browser::ws::fuzz(data);
+}
+
+/// What the browser says over its remote control (WebDriver BiDi), the pictures in it, and
+/// the decision about a paused request (only to the open site's hosts).
+pub fn bidi(data: &[u8]) {
+    crate::browser::bidi::fuzz(data);
+}
+
+/// A command line for the browser app, through the contract's parser and the browser's.
+pub fn browser_command(data: &[u8]) {
+    crate::browser::app::fuzz(data);
+}

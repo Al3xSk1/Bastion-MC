@@ -73,6 +73,9 @@ USAGE: bastion-mc [--events] <command> [options]
   wiki scram [--links]                the built-in recovery runbook for a compromised account
   export-proofs <file> [--account NAME]   what this launcher recorded that proves the account is yours
 
+  browser login <site>                sign in to a site of the phone's browser, in a window on your desktop
+                                      (same sandbox and profile as in the game; the password is never typed there)
+
   versions [--snapshots] [--limit N]  list Minecraft versions from Mojang's manifest
   instance new <id> --minecraft <version>     create a vanilla instance
   instance list
@@ -574,6 +577,20 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
                 reporter.emit(account_summaries(&paths, &cfg));
             }
             return Ok(if report.incomplete { 1 } else { 0 });
+        }
+        "browser" => {
+            match args.positional("`login`")?.as_str() {
+                "login" => {}
+                other => return Err(usage(format!("unknown browser command {other:?} (there is one: login <site>)"))),
+            }
+            let site = args.positional("site name")?;
+            args.flags(|_, _| Ok(false))?;
+            let cfg = Config::load(&paths)?;
+            return block_on(
+                reporter,
+                &stop,
+                crate::browser::login::run(&paths, &cfg, &site, Path::new("/proc/self/exe"), reporter),
+            );
         }
         "wiki" => {
             use bastion_mc_proto::runbook;

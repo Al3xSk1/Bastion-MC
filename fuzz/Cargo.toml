@@ -117,8 +117,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "websocket"
+path = "fuzz_targets/websocket.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dbus"
 path = "fuzz_targets/dbus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bidi"
+path = "fuzz_targets/bidi.rs"
 test = false
 doc = false
 bench = false
@@ -161,6 +175,13 @@ bench = false
 [[bin]]
 name = "x11"
 path = "fuzz_targets/x11.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "browser_command"
+path = "fuzz_targets/browser_command.rs"
 test = false
 doc = false
 bench = false

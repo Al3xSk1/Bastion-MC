@@ -46,6 +46,8 @@ pub struct Config {
     pub spotify: crate::spotify::SpotifyConfig,
     /// Clips of the game, saved from the in-game phone (see `clips`).
     pub clips: crate::clips::ClipsConfig,
+    /// The phone's web browser (see `browser`). Off by default.
+    pub browser: crate::browser::BrowserConfig,
 }
 
 impl Config {
@@ -66,6 +68,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.browser.validate()?;
         if let Some(id) = &self.auth.client_id {
             validate_client_id(id)?;
         }
@@ -977,6 +980,11 @@ mod tests {
             "max_clips",
             "max_total_mb",
             "folder = ",
+            "[browser]",
+            "preset = \"discord\"",
+            "api_calls_per_minute",
+            "megabytes_per_minute",
+            "frame_rate",
         ] {
             assert!(text.contains(key), "examples/config.toml does not mention {key}");
         }

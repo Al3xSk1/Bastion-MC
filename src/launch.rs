@@ -1078,6 +1078,38 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         },
     };
 
+    // Round 4, the phone's browser (`browser`): Firefox in a sandbox of its own, started now
+    // because the launcher, once it has confined itself (step 9), can start nothing. Nothing
+    // it sends is read before step 10. Not for a burner session: the game there runs content
+    // you do not trust, and a signed-in browser is not put within its reach.
+    let mut browser = if opts.burner {
+        if cfg.browser.enabled {
+            say("browser: not started — a burner session does not put a signed-in browser within the game's reach");
+        }
+        None
+    } else if !phone_wanted {
+        if cfg.browser.enabled {
+            say("browser: not started — no phone in this launch (the companion is not added to this instance)");
+        }
+        None
+    } else {
+        let sink = log.clone();
+        let logger: egress::Logger = Arc::new(move |line: String| sink.line(Source::Egress, &line));
+        crate::browser::prepare(paths, cfg, &inst.id, &opts.program, limits.is_some(), logger)
+    };
+    if let Some(service) = &browser {
+        use crate::phone::Service;
+        log.line(Source::Launcher, &service.describe());
+        if !service.is_running() {
+            reporter.warn(service.describe());
+        }
+    }
+    let browser_stop = browser.as_mut().and_then(crate::browser::BrowserService::stopper);
+    // From here the browser is one of the phone's services like the others.
+    if let Some(service) = browser.take() {
+        services.push(Box::new(service));
+    }
+
     let mut env = base.env;
     env.extend(desktop.env);
 
@@ -1522,6 +1554,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     };
     if let Some(session) = nested.take() {
         session.stop().await;
+    }
+    // Firefox is asked to close (it writes its profile), then its sandbox is made to end.
+    if let Some(stop) = browser_stop {
+        stop.stop().await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         let _ = out.await;

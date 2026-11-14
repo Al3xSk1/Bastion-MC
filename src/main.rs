@@ -4,13 +4,14 @@
 //! single-threaded and exist only to `execve` onward (the network-namespace helper into
 //! bubblewrap, the init stage into the JVM), the third is the nested compositor's
 //! placeholder child, the fourth the Realms dialer (inside a sandbox of its own, see
-//! `realms::dial`), the fifth the clip recorder's helper (inside its sandbox). Everything
-//! else gets the launcher-side process hardening first — the Spotify token keeper too,
-//! which is dispatched right after it.
+//! `realms::dial`), the fifth the clip recorder's helper (inside its sandbox), the sixth the
+//! browser's stage (single-threaded too: it forks Firefox). Everything else gets the
+//! launcher-side process hardening first — the Spotify token keeper too, which is
+//! dispatched right after it.
 
 use std::ffi::OsString;
 
-use bastion_mc::{cli, clips, hardening, realms, sandbox, spotify};
+use bastion_mc::{browser, cli, clips, hardening, realms, sandbox, spotify};
 
 /// Every heap block in this process is wiped before it is returned to the allocator.
 #[global_allocator]
@@ -26,6 +27,8 @@ fn main() {
         // The clip recorder's helper, inside the recorder's sandbox (whose init stage
         // started it, after applying the sandbox's restrictions).
         Some(clips::recorder::RECORDER_ARG) => clips::recorder::recorder_main(&args[2..]),
+        // The browser's sandbox: hardens itself, then bridges to Firefox (see `browser::stage`).
+        Some(browser::stage::STAGE_ARG) => browser::stage::main(&args[2..]),
         _ => {}
     }
 
