@@ -1329,17 +1329,49 @@ pub async fn add<T: Transport>(
     let voice_chat = alias("simple-voice-chat").map(|a| a.id);
     if staged.iter().any(|item| Some(plan.steps[item.step].project.id.as_str()) == voice_chat) {
         out.say("");
-        out.say(VOICE_CHAT_HINT);
+        out.say(voice_chat_hint(effective_network_mode(paths, &draft.dir)));
     }
     Ok(true)
 }
 
-/// Said when `profile add` has added Simple Voice Chat: the mod is useless until a server
-/// rule names its UDP port, and installing it opens nothing by itself.
-pub const VOICE_CHAT_HINT: &str = "Simple Voice Chat sends voice over UDP, which the sandbox allows only to a port that a \
-     server rule names. Installing the mod opens nothing. Name the port in that server's rule ([network] servers in \
+/// The network mode a launch of this instance would run in, if both configuration files can
+/// be read now (a launch would refuse otherwise).
+fn effective_network_mode(paths: &Paths, instance_dir: &Path) -> Option<crate::config::NetworkMode> {
+    let global = crate::config::Config::load(paths).ok()?;
+    let instance = crate::config::InstanceConfig::load(instance_dir).ok()?;
+    Some(instance.network.mode.unwrap_or(global.network.mode))
+}
+
+/// What `profile add` says after adding Simple Voice Chat. The mod sends voice over UDP, and
+/// what becomes of that depends on the instance's network mode; installing the mod opens
+/// nothing either way.
+pub fn voice_chat_hint(mode: Option<crate::config::NetworkMode>) -> &'static str {
+    use crate::config::NetworkMode;
+    match mode {
+        Some(NetworkMode::Open) => VOICE_CHAT_HINT_OPEN,
+        Some(NetworkMode::None) => VOICE_CHAT_HINT_NONE,
+        // Filtered, the default (also what is said when the configuration cannot be read).
+        Some(NetworkMode::Filtered) | None => VOICE_CHAT_HINT,
+    }
+}
+
+/// The hint in network mode "filtered" (the default).
+pub const VOICE_CHAT_HINT: &str = "Simple Voice Chat sends voice over UDP. In network mode \"filtered\" (the default) the \
+     launcher relays UDP only to a port that the server's rule names, only while a game connection to that server is \
+     open, and only to the address that connection uses: a server that puts its voice on another host (voice_host) \
+     will not work. Installing the mod opens nothing. Name the port in that server's rule ([network] servers in \
      config.toml, or in the instance's instance.toml), e.g.\n  servers = [{ host = \"play.example.org\", voice = \
      24454 }]\n24454 is the mod's default; the server's operator knows the port it uses.";
+
+/// The hint in network mode "open".
+pub const VOICE_CHAT_HINT_OPEN: &str = "Simple Voice Chat sends voice over UDP. This instance runs in network mode \
+     \"open\": the game uses this machine's network directly, and its UDP is neither relayed nor restricted - no server \
+     rule is needed, and none applies.";
+
+/// The hint in network mode "none".
+pub const VOICE_CHAT_HINT_NONE: &str = "Simple Voice Chat sends voice over UDP. This instance runs in network mode \
+     \"none\": the game has no network at all, so voice chat cannot work. In mode \"filtered\" a server rule that names \
+     the port allows it (see examples/config.toml).";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -2830,6 +2862,35 @@ mod tests {
             assert!(matches!(&outcome, Err(Error::Policy(m)) if m.contains("(none and `alpha`)")), "{outcome:?}");
             assert_eq!(f.snapshot(), before);
         }
+    }
+
+    #[test]
+    fn the_voice_chat_hint_says_what_the_network_mode_does_with_udp() {
+        use crate::config::NetworkMode;
+        assert_eq!(voice_chat_hint(Some(NetworkMode::Filtered)), VOICE_CHAT_HINT);
+        assert_eq!(voice_chat_hint(None), VOICE_CHAT_HINT, "the default when the configuration cannot be read");
+        assert!(VOICE_CHAT_HINT.contains("only while a game connection") && VOICE_CHAT_HINT.contains("voice_host"));
+        assert_eq!(voice_chat_hint(Some(NetworkMode::Open)), VOICE_CHAT_HINT_OPEN);
+        assert!(
+            VOICE_CHAT_HINT_OPEN.contains("neither relayed nor restricted") && !VOICE_CHAT_HINT_OPEN.contains("only")
+        );
+        assert_eq!(voice_chat_hint(Some(NetworkMode::None)), VOICE_CHAT_HINT_NONE);
+        assert!(VOICE_CHAT_HINT_NONE.contains("cannot work"));
+    }
+
+    /// The hint follows the instance's own network mode, not the global default.
+    #[tokio::test]
+    async fn in_open_mode_the_voice_chat_hint_says_that_udp_is_not_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture("voice-open");
+        let settings = f.dir.join("instance.toml");
+        fs::write(&settings, "[network]\nmode = \"open\"\n").unwrap();
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+        let real = build("9eGKb6K1", "V0000001", "voicechat", "2.6", "release", OLD);
+        offer(&f.registry, &project("9eGKb6K1", "simple-voice-chat", "Simple Voice Chat"), &[&real]);
+        let text = f.added(&["voicechat"]).await;
+        assert!(text.contains(VOICE_CHAT_HINT_OPEN), "{text}");
+        assert!(!text.contains(VOICE_CHAT_HINT), "{text}");
     }
 
     #[tokio::test]

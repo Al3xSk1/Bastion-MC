@@ -2,8 +2,10 @@
 //! settings (`instances/<id>/instance.toml`).
 //!
 //! Every table uses `deny_unknown_fields`: a mistyped security option is a hard error, never a
-//! silently ignored line. Neither file can express arbitrary JVM arguments or commands — the
-//! only place code-affecting options may come from is a *signed* profile manifest.
+//! silently ignored line. Neither file can name code, JVM arguments or commands. Code reaches
+//! the game through a *signed* profile manifest — and, for Fabric profiles, through the
+//! launcher's own embedded companion mod, which `[companion]` can switch off or tune (see
+//! `companion`) but cannot replace or point at anything else.
 
 use std::{
     collections::BTreeMap,

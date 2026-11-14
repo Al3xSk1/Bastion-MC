@@ -1141,17 +1141,26 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     };
     delivered.ctx(|| "delivering the launch frame")?;
     // The game's Wayland socket needs its name only until bubblewrap has bound it, which it
-    // has once the program inside exists. (If that cannot be established, the name stays
-    // until the launcher exits.)
+    // has once the program inside exists. (If that cannot be established, the name stays:
+    // once step 9 has confined this process it cannot remove it any more, so it outlives the
+    // launcher. The compositor stops answering on it when the game's connection ends.)
     let payload = running.payload_pid().await;
     if let (Some(context), Some(_)) = (&wayland_context, payload) {
         context.unlink();
     }
     // The companion channel's socket likewise — and now, while this process can still
     // remove a name in the runtime directory (step 9 takes that away). Reading from the
-    // socket starts in step 10.
+    // socket starts in step 10. A name that stays could be used by other programs of the
+    // user to write to the channel, so that case is said.
     if payload.is_some() {
         companion.release_name();
+    } else if companion.has_channel() {
+        let warning = "companion: WARNING: the program in the sandbox could not be identified in time, so the \
+                       companion channel's socket keeps its name on the host for this session: other programs of yours \
+                       could write lines that appear as the game's companion messages (they are logged, never acted \
+                       on). The next launch that adds the companion removes the name.";
+        log.record(Source::Launcher, warning);
+        reporter.warn(warning);
     }
 
     // 9. Not assumed: looked at. First the resource limits, read back from the kernel for the
@@ -1291,7 +1300,9 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 
     // 10. Supervise. Only now is anything the game sends looked at: its display server's
     // output, its network sockets, its own output.
-    drop(display_output_held);
+    if let Some(hold) = display_output_held {
+        hold.release();
+    }
     let egress = match policy {
         Some(policy) => {
             let spec = policy.netns_spec();

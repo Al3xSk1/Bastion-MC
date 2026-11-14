@@ -1260,7 +1260,9 @@ impl App {
                     .map(|item| Protection {
                         aspect: clean_to(&item.aspect, 24),
                         shield: item.shield,
-                        detail: clean_to(&item.detail, 240),
+                        // They wrap; a "partly" detail names each protection that is not in
+                        // force and can run to a few hundred characters.
+                        detail: clean_to(&item.detail, 1000),
                     })
                     .collect();
             }
@@ -2018,7 +2020,7 @@ mod tests {
         );
         assert_eq!(app.protection.len(), 12);
         assert_eq!(app.protection[3].aspect, "aspect3");
-        assert!(app.protection[0].detail.chars().count() <= 241);
+        assert!(app.protection[0].detail.chars().count() <= 1001);
         assert!(app.progress.as_ref().unwrap().label.chars().count() <= 49);
         assert!(!app.progress.as_ref().unwrap().label.contains('\u{1b}'));
     }

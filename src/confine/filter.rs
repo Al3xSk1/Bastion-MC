@@ -167,6 +167,14 @@ mod tests {
             libc::SYS_sendto,
             libc::SYS_recvfrom,
             libc::SYS_sendmmsg,
+            // The voice relay's sockets per flow (UDP is not Landlock's business), its
+            // datagrams with their destination address (IP_PKTINFO), and the TCP relay's
+            // look at its own end of a connection.
+            libc::SYS_bind,
+            libc::SYS_setsockopt,
+            libc::SYS_getsockname,
+            libc::SYS_sendmsg,
+            libc::SYS_recvmsg,
             libc::SYS_epoll_wait,
             libc::SYS_epoll_ctl,
             libc::SYS_futex,

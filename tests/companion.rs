@@ -26,8 +26,8 @@
 
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Read},
-    os::unix::net::UnixListener,
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -41,6 +41,7 @@ use bastion_mc::{
         channel::{self, Message, Voice},
     },
     config::{InstanceConfig, JavaMatch},
+    confine::{self, Confinement, Demand, Support},
     instance::{Instance, Kind},
     java,
     mojang::args::{Vars, build_frame},
@@ -671,9 +672,10 @@ s.close()
     };
     let mut running = sandbox::spawn(spec, Path::new(env!("CARGO_BIN_EXE_bastion-mc"))).expect("spawn sandbox");
 
-    // As the launch does: serve once the sandbox has the socket, and take its name away.
-    // The payload waits meanwhile, so everything it does happens in the state a game finds:
-    // the socket's name no longer exists on the host.
+    // As the launch does: once the sandbox has the socket, take its name away (step 8), then
+    // serve (step 10; this test process is not confined — the next test covers that). The
+    // payload waits meanwhile, so everything it does happens in the state a game finds: the
+    // socket's name no longer exists on the host.
     let said = Arc::new(Mutex::new(Vec::new()));
     let sink = said.clone();
     let has_socket = running.payload_pid().await.is_some();
@@ -1059,4 +1061,86 @@ fn the_stand_ins_match_the_real_fabric_and_mixin_types() {
     );
     assert!(compared >= 2 * classes.len(), "the comparison looked at too little: {compared}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+const CONFINED_CHANNEL_CHILD: &str = "BASTION_COMPANION_CONFINED_CHILD";
+
+/// The re-executed half of the next test: the launch's order for the channel in one process —
+/// socket created, a client connected (the game holds the socket through its bind mount),
+/// the name removed, the process confined as `launcher.confine = "require"` does it, and only
+/// then the channel served. Nothing in a normal run.
+#[test]
+fn confined_channel_child() {
+    let Ok(root) = std::env::var(CONFINED_CHANNEL_CHILD) else { return };
+    let root = PathBuf::from(root);
+    let (runtime, cache) = (root.join("rt"), root.join("cache"));
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    // The async runtime exists before the confinement, as in the launcher.
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let endpoint = channel::Endpoint::create(Some(&runtime), &cache).expect("the socket");
+    let mut client = UnixStream::connect(endpoint.path()).expect("the client connects while the name exists");
+    endpoint.unlink();
+    let names = std::fs::read_dir(runtime.join("bastion-mc")).map(|d| d.count()).unwrap_or(0);
+    let mut keep = Confinement::supervisor();
+    keep.write.push(cache.clone());
+    let applied = confine::apply(&keep, Demand::Whole).expect("confining the child");
+    assert!(applied.is_whole(), "the whole confinement is in force");
+    // Why the name goes first: a confined launcher can remove nothing in the runtime directory.
+    let probe = runtime.join("probe");
+    let removable = std::fs::create_dir(&probe).is_ok();
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let sink = said.clone();
+    let logged = rt.block_on(async move {
+        let serving = endpoint
+            .serve(Arc::new(move |_voice, line| sink.lock().unwrap().push(line)))
+            .expect("served after the confinement");
+        client.write_all(b"hello 1 0.1.0 zoom\ndiag zoom ready\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while said.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let summary = serving.finish();
+        let mut lines = said.lock().unwrap().clone();
+        lines.push(summary);
+        lines
+    });
+    // (libtest writes "test confined_channel_child ... " without a newline first.)
+    println!("\nnames_left={names}");
+    println!("runtime_dir_writable={removable}");
+    for line in logged {
+        println!("logged: {line}");
+    }
+}
+
+/// The launch serves the companion channel only after the launcher has confined itself
+/// (step 10), and removes the socket's name before (step 8). In a process confined the same
+/// way the channel is still read; and such a process could not have removed the name. If the
+/// confinement ever starts to refuse what the channel needs, this test is where it shows —
+/// the channel enforces nothing, so nothing else would fail.
+#[test]
+fn the_channel_is_read_by_a_launcher_that_has_confined_itself() {
+    if confine::support() != Support::Whole {
+        eprintln!("skipped: {:?}", confine::support());
+        return;
+    }
+    // Short: a socket's path is limited to 107 bytes.
+    let root = std::env::temp_dir().join(format!("bmc-cc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["confined_channel_child", "--exact", "--nocapture", "--test-threads=1"])
+        .env(CONFINED_CHANNEL_CHILD, &root)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("names_left=0"), "the name was gone before the confinement:\n{stdout}");
+    assert!(stdout.contains("runtime_dir_writable=false"), "the confined child could not have removed it:\n{stdout}");
+    assert!(
+        stdout.contains("logged: companion channel #1: hello: mod version 0.1.0, protocol 1, features: zoom"),
+        "the hello was read after the confinement:\n{stdout}"
+    );
+    assert!(stdout.contains("logged: companion channel #1: zoom: ready"), "and the diagnostic:\n{stdout}");
 }

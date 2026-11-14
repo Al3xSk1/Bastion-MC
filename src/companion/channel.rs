@@ -402,7 +402,8 @@ pub struct Endpoint {
 
 /// Remove what earlier launches could not: a launcher that never learnt that its sandbox
 /// held the socket keeps the name (see [`Endpoint::unlink`]), then confines itself, and from
-/// then on can remove nothing outside its instance and cache — the name outlives it.
+/// then on can remove nothing outside the instance's persist/ and the cache — the name
+/// outlives it. Only a launch that adds the companion runs this sweep.
 ///
 /// A socket nobody listens on refuses connections; that is how a leftover is told from one
 /// in use (whose launcher sees one connection that says nothing). A socket younger than

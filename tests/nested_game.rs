@@ -1,8 +1,8 @@
 //! The real game through the whole launch path, with its display hardening on: inside a
 //! nested compositor on an X11 session, or behind a Wayland security context.
 //!
-//! Opt-in, and alone in this file on purpose: a launch ends with the launcher confining its
-//! own process (Landlock, every thread) — here, the test process.
+//! Opt-in, and alone in this file on purpose: in step 9 a launch confines the launcher's own
+//! process (Landlock and a system-call filter, every thread) — here, the test process.
 //!
 //! ```sh
 //! BASTION_E2E_ROOT=$PWD/target/e2e BASTION_E2E_INSTANCE=vanilla-latest \

@@ -391,6 +391,11 @@ impl Plan {
         }
     }
 
+    /// Whether this launch serves a channel (the mod is added and its socket exists).
+    pub fn has_channel(&self) -> bool {
+        matches!(&self.outcome, Ok(Injection { endpoint: Ok(_), .. }))
+    }
+
     /// Remove the channel socket's name on the host. Call once bubblewrap has bound the
     /// socket (the program inside the sandbox exists) and BEFORE the launcher confines
     /// itself: a confined launcher can remove nothing in the runtime directory, and a name

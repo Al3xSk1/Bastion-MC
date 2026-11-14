@@ -136,26 +136,53 @@ type Recent = Arc<Mutex<VecDeque<String>>>;
 /// The compositor talks to the game: once the game runs, what the compositor prints is
 /// influenced by the game. The launcher reads nothing of that kind before it has confined
 /// itself, so between starting the game and that moment it holds this output back
-/// ([`Session::hold_output`]). `held` tells the two relay tasks to step aside; `pass` is what
-/// a relay holds while it reads and handles a line, so that whoever takes it exclusively
-/// knows that no relay is in the middle of one.
+/// ([`Session::hold_output`]). `held` tells the two relay tasks to step aside (or, once a
+/// hold has been given up without being released, to stop); `pass` is what a relay holds
+/// while it reads and handles a line, so that whoever takes it exclusively knows that no
+/// relay is in the middle of one.
 #[derive(Clone)]
 struct Gate {
-    held: tokio::sync::watch::Receiver<bool>,
+    held: tokio::sync::watch::Receiver<Flow>,
     pass: Arc<tokio::sync::RwLock<()>>,
 }
 
-/// While this exists, nothing the compositor prints is read. Dropping it resumes the
-/// relays; what the compositor wrote meanwhile waited in its pipes (a compositor that
+/// What the relays may do with the compositor's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// Read and log it.
+    Open,
+    /// Leave it in the pipes for now.
+    Held,
+    /// Never read it again: a hold ended without being released, i.e. the launch gave up
+    /// before the launcher had confined itself (step 9 refused). What the game made the
+    /// compositor print meanwhile is thrown away with the pipes, unread.
+    Discarded,
+}
+
+/// While this exists, nothing the compositor prints is read. [`OutputHold::release`] resumes
+/// the relays; what the compositor wrote meanwhile waited in its pipes (a compositor that
 /// prints more than a pipe holds waits too — its own delay, for as long as the hold lasts).
+/// Dropped without being released, it stops the relays for good instead: a launch that
+/// returns early is not confined, so it must not start reading what the game influenced.
 pub struct OutputHold {
-    held: Arc<tokio::sync::watch::Sender<bool>>,
+    held: Arc<tokio::sync::watch::Sender<Flow>>,
+    released: bool,
     _pass: tokio::sync::OwnedRwLockWriteGuard<()>,
+}
+
+impl OutputHold {
+    /// The launcher has confined itself: the relays may read again (step 10).
+    pub fn release(mut self) {
+        self.released = true;
+        self.held.send_replace(Flow::Open);
+    }
 }
 
 impl Drop for OutputHold {
     fn drop(&mut self) {
-        self.held.send_replace(false);
+        if !self.released {
+            self.held.send_replace(Flow::Discarded);
+        }
     }
 }
 
@@ -294,7 +321,7 @@ pub struct Session {
     /// Tells a sweep of the cache that `dir` is in use (`running::sweep_leftovers`).
     _in_use: Option<crate::running::DirLock>,
     /// The switch and the lock of the output relays' [`Gate`].
-    held: Arc<tokio::sync::watch::Sender<bool>>,
+    held: Arc<tokio::sync::watch::Sender<Flow>>,
     pass: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -340,14 +367,18 @@ async fn relay(
         let mut limited = (&mut reader).take(16 * 1024);
         let _pass = loop {
             // Not while the output is held: then nothing is read, and nothing is handled.
-            // (An error means that the session — the one who could hold — is gone.)
-            let _ = gate.held.wait_for(|held| !*held).await;
+            // Never again once a hold was given up unreleased. (An error means that the
+            // session — the one who could hold — is gone.)
+            let flow = gate.held.wait_for(|flow| *flow != Flow::Held).await.map(|flow| *flow);
+            if matches!(flow, Ok(Flow::Discarded)) {
+                break 'lines;
+            }
             let pass = gate.pass.clone().read_owned().await;
             let read = tokio::select! {
                 biased;
                 // A hold begins: step aside. What was read of the line so far stays in `buf`
                 // (reading up to a delimiter may be interrupted and taken up again).
-                Ok(_) = gate.held.wait_for(|held| *held) => None,
+                Ok(_) = gate.held.wait_for(|flow| *flow != Flow::Open) => None,
                 read = limited.read_until(b'\n', &mut buf) => Some(read),
             };
             match read {
@@ -387,7 +418,7 @@ pub async fn start(plan: Plan, launcher_exe: &Path, sink: Sink) -> Result<Sessio
     let dir = plan.dir.clone();
     let require_clipboard_cut = plan.require_clipboard_cut;
     let mut in_use = crate::running::lock_dir(&dir).ok();
-    let (held, held_rx) = tokio::sync::watch::channel(false);
+    let (held, held_rx) = tokio::sync::watch::channel(Flow::Open);
     let (held, pass) = (Arc::new(held), Arc::new(tokio::sync::RwLock::new(())));
     let gate = Gate { held: held_rx, pass: pass.clone() };
     let started = async {
@@ -486,17 +517,18 @@ impl Session {
         self.running.child.id()
     }
 
-    /// Stop reading the compositor's output until the returned value is dropped. Returns
-    /// once neither output relay is reading or handling a line.
+    /// Stop reading the compositor's output until the returned value is released (or, if it
+    /// is dropped unreleased, for good). Returns once neither output relay is reading or
+    /// handling a line.
     ///
     /// For the stretch between starting the game and the launcher confining itself: from
     /// the moment the game exists, what the compositor prints is no longer only its own.
     pub async fn hold_output(&self) -> OutputHold {
-        self.held.send_replace(true);
+        self.held.send_replace(Flow::Held);
         // Granted when both relays have let go of theirs — which they do as soon as they
         // see the switch, also in the middle of waiting for output.
         let pass = self.pass.clone().write_owned().await;
-        OutputHold { held: self.held.clone(), _pass: pass }
+        OutputHold { held: self.held.clone(), released: false, _pass: pass }
     }
 
     /// Resolves when the compositor is gone (its window was closed, or it crashed).
@@ -686,16 +718,16 @@ mod tests {
     }
 
     /// A gate nobody holds, and the two handles a [`Session`] keeps to hold it.
-    fn open_gate() -> (Gate, Arc<tokio::sync::watch::Sender<bool>>, Arc<tokio::sync::RwLock<()>>) {
-        let (held, held_rx) = tokio::sync::watch::channel(false);
+    fn open_gate() -> (Gate, Arc<tokio::sync::watch::Sender<Flow>>, Arc<tokio::sync::RwLock<()>>) {
+        let (held, held_rx) = tokio::sync::watch::channel(Flow::Open);
         let pass = Arc::new(tokio::sync::RwLock::new(()));
         (Gate { held: held_rx, pass: pass.clone() }, Arc::new(held), pass)
     }
 
     /// What `Session::hold_output` does, for a relay that is not attached to a compositor.
-    async fn hold(held: &Arc<tokio::sync::watch::Sender<bool>>, pass: &Arc<tokio::sync::RwLock<()>>) -> OutputHold {
-        held.send_replace(true);
-        OutputHold { held: held.clone(), _pass: pass.clone().write_owned().await }
+    async fn hold(held: &Arc<tokio::sync::watch::Sender<Flow>>, pass: &Arc<tokio::sync::RwLock<()>>) -> OutputHold {
+        held.send_replace(Flow::Held);
+        OutputHold { held: held.clone(), released: false, _pass: pass.clone().write_owned().await }
     }
 
     /// Between the start of the game and the launcher's confinement nothing the compositor
@@ -733,7 +765,7 @@ mod tests {
         assert_eq!(seen(), ["display server: before the game"], "nothing is handled while the output is held");
         assert!(!flood.is_finished(), "nothing is even read: the writer is still waiting for room");
 
-        drop(holding);
+        holding.release();
         let compositor = tokio::time::timeout(Duration::from_secs(5), &mut flood).await.expect("resumed").unwrap();
         drop(compositor);
         tokio::time::timeout(Duration::from_secs(5), task).await.expect("the relay ends with its stream").unwrap();
@@ -743,6 +775,30 @@ mod tests {
         assert_eq!(seen[2], "display server: printed while held");
         assert_eq!(seen[3], format!("display server: {}", "x".repeat(200)));
         assert_eq!(seen[4], "display server: last");
+    }
+
+    /// A launch that gives up before the launcher has confined itself (step 9 refused) drops
+    /// its hold unreleased: what the compositor printed meanwhile is never read — the relays
+    /// stop instead of resuming.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hold_given_up_unreleased_discards_the_output_unread() {
+        use tokio::io::AsyncWriteExt;
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink: Sink = {
+            let lines = lines.clone();
+            Arc::new(move |line| lines.lock().unwrap().push(line))
+        };
+        let (mut compositor, launcher) = tokio::io::duplex(64);
+        let (gate, held, pass) = open_gate();
+        let task = tokio::spawn(relay(launcher, sink, Arc::default(), None, gate));
+        compositor.write_all(b"before the game\n").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let holding = tokio::time::timeout(Duration::from_secs(5), hold(&held, &pass)).await.expect("hold granted");
+        compositor.write_all(b"printed while held\n").await.unwrap();
+        drop(holding);
+        tokio::time::timeout(Duration::from_secs(5), task).await.expect("the relay stops at once").unwrap();
+        compositor.write_all(b"after\n").await.ok();
+        assert_eq!(*lines.lock().unwrap(), ["display server: before the game"], "nothing held was read");
     }
 
     #[tokio::test]

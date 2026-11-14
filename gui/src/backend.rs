@@ -39,17 +39,20 @@ use tokio::{
 /// Updates buffered between the worker and the UI. When the UI falls behind, the worker
 /// waits; the launcher then drops game output on its side instead of stalling the game.
 const CHANNEL_CAPACITY: usize = 1024;
-/// How long the launcher gets to shut the game down after a stop before it is killed. The
-/// launcher itself gives the game 15 seconds.
-const STOP_GRACE: Duration = Duration::from_secs(30);
+/// How long the launcher gets after a stop before it is killed. Its own shutdown is bounded:
+/// up to 15 seconds for the game, 8 for the display server, 5 for the output relays, then up
+/// to 30 to delete what the game wrote (and to say what could not be deleted). The grace
+/// covers all of that with room to spare.
+const STOP_GRACE: Duration = Duration::from_secs(90);
 /// How long output may keep arriving after the launcher itself has exited. Its pipes close
 /// with it; this only matters if some stray descendant still holds one open.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const MAX_STRAY_CHARS: usize = 2000;
 /// How long the window waits for a scram before it says "still running" and stops waiting.
-/// Reaching it ends nothing: the launcher is left to finish. A scram normally takes a
-/// second or two; the slow part is deleting what killed games left behind, which is
-/// bounded by the size of that data, not by a clock.
+/// Reaching it ends nothing: the launcher is left to finish. A scram normally ends within
+/// seconds, and each of its steps is bounded (about 5 seconds to stop running commands per
+/// pass, 2 to confirm the keys are gone, at most two passes, 15 to delete what killed games
+/// left behind); this limit only guards against a launcher that hangs.
 pub const SCRAM_WAIT_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 /// Everything the UI can ask of the launcher.

@@ -431,8 +431,9 @@ pub enum Rows {
 /// How many of the reported aspects are in force, as a tag: the whole panel in one glance.
 fn protection_summary<'a>(app: &App) -> Element<'a, Message> {
     if app.protection.is_empty() {
-        // A launch under way reports just before the game starts; until then there is a
-        // launch, and nothing known about it.
+        // A launch under way reports once the game runs and the launcher has checked it
+        // (limits read back, its own confinement applied); until then there is a launch, and
+        // nothing known about it.
         return kit::chip(if app.launch().is_some() { "Awaiting report" } else { "No launch yet" }, Tone::Neutral);
     }
     let count = |level: Shield| app.protection.iter().filter(|item| item.shield == level).count();

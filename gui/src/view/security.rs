@@ -50,7 +50,10 @@ pub fn page(app: &App, layout: Layout) -> Element<'_, Message> {
 fn last_launch(app: &App) -> Element<'_, Message> {
     let running = app.launch().is_some();
     let lead = match (app.protection.is_empty(), running) {
-        (true, true) => "The launch under way has not reported yet: the read-outs arrive just before the game starts.",
+        (true, true) => {
+            "The launch under way has not reported yet: the read-outs arrive once the launcher has checked the game it \
+             started."
+        }
         (true, false) => "No game has been started in this window yet. A launch reports these five things:",
         (false, true) => "The game that is running was started with:",
         (false, false) => "The last game was started with:",

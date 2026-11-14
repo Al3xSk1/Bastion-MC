@@ -75,7 +75,9 @@ pub enum Event {
         latest_snapshot: String,
         versions: Vec<Version>,
     },
-    /// Which protections this launch runs with. Sent once, just before the game starts.
+    /// Which protections this launch runs with. Sent once, after the game was started and
+    /// what was started was checked (resource limits read back, the launcher's own
+    /// confinement applied), just before `Phase::Running`.
     Protection {
         items: Vec<Protection>,
     },
