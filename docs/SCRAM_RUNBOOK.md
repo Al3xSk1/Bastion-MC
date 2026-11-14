@@ -28,8 +28,11 @@ removes every stored refresh token from the kernel keyring — those of your Min
 accounts and the Spotify token of the in-game phone — and the secret for approving Realms
 joins; deletes the age vault files; deletes the in-game browser's profile, which holds the
 sessions of the sites you signed in to there (a Discord session, for example); and forgets
-which player each local account was. Last, and for at most 15 seconds, it deletes what
-stopped games left behind. It prints what it did.
+which player each local account was. If you played Bedrock through bastion-mc, it also stops
+a running Bedrock session — its game holds your Xbox sign-in — and deletes what killed or
+crashed Bedrock sessions left on disk, which can hold that sign-in; it keeps Bedrock worlds.
+Last, and for at most 15 seconds, it deletes what stopped games left behind. It prints what
+it did.
 
 Read what it prints. A line that starts with `COULD NOT` means that something is still
 there or could not be checked, and it says what to do — for example end a process
@@ -54,6 +57,11 @@ What it does **not** do:
   vault file, the browser's profile is not encrypted: if this machine may be compromised,
   end those sessions from a clean device. A Spotify app you allowed keeps its access until
   you remove it under "Manage apps" in your Spotify account.
+- A Bedrock game held your Xbox sign-in itself — a refresh token of your Microsoft account —
+  in every session you signed in. If a Bedrock session may have been hostile (a strange
+  server, an add-on, a crash you cannot explain), assume that it copied that sign-in: only
+  signing out everywhere (phase 2) ends it, as it ends every app's sign-in — in bastion-mc's
+  Bedrock sessions and in mcpelauncher-ui's alike.
 - The profile canary's history is kept: it is evidence for phase 3, and not a credential.
 
 ## Phase 2 — the Microsoft account (ten minutes, from a clean device)
@@ -119,6 +127,9 @@ Have ready:
   writes what this launcher recorded: the player id, every name, skin and cape state the
   canary has seen with dates, and when you signed in and played. It contains no token.
 
+**Minecoins spent, or a Realm changed, that you did not do** (Bedrock): Minecraft Support,
+with the same form.
+
 ## Afterwards
 
 - Sign in to the launcher again (`bastion-mc login`) and check `bastion-mc skin show`.
@@ -127,6 +138,9 @@ Have ready:
   `bastion-mc spotify login`, make a new Realms secret with `bastion-mc realms totp-setup`
   and delete the old "bastion-mc:Realms" entry from your authenticator app, and sign in to
   each site again with `bastion-mc browser login <site>` once its old sessions are ended.
+- Bedrock: the next session signs in again, as every session does. Look at your Minecoins,
+  your Realms and your Bedrock character in the game: the profile canary watches the Java
+  profile only.
 - If the refresh-token store is the kernel keyring, consider the age vault with a hardware
   key (README, "Where the refresh token rests").
 - Find out how it happened before you play again: a password reused elsewhere, a
