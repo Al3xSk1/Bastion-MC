@@ -29,6 +29,13 @@
 //! no netlink, packet, AF_ALG, vsock, …), `socketpair` (AF_UNIX), `ioctl` (no TIOCSTI,
 //! TIOCLINUX, TIOCCONS, TIOCSETD), `prctl` (fixed option list), `kcmp` (KCMP_FILE only),
 //! `personality` (query only).
+//!
+//! **The Bedrock client** (`SeccompProfile::BedrockClient`) has an allowlist of its own,
+//! [`BEDROCK_ALLOW`], with the same argument filters and the same tripwire. Its log mode
+//! differs from the JVM's: it is meant for profiling the real `mcpelauncher-client` once (see
+//! `bedrock::launch`), so it keeps the tripwire, and it keeps refusing what must never be
+//! allowed even while a profile is taken ([`BEDROCK_ALWAYS_DENIED`] and namespace flags
+//! on `clone`); only the rest of what lies outside the allowlist is logged and let through.
 
 use std::collections::BTreeMap;
 
@@ -37,7 +44,7 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 
-use super::policy::SeccompPolicy;
+use super::policy::{SeccompPolicy, SeccompProfile};
 use crate::{
     config::SeccompMode,
     error::{Error, Result},
@@ -141,6 +148,93 @@ const DENIED_NAMED: &[(&str, i64)] = sys![
 const FILTERED: &[(&str, i64)] =
     sys![SYS_clone, SYS_socket, SYS_socketpair, SYS_ioctl, SYS_prctl, SYS_kcmp, SYS_personality];
 
+/// The Bedrock client's allowlist: `mcpelauncher-client`, which loads the Android build of
+/// the game into its own process. Derived from what the client's source does (research
+/// clone `mcpe-mcpelauncher-client`, `main.cpp` and `src/jni/`): its own Android linker maps
+/// the game's `.so` files; libc-shim maps the game's bionic calls onto glibc; the window and
+/// GL context come from SDL3 (or GLFW) and the GPU driver; sound from PulseAudio (or SDL3
+/// audio, or ALSA); HTTPS from libcurl and OpenSSL; Bedrock's game traffic is RakNet over
+/// UDP; and the sign-in page is shown by executing a separate program and reading its
+/// standard output (`xal_webview_qt.cpp`: pipe, fork, dup2, execv, waitpid).
+///
+/// Not profiled against the real client on this machine (there is none); `[bedrock]
+/// seccomp = "log"` is how the user takes that profile once, and `[bedrock] extra_syscalls`
+/// how a missing call is added without widening the JVM's list. The calls the JVM's list
+/// has and this one does not are named in the test `the_bedrock_list_differs_from_the_jvm_list_only_where_written_down`.
+#[rustfmt::skip]
+pub(crate) const BEDROCK_ALLOW: &[(&str, i64)] = sys![
+    // files and directories: the client reads the game directory; the game writes its data
+    // directory (worlds are LevelDB: pread/pwrite, fsync/fdatasync, flock, fallocate, rename)
+    SYS_read, SYS_write, SYS_open, SYS_openat, SYS_openat2, SYS_close, SYS_close_range, SYS_creat,
+    SYS_stat, SYS_fstat, SYS_lstat, SYS_newfstatat, SYS_statx, SYS_lseek, SYS_pread64, SYS_pwrite64,
+    SYS_readv, SYS_writev, SYS_preadv, SYS_pwritev, SYS_preadv2, SYS_pwritev2, SYS_access,
+    SYS_faccessat, SYS_faccessat2, SYS_readlink, SYS_readlinkat, SYS_getdents, SYS_getdents64,
+    SYS_getcwd, SYS_chdir, SYS_fchdir, SYS_rename, SYS_renameat, SYS_renameat2, SYS_mkdir, SYS_mkdirat,
+    SYS_rmdir, SYS_unlink, SYS_unlinkat, SYS_link, SYS_linkat, SYS_chmod, SYS_fchmod, SYS_fchmodat,
+    SYS_fchmodat2, SYS_chown, SYS_fchown, SYS_lchown, SYS_fchownat, SYS_umask, SYS_truncate,
+    SYS_ftruncate, SYS_fallocate, SYS_fsync, SYS_fdatasync, SYS_sync, SYS_syncfs, SYS_sync_file_range,
+    SYS_utime, SYS_utimes, SYS_utimensat, SYS_futimesat, SYS_fadvise64, SYS_readahead, SYS_sendfile,
+    SYS_copy_file_range, SYS_dup, SYS_dup2, SYS_dup3, SYS_fcntl, SYS_flock, SYS_statfs, SYS_fstatfs,
+    SYS_pipe, SYS_pipe2, SYS_getxattr, SYS_lgetxattr, SYS_fgetxattr, SYS_listxattr, SYS_llistxattr,
+    SYS_flistxattr,
+    // event notification: SDL3's event loop, libcurl, PulseAudio's main loop, the game's looper
+    SYS_poll, SYS_ppoll, SYS_select, SYS_pselect6, SYS_epoll_create, SYS_epoll_create1, SYS_epoll_ctl,
+    SYS_epoll_wait, SYS_epoll_pwait, SYS_epoll_pwait2, SYS_eventfd, SYS_eventfd2, SYS_signalfd,
+    SYS_signalfd4, SYS_timerfd_create, SYS_timerfd_settime, SYS_timerfd_gettime, SYS_inotify_init,
+    SYS_inotify_init1, SYS_inotify_add_watch, SYS_inotify_rm_watch,
+    // memory: the client's own linker maps the game's libraries with mmap and mprotect
+    // (PROT_EXEC, which Landlock does not govern), and the game's script engine (V8) compiles
+    // code at run time — W^X cannot be enforced here either; protection keys where the CPU
+    // has them. Not mlockall/munlockall: nothing in the client pins its whole address space.
+    SYS_mmap, SYS_munmap, SYS_mprotect, SYS_mremap, SYS_brk, SYS_madvise, SYS_mincore, SYS_msync,
+    SYS_mlock, SYS_mlock2, SYS_munlock, SYS_membarrier, SYS_mbind, SYS_set_mempolicy,
+    SYS_get_mempolicy, SYS_memfd_create, SYS_pkey_alloc, SYS_pkey_free, SYS_pkey_mprotect, SYS_mseal,
+    // processes and threads: the game's threads (pthreads through libc-shim); fork and execve
+    // for the sign-in webview (and for helpers the client looks for — the file picker, the old
+    // MSA daemon — which Landlock does not let it execute)
+    SYS_fork, SYS_vfork, SYS_execve, SYS_execveat, SYS_exit, SYS_exit_group, SYS_wait4, SYS_waitid,
+    SYS_getpid, SYS_getppid, SYS_gettid, SYS_getpgrp, SYS_getpgid, SYS_getsid, SYS_setsid, SYS_setpgid,
+    SYS_getuid, SYS_geteuid, SYS_getgid, SYS_getegid, SYS_getgroups, SYS_getresuid, SYS_getresgid,
+    SYS_set_tid_address, SYS_set_robust_list, SYS_get_robust_list, SYS_futex, SYS_futex_waitv,
+    SYS_sched_yield, SYS_sched_getaffinity, SYS_sched_setaffinity, SYS_sched_getparam,
+    SYS_sched_setparam, SYS_sched_getscheduler, SYS_sched_setscheduler, SYS_sched_get_priority_max,
+    SYS_sched_get_priority_min, SYS_sched_rr_get_interval, SYS_sched_getattr, SYS_sched_setattr,
+    SYS_getpriority, SYS_setpriority, SYS_ioprio_get, SYS_ioprio_set, SYS_getrlimit, SYS_setrlimit,
+    SYS_prlimit64, SYS_getrusage, SYS_times, SYS_uname, SYS_sysinfo, SYS_getcpu, SYS_arch_prctl,
+    SYS_rseq, SYS_capget, SYS_pidfd_open, SYS_pidfd_send_signal,
+    // signals and timers (the client's crash handler installs an alternate signal stack)
+    SYS_kill, SYS_tkill, SYS_tgkill, SYS_rt_sigaction, SYS_rt_sigprocmask, SYS_rt_sigreturn,
+    SYS_rt_sigpending, SYS_rt_sigtimedwait, SYS_rt_sigqueueinfo, SYS_rt_tgsigqueueinfo,
+    SYS_rt_sigsuspend, SYS_sigaltstack, SYS_pause, SYS_alarm, SYS_getitimer, SYS_setitimer,
+    SYS_timer_create, SYS_timer_settime, SYS_timer_gettime, SYS_timer_getoverrun, SYS_timer_delete,
+    SYS_nanosleep, SYS_clock_nanosleep, SYS_clock_gettime, SYS_clock_getres, SYS_gettimeofday, SYS_time,
+    SYS_restart_syscall, SYS_getrandom,
+    // sockets (creation is argument-filtered): libcurl, RakNet over UDP, the display and sound
+    // servers' UNIX sockets (PulseAudio passes memfds with SCM_RIGHTS), the sign-in bridge
+    SYS_bind, SYS_listen, SYS_accept, SYS_accept4, SYS_connect, SYS_getsockname, SYS_getpeername,
+    SYS_sendto, SYS_recvfrom, SYS_sendmsg, SYS_recvmsg, SYS_sendmmsg, SYS_recvmmsg, SYS_shutdown,
+    SYS_setsockopt, SYS_getsockopt,
+    // SysV shm/sem inside the private IPC namespace (ALSA's dmix with audio = "alsa", MIT-SHM
+    // probes of X clients under the nested compositor)
+    SYS_shmget, SYS_shmat, SYS_shmdt, SYS_shmctl, SYS_semget, SYS_semop, SYS_semtimedop, SYS_semctl,
+];
+
+/// Refused to the Bedrock client in both modes — also while a profile is taken in log mode,
+/// where everything else outside [`BEDROCK_ALLOW`] is logged and let through:
+///
+/// * new namespaces (`unshare`; `clone3`, whose flags the filter cannot read, so that glibc
+///   falls back to `clone`, where namespace flags are refused too) — no sandbox of its own,
+///   which is also why no browser engine can run in there;
+/// * the kernel keyrings: they are not namespaced, and the user keyring is where bastion-mc
+///   keeps the Java refresh token;
+/// * io_uring (its operations bypass the filter), `userfaultfd` and `perf_event_open`
+///   (kernel exploitation primitives), `pidfd_getfd` (taking another process's descriptors).
+#[rustfmt::skip]
+pub(crate) const BEDROCK_ALWAYS_DENIED: &[(&str, i64)] = sys![
+    SYS_unshare, SYS_clone3, SYS_keyctl, SYS_add_key, SYS_request_key, SYS_io_uring_setup,
+    SYS_io_uring_enter, SYS_io_uring_register, SYS_userfaultfd, SYS_perf_event_open, SYS_pidfd_getfd,
+];
+
 const AF_UNIX: u64 = libc::AF_UNIX as u64;
 const AF_INET: u64 = libc::AF_INET as u64;
 const AF_INET6: u64 = libc::AF_INET6 as u64;
@@ -198,16 +292,25 @@ fn rule(conds: Vec<Cond>) -> Result<SeccompRule> {
 /// Resolve a syscall name (`"openat"` or `"SYS_openat"`) from any of the tables.
 pub fn syscall_number(name: &str) -> Option<i64> {
     let bare = name.strip_prefix("SYS_").unwrap_or(name);
-    [ALLOW, ALLOW_NUMERIC, TRIPWIRE, DENIED_NAMED, FILTERED]
+    [ALLOW, ALLOW_NUMERIC, TRIPWIRE, DENIED_NAMED, FILTERED, BEDROCK_ALLOW, BEDROCK_ALWAYS_DENIED]
         .iter()
         .flat_map(|t| t.iter())
         .find(|(n, _)| n.strip_prefix("SYS_") == Some(bare))
         .map(|(_, nr)| *nr)
 }
 
+/// The unconditional part of a profile's allowlist, and the configuration key that adds to it.
+fn profile_table(profile: SeccompProfile) -> (&'static [(&'static str, i64)], &'static str) {
+    match profile {
+        SeccompProfile::Jvm => (ALLOW, "sandbox.extra_syscalls"),
+        SeccompProfile::BedrockClient => (BEDROCK_ALLOW, "bedrock.extra_syscalls"),
+    }
+}
+
 fn allowlist_rules(policy: &SeccompPolicy) -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
+    let (table, key) = profile_table(policy.profile);
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    for (_, nr) in ALLOW.iter().chain(ALLOW_NUMERIC) {
+    for (_, nr) in table.iter().chain(ALLOW_NUMERIC) {
         rules.insert(*nr, vec![]);
     }
 
@@ -239,22 +342,38 @@ fn allowlist_rules(policy: &SeccompPolicy) -> Result<BTreeMap<i64, Vec<SeccompRu
     rules.insert(libc::SYS_personality, vec![rule(vec![cond(0, Len::Dword, Op::Eq, 0xffff_ffff)?])?]);
 
     for name in &policy.extra_allow {
-        let nr = syscall_number(name)
-            .ok_or_else(|| Error::Config(format!("sandbox.extra_syscalls: unknown syscall {name:?}")))?;
+        let nr = syscall_number(name).ok_or_else(|| Error::Config(format!("{key}: unknown syscall {name:?}")))?;
         if TRIPWIRE.iter().any(|(_, t)| *t == nr) {
-            return Err(Error::Config(format!(
-                "sandbox.extra_syscalls: {name:?} is on the tripwire list and cannot be allowed"
-            )));
+            return Err(Error::Config(format!("{key}: {name:?} is on the tripwire list and cannot be allowed")));
         }
         // An unconditional rule here would silently *replace* the argument checks (naming
         // `ioctl` would re-enable TIOCSTI, `clone` namespace flags, `socket` netlink, …).
         if FILTERED.iter().any(|(_, f)| *f == nr) {
             return Err(Error::Config(format!(
-                "sandbox.extra_syscalls: {name:?} is already allowed with argument checks and cannot be widened"
+                "{key}: {name:?} is already allowed with argument checks and cannot be widened"
+            )));
+        }
+        if policy.profile == SeccompProfile::BedrockClient && BEDROCK_ALWAYS_DENIED.iter().any(|(_, d)| *d == nr) {
+            return Err(Error::Config(format!(
+                "{key}: {name:?} is never allowed to the Bedrock client (namespaces, keyrings, io_uring and the \
+                 like stay refused even in log mode)"
             )));
         }
         rules.insert(nr, vec![]);
     }
+    Ok(rules)
+}
+
+/// What the Bedrock client is refused in log mode as well: [`BEDROCK_ALWAYS_DENIED`], and
+/// `clone` with any namespace flag (one rule per flag: a rule matches when its bit is set).
+fn bedrock_always_denied_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
+        BEDROCK_ALWAYS_DENIED.iter().map(|(_, nr)| (*nr, vec![])).collect();
+    let bits = (0..64).map(|bit| 1u64 << bit).filter(|bit| CLONE_NAMESPACE_BITS & bit != 0);
+    rules.insert(
+        libc::SYS_clone,
+        bits.map(|bit| rule(vec![cond(0, Len::Qword, Op::MaskedEq(bit), bit)?])).collect::<Result<_>>()?,
+    );
     Ok(rules)
 }
 
@@ -270,6 +389,42 @@ fn compile(
 
 /// Build the filters in installation order.
 pub fn build(policy: &SeccompPolicy) -> Result<Vec<BpfProgram>> {
+    match policy.profile {
+        SeccompProfile::Jvm => build_jvm(policy),
+        SeccompProfile::BedrockClient => build_bedrock(policy),
+    }
+}
+
+/// The Bedrock client's filters. Enforcing: the tripwire, then the allowlist (whatever is
+/// outside it fails with `ENOSYS`). Logging: the tripwire, then the refusals that hold in
+/// any case, then the allowlist with "log and allow" for the rest. The kernel applies the
+/// strictest verdict of all installed filters, so a call the second filter refuses is
+/// refused whatever the third says.
+fn build_bedrock(policy: &SeccompPolicy) -> Result<Vec<BpfProgram>> {
+    let mut programs = Vec::new();
+    if policy.tripwire {
+        let rules = TRIPWIRE.iter().map(|(_, nr)| (*nr, vec![])).collect();
+        programs.push(compile(rules, SeccompAction::Allow, SeccompAction::KillProcess)?);
+    }
+    match policy.mode {
+        SeccompMode::Enforce => programs.push(compile(
+            allowlist_rules(policy)?,
+            SeccompAction::Errno(libc::ENOSYS as u32),
+            SeccompAction::Allow,
+        )?),
+        SeccompMode::Log => {
+            programs.push(compile(
+                bedrock_always_denied_rules()?,
+                SeccompAction::Allow,
+                SeccompAction::Errno(libc::ENOSYS as u32),
+            )?);
+            programs.push(compile(allowlist_rules(policy)?, SeccompAction::Log, SeccompAction::Allow)?);
+        }
+    }
+    Ok(programs)
+}
+
+fn build_jvm(policy: &SeccompPolicy) -> Result<Vec<BpfProgram>> {
     let mut programs = Vec::new();
     match policy.mode {
         SeccompMode::Enforce => {
@@ -300,6 +455,8 @@ pub fn install(programs: &[BpfProgram]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -349,6 +506,89 @@ mod tests {
         assert_eq!(syscall_number("ptrace"), Some(101));
         assert_eq!(syscall_number("io_uring_setup"), Some(425));
         assert_eq!(syscall_number("no_such_call"), None);
+    }
+
+    fn bedrock(mode: SeccompMode) -> SeccompPolicy {
+        SeccompPolicy { mode, profile: SeccompProfile::BedrockClient, ..Default::default() }
+    }
+
+    /// Profiling the real client (log mode) must not open what the filter is there to keep
+    /// shut: the tripwire is still the first filter, the always-refused calls the second.
+    #[test]
+    fn bedrock_filters_compile_fit_and_keep_the_tripwire_in_log_mode() {
+        let enforce = build(&bedrock(SeccompMode::Enforce)).unwrap();
+        assert_eq!(enforce.len(), 2, "tripwire, allowlist");
+        let log = build(&bedrock(SeccompMode::Log)).unwrap();
+        assert_eq!(log.len(), 3, "tripwire, always-refused, allowlist that logs");
+        for p in enforce.iter().chain(&log) {
+            assert!(!p.is_empty() && p.len() < 4096, "BPF program length {}", p.len());
+        }
+        // The tripwire program is the JVM's, unchanged.
+        let jvm = build(&SeccompPolicy::default()).unwrap();
+        assert_eq!(enforce[0], jvm[0], "the same tripwire for both programs");
+        assert_eq!(log[0], jvm[0], "and in log mode too");
+        let quiet = SeccompPolicy { tripwire: false, ..bedrock(SeccompMode::Log) };
+        assert_eq!(build(&quiet).unwrap().len(), 2, "sandbox.tripwire = false removes only the tripwire");
+    }
+
+    #[test]
+    fn the_bedrock_tables_are_disjoint_from_the_tripwire_and_the_refusals() {
+        let allowed: Vec<i64> = BEDROCK_ALLOW.iter().map(|(_, n)| *n).collect();
+        let mut unique = allowed.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), allowed.len(), "a syscall is listed twice");
+        for (name, nr) in TRIPWIRE.iter().chain(BEDROCK_ALWAYS_DENIED).chain(FILTERED) {
+            assert!(!allowed.contains(nr), "{name} is in the Bedrock allowlist");
+        }
+        for name in [
+            "keyctl",
+            "add_key",
+            "request_key",
+            "unshare",
+            "clone3",
+            "setns",
+            "ptrace",
+            "bpf",
+            "mount",
+            "io_uring_setup",
+            "userfaultfd",
+            "perf_event_open",
+            "pidfd_getfd",
+            "process_vm_readv",
+        ] {
+            let nr = syscall_number(name).unwrap_or_else(|| panic!("{name} missing from tables"));
+            assert!(!allowed.contains(&nr), "{name} must not be allowed to the Bedrock client");
+        }
+    }
+
+    /// The two lists start from the same needs (a native game process: threads, GL, sound,
+    /// sockets, a JIT) and may drift apart only by a decision that is written down here.
+    #[test]
+    fn the_bedrock_list_differs_from_the_jvm_list_only_where_written_down() {
+        fn names(table: &[(&'static str, i64)]) -> BTreeSet<&'static str> {
+            table.iter().map(|(n, _)| *n).collect()
+        }
+        let (jvm, client) = (names(ALLOW), names(BEDROCK_ALLOW));
+        let only_jvm: Vec<&str> = jvm.difference(&client).copied().collect();
+        let only_client: Vec<&str> = client.difference(&jvm).copied().collect();
+        assert_eq!(only_jvm, ["SYS_mlockall", "SYS_munlockall"], "nothing in the client pins its address space");
+        assert!(only_client.is_empty(), "calls only the client needs: {only_client:?}");
+    }
+
+    #[test]
+    fn bedrock_extra_syscalls_cannot_reopen_what_is_always_denied() {
+        let with = |name: &str| SeccompPolicy { extra_allow: vec![name.into()], ..bedrock(SeccompMode::Enforce) };
+        assert!(build(&with("splice")).is_ok());
+        for refused in ["keyctl", "unshare", "clone3", "io_uring_setup", "ptrace", "ioctl", "frobnicate"] {
+            match build(&with(refused)) {
+                Err(Error::Config(why)) => assert!(why.starts_with("bedrock.extra_syscalls"), "{refused}: {why}"),
+                other => panic!("{refused}: {other:?}"),
+            }
+        }
+        // The JVM's key still says its own name.
+        let jvm = SeccompPolicy { extra_allow: vec!["ptrace".into()], ..Default::default() };
+        assert!(matches!(build(&jvm), Err(Error::Config(why)) if why.starts_with("sandbox.extra_syscalls")));
     }
 
     #[test]

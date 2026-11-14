@@ -66,10 +66,32 @@ pub struct SeccompPolicy {
     pub mode: SeccompMode,
     pub tripwire: bool,
     pub extra_allow: Vec<String>,
+    /// Whose allowlist (see `seccomp`). Absent from older policies: the JVM's.
+    #[serde(default)]
+    pub profile: SeccompProfile,
 }
 
 impl Default for SeccompPolicy {
     fn default() -> Self {
-        SeccompPolicy { mode: SeccompMode::Enforce, tripwire: true, extra_allow: Vec::new() }
+        SeccompPolicy {
+            mode: SeccompMode::Enforce,
+            tripwire: true,
+            extra_allow: Vec::new(),
+            profile: SeccompProfile::Jvm,
+        }
     }
+}
+
+/// Which system-call allowlist a sandboxed program gets. The tripwire is the same for all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeccompProfile {
+    /// The allowlist written for the JVM; the helper sandboxes (nested compositor, D-Bus
+    /// proxy, clip recorder, Realms dialer) use it too.
+    #[default]
+    Jvm,
+    /// Minecraft Bedrock's `mcpelauncher-client` (see `seccomp::BEDROCK_ALLOW`). In log mode
+    /// it keeps the tripwire and the refusals that must hold even while profiling
+    /// (namespaces, keyrings, io_uring, …), where the JVM's log mode keeps nothing.
+    BedrockClient,
 }

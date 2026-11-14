@@ -65,7 +65,9 @@ pub fn serve(
             let text = match answer {
                 Answer::Cancel if approvals.cancel() => None,
                 Answer::Cancel => Some("Realms: no join is waiting for approval; nothing to cancel".to_string()),
-                Answer::Text(code) => note(&approvals.answer(&code)),
+                // The six digits, however they were spaced ("123 456" is how the window and the
+                // phone show a code); anything else is a wrong code, and costs an attempt.
+                Answer::Text(code) => note(&approvals.answer(&code.split_whitespace().collect::<String>())),
             };
             if let Some(text) = text {
                 reporter.warn(text);
@@ -126,7 +128,9 @@ mod tests {
                 .any(|e| matches!(e, Event::Status { text } if text.contains("2 attempt(s) left")))
         })
         .await;
-        assert_eq!(reporter.answer_for_test(AnswerKind::Realms, Answer::Text(code)), Delivery::Delivered);
+        // Spaced as the window shows it ("123 456"): the same six digits.
+        let spaced = format!("{} {}", &code[..3], &code[3..]);
+        assert_eq!(reporter.answer_for_test(AnswerKind::Realms, Answer::Text(spaced)), Delivery::Delivered);
         eventually("the join is approved", || {
             seen.lock().unwrap().iter().any(|a| a.outcome == Some(approval::Outcome::Approved))
         })

@@ -154,6 +154,7 @@ pub async fn prepare(
 ) -> Result<Prepared> {
     let store = Store { paths, http, parallel: cfg.downloads.parallel, repair, reporter };
     let (pin, loader_libs) = match &inst.kind {
+        Kind::Bedrock(_) => return Err(crate::bedrock::launch::instance::java_only("install", &inst.id)),
         Kind::Vanilla => (None, Vec::new()),
         Kind::Curated { manifest, .. } => (
             manifest.minecraft.version_json_sha1.as_deref().map(Expected::sha1).transpose()?,
@@ -226,7 +227,7 @@ impl Share {
     }
 }
 
-struct Log {
+pub(crate) struct Log {
     /// The file, and per share the bytes written so far (`None` once its limit was reached).
     file: Mutex<(File, [Option<u64>; 4])>,
     limits: [u64; 4],
@@ -235,7 +236,7 @@ struct Log {
 }
 
 impl Log {
-    fn open(paths: &Paths, instance: &str, reporter: &Reporter) -> Result<(Arc<Self>, PathBuf)> {
+    pub(crate) fn open(paths: &Paths, instance: &str, reporter: &Reporter) -> Result<(Arc<Self>, PathBuf)> {
         let dir = paths.logs().join(instance);
         util::create_private_dir_all(&dir)?;
         prune_logs(&dir, KEEP_LAUNCH_LOGS - 1);
@@ -281,19 +282,19 @@ impl Log {
         }
     }
 
-    fn record(&self, source: Source, text: &str) {
+    pub(crate) fn record(&self, source: Source, text: &str) {
         self.record_as(Share::of(source), source, text);
     }
 
     /// Record and show live. `text` must already be sanitised if it came from the sandbox.
-    fn line(&self, source: Source, text: &str) {
+    pub(crate) fn line(&self, source: Source, text: &str) {
         self.record(source, text);
         self.reporter.log(source, text);
     }
 
     /// A line of the nested compositor: the launcher's by name, but with a share of its own,
     /// because how much that program prints is not the launcher's doing.
-    fn display_line(&self, text: &str) {
+    pub(crate) fn display_line(&self, text: &str) {
         self.record_as(Share::Display, Source::Launcher, text);
         self.reporter.log(Source::Launcher, text);
     }
@@ -301,7 +302,7 @@ impl Log {
 
 /// Forward one output stream of the sandbox, line by line. Everything is sanitised: the
 /// game's output is attacker-influenced text that must not reach a terminal raw.
-async fn relay_output(stream: impl AsyncRead + Unpin, source: Source, log: Arc<Log>) {
+pub(crate) async fn relay_output(stream: impl AsyncRead + Unpin, source: Source, log: Arc<Log>) {
     let mut reader = BufReader::with_capacity(64 * 1024, stream);
     let mut buf = Vec::with_capacity(1024);
     loop {
@@ -419,7 +420,13 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 
     // 1. Instance (signature verified here for curated profiles).
     let inst = instance::load(paths, &opts.instance)?;
+    // Minecraft Bedrock (round 5): a launch of its own — no Microsoft/Minecraft sign-in, no
+    // token store, no vault (see `bedrock::launch`).
+    if matches!(inst.kind, Kind::Bedrock(_)) {
+        return crate::bedrock::launch::launch(paths, cfg, opts, inst, reporter).await;
+    }
     match &inst.kind {
+        Kind::Bedrock(_) => unreachable!("Bedrock instances are launched by bedrock::launch, above"),
         Kind::Vanilla => say(&format!("instance {:?}: vanilla Minecraft {}", inst.id, inst.minecraft)),
         Kind::Curated { manifest, signed_by } => say(&format!(
             "instance {:?}: curated profile serial {} for Minecraft {} — signature by {signed_by:?} verified",
@@ -508,6 +515,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // The mods directory must match the signed list exactly (or be empty for vanilla).
     let mods_dir = inst.dir.join("mods");
     let (verified_mods, manifest) = match &inst.kind {
+        Kind::Bedrock(_) => unreachable!("Bedrock instances are launched by bedrock::launch"),
         Kind::Vanilla => (mods::verify_mods_dir(&mods_dir, &[])?, None),
         Kind::Curated { manifest, .. } => (mods::verify_mods_dir(&mods_dir, &manifest.mods)?, Some(manifest.as_ref())),
     };
@@ -1190,6 +1198,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 mode: cfg.sandbox.seccomp,
                 tripwire: cfg.sandbox.tripwire,
                 extra_allow: cfg.sandbox.extra_syscalls.clone(),
+                ..Default::default()
             },
         },
     };
@@ -1754,6 +1763,41 @@ fn realms_off_reason(cfg: &Config, mode: NetworkMode, demo: bool, phone_possible
     }
 }
 
+/// How a Realms join that waits for approval is shown outside the game, and how it ended: a
+/// line in the launch log (which names the prompt, never the code) and the `RealmsApproval`
+/// event (the terminal's text, or the front end's panel). The Java launch and the Bedrock
+/// launch (`bedrock::launch`, through the network package's broker) announce the same way.
+pub(crate) fn realms_announcer(reporter: &Reporter, log: &Arc<Log>) -> crate::realms::approval::Announcer {
+    use crate::realms::{Approve, approval};
+    let (reporter, log) = (reporter.clone(), log.clone());
+    Arc::new(move |a: &approval::Announcement| {
+        use crate::events::{ApprovalState, RealmsApproval, RealmsMode};
+        let state = match a.outcome {
+            None => ApprovalState::Waiting,
+            Some(approval::Outcome::Approved) => ApprovalState::Approved,
+            Some(approval::Outcome::Refused) => ApprovalState::Refused,
+            Some(approval::Outcome::Expired) => ApprovalState::Expired,
+        };
+        // The log file names the prompt, never the code.
+        let word = match state {
+            ApprovalState::Waiting => "waits for your approval (the code is shown on the terminal or in the front end)",
+            ApprovalState::Approved => "was approved",
+            ApprovalState::Refused => "was refused",
+            ApprovalState::Expired => "was not approved in time",
+        };
+        log.record(Source::Launcher, &format!("realms: the join to {} ({}) {word}", a.world, a.address));
+        reporter.emit(Event::RealmsApproval(RealmsApproval {
+            world: a.world.clone(),
+            address: a.address.clone(),
+            mode: if a.mode == Approve::Totp { RealmsMode::Totp } else { RealmsMode::Code },
+            code: a.code.clone(),
+            expires_in: a.expires_in,
+            attempts_left: u32::from(a.attempts_left),
+            state,
+        }));
+    })
+}
+
 /// Realms approvals for this launch (realms-sync): the TOTP secret (read now, while the token
 /// store can still be reached), the approvals, and the dialer — started now, before the
 /// launcher confines itself. `Ok(None)`: Realms is not brokered in this launch.
@@ -1782,37 +1826,7 @@ fn prepare_realms(
         }
         _ => None,
     };
-    let announce: approval::Announcer = {
-        let (reporter, log) = (reporter.clone(), log.clone());
-        Arc::new(move |a: &approval::Announcement| {
-            use crate::events::{ApprovalState, RealmsApproval, RealmsMode};
-            let state = match a.outcome {
-                None => ApprovalState::Waiting,
-                Some(approval::Outcome::Approved) => ApprovalState::Approved,
-                Some(approval::Outcome::Refused) => ApprovalState::Refused,
-                Some(approval::Outcome::Expired) => ApprovalState::Expired,
-            };
-            // The log file names the prompt, never the code.
-            let word = match state {
-                ApprovalState::Waiting => {
-                    "waits for your approval (the code is shown on the terminal or in the front end)"
-                }
-                ApprovalState::Approved => "was approved",
-                ApprovalState::Refused => "was refused",
-                ApprovalState::Expired => "was not approved in time",
-            };
-            log.record(Source::Launcher, &format!("realms: the join to {} ({}) {word}", a.world, a.address));
-            reporter.emit(Event::RealmsApproval(RealmsApproval {
-                world: a.world.clone(),
-                address: a.address.clone(),
-                mode: if a.mode == Approve::Totp { RealmsMode::Totp } else { RealmsMode::Code },
-                code: a.code.clone(),
-                expires_in: a.expires_in,
-                attempts_left: u32::from(a.attempts_left),
-                state,
-            }));
-        })
-    };
+    let announce = realms_announcer(reporter, log);
     let approvals = approval::Approvals::new(cfg.realms.approve, totp_state, crate::realms::PASS_ADDRESS, announce);
     let sink = log.clone();
     let dialer = dial::Dialer::start(&opts.program, Arc::new(move |line: String| sink.line(Source::Launcher, &line)))
@@ -1824,8 +1838,8 @@ fn prepare_realms(
 ///
 /// The event is what a front end draws its shields from, so the rule is in one place and
 /// has a test: a shield is `On` only for what was seen to be whole. Asked for, set up,
-/// started — none of that is "on" by itself.
-mod shields {
+/// started — none of that is "on" by itself. (The Bedrock launch reads them out the same way.)
+pub(crate) mod shields {
     use super::{Shield, confine, nested};
 
     /// The display, where nothing has to be started for it. `context_seen`: with a Wayland

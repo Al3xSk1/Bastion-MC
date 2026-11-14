@@ -291,6 +291,7 @@ pub fn prepare(setup: Setup<'_>) -> Option<Box<dyn Service>> {
             mode: setup.cfg.sandbox.seccomp,
             tripwire: setup.cfg.sandbox.tripwire,
             extra_allow: Vec::new(),
+            ..Default::default()
         };
         let limits = if setup.scopes {
             Some(

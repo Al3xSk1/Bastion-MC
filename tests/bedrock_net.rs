@@ -4,8 +4,9 @@
 //! — the real namespace helper, resolver, relay and service broker on the host side, a stand-in
 //! RakNet server (unconnected ping/pong, open connection request 1 and 2) and a stand-in for the
 //! Realms API and the gatherings service (real TLS, a throw-away certificate hierarchy, scripted
-//! answers), and the approval given through `bedrock::net::answer_join`, as a trusted input
-//! would give it.
+//! answers), and the approval given as the launch wires it: the code typed into the trusted
+//! input (`Reporter::answers`, the terminal or the front end's `answer realms` line), handed to
+//! the session's approvals by `realms::answers` — here delivered with `answer_for_test`.
 //!
 //! Not used: the real game, a real Bedrock server, Realms or the gatherings service, and a
 //! Microsoft account — none of them exists on this machine (docs/notes/bedrock-net.md).
@@ -26,11 +27,15 @@ use bastion_mc::{
     },
     confine::{self, Confinement, Demand, Support},
     egress::raknet::{self, Offline},
+    events::{Answer, AnswerKind, AnswerReceiver, Reporter},
     net::{
         http::HttpClient,
         tls::{self, PinSet},
     },
-    realms::{Approve, approval::Announcement},
+    realms::{
+        Approve,
+        approval::{Announcement, Outcome},
+    },
     sandbox::{
         self, BaseOptions, Network, Resolv, SandboxSpec,
         policy::{InitPolicy, SeccompPolicy, TcpPolicy},
@@ -391,28 +396,47 @@ fn http_for(upstream: Option<&Upstream>) -> HttpClient {
 
 type Heard = Arc<Mutex<Vec<Announcement>>>;
 
-fn options<'a>(cfg: &'a BedrockConfig, approve: Approve, heard: &Heard) -> Options<'a> {
-    let heard = heard.clone();
-    Options {
-        cfg,
-        instance_servers: &[],
-        approve,
-        proxied: false,
-        announce: Arc::new(move |a: &Announcement| heard.lock().unwrap().push(a.clone())),
+/// The trusted input of one session, as the Bedrock launch takes it: a reporter (capturing,
+/// here, so that the test can type into it) and, when joins are brokered, its Realms answers.
+struct Trusted {
+    reporter: Reporter,
+    answers: Option<AnswerReceiver>,
+}
+
+impl Trusted {
+    fn new() -> Self {
+        Trusted { reporter: Reporter::capture(), answers: None }
     }
 }
 
-/// Answer each prompt with its code, as a trusted input would (`answer realms <digits>`) — after
-/// a second and a half, as a person reading the prompt would, so that the game asks again while
-/// the join waits.
+/// The network package's options as the launch builds them: the announcer records what is shown
+/// and, when joins are brokered, tells the trusted input that a prompt waits
+/// (`realms::answers::tracking`).
+fn options<'a>(cfg: &'a BedrockConfig, approve: Approve, heard: &Heard, trusted: &mut Trusted) -> Options<'a> {
+    let heard = heard.clone();
+    let mut announce: bastion_mc::realms::approval::Announcer =
+        Arc::new(move |a: &Announcement| heard.lock().unwrap().push(a.clone()));
+    if approve != Approve::Off {
+        let answers = trusted.reporter.answers(AnswerKind::Realms).unwrap();
+        announce = bastion_mc::realms::answers::tracking(announce, answers.pending_handle());
+        trusted.answers = Some(answers);
+    }
+    Options { cfg, instance_servers: &[], approve, proxied: false, announce }
+}
+
+/// Answer each prompt with its code, as a person at the trusted input would (`answer realms
+/// <digits>`) — after a second and a half, so that the game asks again while the join waits.
+/// The answers reach the approvals the way they do in a launch, through `realms::answers::serve`.
 fn answerer(
     prepared: &Prepared,
     heard: &Heard,
     answers: &Arc<Mutex<Vec<String>>>,
-) -> Option<tokio::task::JoinHandle<()>> {
+    trusted: &mut Trusted,
+) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
     let approvals = prepared.approvals()?;
-    let (heard, answers) = (heard.clone(), answers.clone());
-    Some(tokio::spawn(async move {
+    let serving = bastion_mc::realms::answers::serve(trusted.answers.take()?, approvals, trusted.reporter.clone());
+    let (heard, answers, reporter) = (heard.clone(), answers.clone(), trusted.reporter.clone());
+    let typing = tokio::spawn(async move {
         let mut answered = 0;
         // Bounded: 60 s of looking, twenty times a second.
         for _ in 0..1200 {
@@ -421,21 +445,28 @@ fn answerer(
                 heard.lock().unwrap().iter().filter(|a| a.outcome.is_none()).filter_map(|a| a.code.clone()).collect();
             if codes.len() > answered {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
-                let said = bnet::answer_join(&approvals, &codes[answered]);
-                answers.lock().unwrap().push(said);
+                let delivery = reporter.answer_for_test(AnswerKind::Realms, Answer::Text(codes[answered].clone()));
+                answers.lock().unwrap().push(format!("{delivery:?}"));
                 answered += 1;
             }
         }
-    }))
+    });
+    Some((typing, serving))
+}
+
+/// Was a join approved (its prompt's announcement says so)?
+fn approved(heard: &[Announcement]) -> bool {
+    heard.iter().any(|a| a.outcome == Some(Outcome::Approved))
 }
 
 /// One session: the client's script, start to end.
 async fn session(cfg: BedrockConfig, approve: Approve, upstream: Option<&Upstream>, body: &str) -> Session {
     let heard: Heard = Arc::default();
     let answers: Arc<Mutex<Vec<String>>> = Arc::default();
-    let prepared = bnet::prepare(options(&cfg, approve, &heard)).unwrap().allowing_loopback_for_tests();
+    let mut trusted = Trusted::new();
+    let prepared = bnet::prepare(options(&cfg, approve, &heard, &mut trusted)).unwrap().allowing_loopback_for_tests();
     let mut running = sandboxed(&prepared, body);
-    let answering = answerer(&prepared, &heard, &answers);
+    let answering = answerer(&prepared, &heard, &answers, &mut trusted);
     let log = Arc::new(Mutex::new(Vec::new()));
     let sink = log.clone();
     let spec = prepared.netns_spec();
@@ -459,8 +490,9 @@ async fn session(cfg: BedrockConfig, approve: Approve, upstream: Option<&Upstrea
     .await
     .expect("the client finished");
     tokio::time::sleep(Duration::from_millis(300)).await; // let the relay log what ended
-    if let Some(task) = answering {
-        task.abort();
+    if let Some((typing, serving)) = answering {
+        typing.abort();
+        serving.abort();
     }
     let stats = relay.stats();
     let udp = (
@@ -615,7 +647,8 @@ status, body = curl(R + "/worlds/7/join"); show("again", status)
     assert_eq!(prompt.world, "Castle", "{:?}", s.heard);
     assert_eq!(prompt.address, server.addr.to_string());
     assert!(prompt.code.is_some() && prompt.outcome.is_none());
-    assert_eq!(s.answers[0], "approved: the game may now join that server, once");
+    assert_eq!(s.answers[0], "Delivered", "the code went to the trusted input");
+    assert!(approved(&s.heard), "and approved the join: {:?}", s.heard);
     // What the server saw came from the host side; the handshake reached it intact.
     assert!(server.saw("open connection request 1").iter().all(|(from, len)| from.ip().is_loopback() && *len == 1464));
     assert!(!server.saw("open connection request 2").is_empty());
@@ -698,7 +731,8 @@ status, body = curl(G + "/api/v2.0/join/experience", "POST", "not json"); show("
     assert_eq!(s.get("garbage"), "400", "a join request that names no experience is refused");
     assert_eq!(s.heard[0].world, "Stand-in Live Event", "{:?}", s.heard);
     assert_eq!(s.heard[0].address, server.addr.to_string());
-    assert_eq!(s.answers[0], "approved: the game may now join that server, once", "totp acts as the code");
+    assert_eq!(s.answers[0], "Delivered", "totp acts as the code: the code shown was typed");
+    assert!(approved(&s.heard), "and approved the join: {:?}", s.heard);
     assert!(s.logged("the approved join to the event server \"Stand-in Live Event\""), "{}", s.dump());
     let seen = up.seen.lock().unwrap().clone();
     assert!(
@@ -735,7 +769,9 @@ async fn confined_child() {
     let cfg = BedrockConfig { servers: servers(&[("localhost", server.addr.port())]), ..BedrockConfig::default() };
     let heard: Heard = Arc::default();
     let answers: Arc<Mutex<Vec<String>>> = Arc::default();
-    let prepared = bnet::prepare(options(&cfg, Approve::Code, &heard)).unwrap().allowing_loopback_for_tests();
+    let mut trusted = Trusted::new();
+    let prepared =
+        bnet::prepare(options(&cfg, Approve::Code, &heard, &mut trusted)).unwrap().allowing_loopback_for_tests();
     let port = server.addr.port();
     let body = format!(
         r#"
@@ -753,7 +789,7 @@ r, src = exchange(udp(), (a[0], int(a[1])), ping(), tries=3); show("pass", kind(
     keep.tcp_connect.push(up.addr.port()); // the stand-in's port, in place of 443
     let applied = confine::apply(&keep, Demand::Whole).expect("confining the child");
     assert!(applied.is_whole());
-    let answering = answerer(&prepared, &heard, &answers);
+    let answering = answerer(&prepared, &heard, &answers, &mut trusted);
     let log = Arc::new(Mutex::new(Vec::new()));
     let sink = log.clone();
     let spec = prepared.netns_spec();
@@ -769,8 +805,9 @@ r, src = exchange(udp(), (a[0], int(a[1])), ping(), tries=3); show("pass", kind(
     let mut stdout = String::new();
     tokio::time::timeout(Duration::from_secs(90), out.read_to_string(&mut stdout)).await.unwrap().unwrap();
     let _ = running.child.wait().await;
-    if let Some(task) = answering {
-        task.abort();
+    if let Some((typing, serving)) = answering {
+        typing.abort();
+        serving.abort();
     }
     relay.shutdown();
     // Control: the confinement is in force — a TCP connection to a port it does not list.

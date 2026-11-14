@@ -35,7 +35,7 @@ use crate::{
     net::http::HttpClient,
     realms::{
         Approve,
-        approval::{Announcer, Answer, Approvals},
+        approval::{Announcer, Approvals},
     },
     sandbox::netns::NetnsSpec,
 };
@@ -222,9 +222,9 @@ impl Prepared {
         keep.tcp_connect.dedup();
     }
 
-    /// The approvals of this launch, when joins are brokered: what a trusted input answers
-    /// ([`answer_join`]). Available from here on, so that the input can be wired before the game
-    /// starts.
+    /// The approvals of this launch, when joins are brokered: what the trusted input answers
+    /// (the launch hands it to `realms::answers::serve`). Available from here on, so that the
+    /// input can be wired before the game starts.
     pub fn approvals(&self) -> Option<Arc<Approvals>> {
         self.approvals.clone()
     }
@@ -330,30 +330,6 @@ pub fn describe_proxy(proxy: std::net::SocketAddr) -> String {
          approved join, and the lookup of the servers' names (your resolver sees those) — all of these come from your \
          address"
     )
-}
-
-/// What a trusted input — the terminal of a terminal launch, the front end's `answer realms
-/// <text>` line in event mode, never the game — says about a waiting join: the six digits shown
-/// with it, or `cancel`. Anything else counts as a wrong code (a guess is a guess). Returns the
-/// sentence to show the user.
-pub fn answer_join(approvals: &Approvals, text: &str) -> String {
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("cancel") {
-        return if approvals.cancel() { "the waiting join was cancelled" } else { "no join is waiting" }.into();
-    }
-    let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let answer = if digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit()) {
-        approvals.answer(&digits)
-    } else {
-        approvals.answer("x")
-    };
-    match answer {
-        Answer::Approved => "approved: the game may now join that server, once".into(),
-        Answer::Wrong { attempts_left } => format!("wrong code ({attempts_left} attempt(s) left)"),
-        Answer::Refused => "wrong code: the join was refused".into(),
-        Answer::NoPrompt => "no join is waiting for a code".into(),
-        Answer::Locked => "too many wrong codes: joins are refused until the next launch".into(),
-    }
 }
 
 #[cfg(test)]
@@ -464,34 +440,6 @@ mod tests {
         };
         let err = prepare(options(&cfg, Approve::Off, false, Arc::default())).err().unwrap().to_string();
         assert!(err.contains("bad host"), "{err}");
-    }
-
-    #[test]
-    fn a_trusted_answer_approves_the_waiting_join_with_its_code_and_nothing_else_does() {
-        let heard: Arc<std::sync::Mutex<Vec<crate::realms::approval::Announcement>>> = Arc::default();
-        let cfg = BedrockConfig::default();
-        let prepared = prepare(options(&cfg, Approve::Code, false, heard.clone())).unwrap();
-        let approvals = prepared.approvals().unwrap();
-        assert_eq!(answer_join(&approvals, "123456"), "no join is waiting for a code");
-        assert_eq!(approvals.join_requested(7), crate::realms::approval::JoinStep::Forward);
-        let address = crate::realms::table::Address { host: "203.0.113.9".into(), port: 19132 };
-        approvals.prompt(7, address, b"{}".to_vec());
-        let code = heard.lock().unwrap()[0].code.clone().expect("the code is shown outside the game");
-        let wrong = if code == "000000" { "000001" } else { "000000" };
-        assert_eq!(answer_join(&approvals, wrong), "wrong code (2 attempt(s) left)");
-        assert_eq!(answer_join(&approvals, "12 34"), "wrong code (1 attempt(s) left)", "malformed is an attempt");
-        assert_eq!(
-            answer_join(&approvals, &format!(" {} {} ", &code[..3], &code[3..])),
-            "approved: the game may now join that server, once"
-        );
-        // Until the game has been given the pass, the user may still change their mind.
-        assert_eq!(answer_join(&approvals, "cancel"), "the waiting join was cancelled");
-        assert_ne!(
-            approvals.join_requested(7),
-            crate::realms::approval::JoinStep::Deliver(b"{}".to_vec()),
-            "a cancelled approval delivers nothing"
-        );
-        assert_eq!(answer_join(&approvals, "cancel"), "no join is waiting");
     }
 
     #[test]

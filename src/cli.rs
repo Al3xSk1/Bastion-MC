@@ -78,6 +78,8 @@ USAGE: bastion-mc [--events] <command> [options]
 
   versions [--snapshots] [--limit N]  list Minecraft versions from Mojang's manifest
   instance new <id> --minecraft <version>     create a vanilla instance
+  instance new <id> --bedrock <version>       create a Minecraft Bedrock instance (a version imported with
+                                      `bedrock import`; its worlds are kept, the game's sign-in never is)
   instance list
   install <id> [--repair]             download and verify an instance's files without launching
   launch  <id> [--account NAME] [--join HOST[:PORT]] [--demo] [--burner] [--repair] [--quiet]
@@ -269,6 +271,7 @@ fn instance_summaries(paths: &Paths) -> Result<Vec<events::Instance>> {
             Ok(inst) => {
                 let (kind, detail) = match &inst.kind {
                     Kind::Vanilla => ("vanilla", None),
+                    Kind::Bedrock(_) => ("bedrock", Some("Minecraft Bedrock, the Android build".to_string())),
                     Kind::Curated { manifest, signed_by } => {
                         ("curated", Some(format!("serial {}, signed by {signed_by}", manifest.serial)))
                     }
@@ -479,15 +482,36 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             }
             "new" => {
                 let id = args.positional("instance id")?;
-                let mut minecraft = None;
+                let (mut minecraft, mut bedrock) = (None, None);
                 args.flags(|name, a| {
-                    if name == "minecraft" {
-                        minecraft = Some(a.value("--minecraft")?);
-                        return Ok(true);
+                    match name {
+                        "minecraft" => minecraft = Some(a.value("--minecraft")?),
+                        "bedrock" => bedrock = Some(a.value("--bedrock")?),
+                        _ => return Ok(false),
                     }
-                    Ok(false)
+                    Ok(true)
                 })?;
-                let minecraft = minecraft.ok_or_else(|| usage("--minecraft <version> is required"))?;
+                if let Some(version) = bedrock {
+                    if minecraft.is_some() {
+                        return Err(usage("--minecraft and --bedrock exclude each other"));
+                    }
+                    let dir = instance::create_bedrock(&paths, &id, &version)?;
+                    reporter.status(format!(
+                        "created Minecraft Bedrock instance {id} for version {version} at {}",
+                        dir.display()
+                    ));
+                    if !crate::bedrock::store::versions_dir(&paths).join(&version).is_dir() {
+                        reporter.status(format!(
+                            "version {version} is not imported yet: `bastion-mc bedrock import <directory>` adds it"
+                        ));
+                    }
+                    if machine {
+                        reporter.emit(Event::Instances { instances: instance_summaries(&paths)? });
+                    }
+                    return Ok(0);
+                }
+                let minecraft =
+                    minecraft.ok_or_else(|| usage("--minecraft <version> (or --bedrock <version>) is required"))?;
                 let dir = instance::create(&paths, &id, Some(&minecraft))?;
                 reporter
                     .status(format!("created vanilla instance {id} for Minecraft {minecraft} at {}", dir.display()));
@@ -712,6 +736,9 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             let dir = paths.instance(&id)?;
             if !dir.is_dir() {
                 return Err(usage(format!("no instance called {id:?}")));
+            }
+            if crate::bedrock::launch::instance::is_bedrock_instance(&paths, &id) {
+                return Err(crate::bedrock::launch::instance::java_only(&format!("pack {sub}"), &id));
             }
             let operand = match sub.as_str() {
                 "import" => Some(args.positional("pack file")?),
@@ -1221,6 +1248,9 @@ fn key_command(args: &mut Args, paths: &Paths) -> Result<()> {
 
 fn profile_command(args: &mut Args, paths: &Paths, sub: &str, id: &str) -> Result<()> {
     validate_id(id)?;
+    if crate::bedrock::launch::instance::is_bedrock_instance(paths, id) {
+        return Err(crate::bedrock::launch::instance::java_only(&format!("profile {sub}"), id));
+    }
     match sub {
         "add" | "check" => return crate::profile::catalog::command(&mut args.parser, paths, sub, id),
         "new" => {
@@ -1333,6 +1363,7 @@ fn profile_command(args: &mut Args, paths: &Paths, sub: &str, id: &str) -> Resul
             args.flags(|_, _| Ok(false))?;
             let inst = instance::load(paths, id)?;
             match &inst.kind {
+                Kind::Bedrock(_) => return Err(crate::bedrock::launch::instance::java_only("profile verify", id)),
                 Kind::Vanilla => {
                     mods::verify_mods_dir(&inst.dir.join("mods"), &[])?;
                     println!(

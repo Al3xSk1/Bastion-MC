@@ -23,6 +23,10 @@
 //! A *vanilla* instance runs an unmodified Mojang version and needs no signature: its whole
 //! content is covered by Mojang's hash chain. A *curated* instance exists only by virtue of
 //! a manifest signed by a trusted key.
+//!
+//! A *Bedrock* instance (`kind = "bedrock"`, round 5) has none of the above: `instance.toml`
+//! and `bedrock-data/`, where its worlds and the game's settings are kept between sessions —
+//! and nothing else, the game's sign-in least of all (see `bedrock::launch`).
 
 use std::{
     fs,
@@ -58,7 +62,13 @@ pub const OWN_FILES: [&str; 4] = ["instance.toml", MANIFEST_FILE, SIGNATURE_FILE
 #[derive(Debug)]
 pub enum Kind {
     Vanilla,
-    Curated { manifest: Box<ProfileManifest>, signed_by: String },
+    Curated {
+        manifest: Box<ProfileManifest>,
+        signed_by: String,
+    },
+    /// Minecraft: Bedrock Edition, the Android build run by `mcpelauncher-client` (see
+    /// `bedrock`). `Instance::minecraft` holds its version id.
+    Bedrock(crate::bedrock::launch::instance::InstanceSettings),
 }
 
 #[derive(Debug)]
@@ -179,6 +189,22 @@ pub fn create(paths: &Paths, id: &str, minecraft: Option<&str>) -> Result<PathBu
     Ok(dir)
 }
 
+/// Create a Bedrock instance (`instance new <id> --bedrock <version>`): its `instance.toml`
+/// and the directory its worlds and settings are kept in. None of the Java directories.
+pub fn create_bedrock(paths: &Paths, id: &str, version: &str) -> Result<PathBuf> {
+    use crate::bedrock::launch::instance as bedrock;
+    crate::paths::validate_id(version).map_err(|_| {
+        Error::Usage(format!("{version:?} is not a Bedrock version id (see `bastion-mc bedrock versions`)"))
+    })?;
+    let dir = paths.instance(id)?;
+    if dir.exists() {
+        return Err(Error::Usage(format!("instance {id:?} already exists at {}", dir.display())));
+    }
+    util::create_private_dir_all(&dir.join(bedrock::DATA_DIR))?;
+    util::write_atomic(&dir.join("instance.toml"), bedrock::template(version).as_bytes(), 0o600)?;
+    Ok(dir)
+}
+
 /// Read the raw manifest and signature of a curated instance (`None` for vanilla).
 pub fn read_signed_manifest(dir: &Path) -> Result<Option<(Vec<u8>, SignatureFile)>> {
     let manifest_path = dir.join(MANIFEST_FILE);
@@ -214,6 +240,25 @@ pub fn load(paths: &Paths, id: &str) -> Result<Instance> {
     }
     util::require_private(&dir)?;
     let config = InstanceConfig::load(&dir)?;
+
+    // A Bedrock instance (round 5): no signed mod profile, nothing from Mojang's Java manifest.
+    if let (true, Some(settings)) = (crate::bedrock::launch::instance::is_bedrock(&config), &config.bedrock) {
+        if dir.join(MANIFEST_FILE).exists() || dir.join(SIGNATURE_FILE).exists() {
+            return Err(Error::Config(format!(
+                "{} is a Bedrock instance and has no mod profile, but {MANIFEST_FILE} or {SIGNATURE_FILE} is there; \
+                 remove it",
+                dir.display()
+            )));
+        }
+        let settings = settings.clone();
+        return Ok(Instance {
+            id: id.to_string(),
+            dir,
+            minecraft: settings.version.clone(),
+            config,
+            kind: Kind::Bedrock(settings),
+        });
+    }
 
     match read_signed_manifest(&dir)? {
         None => {

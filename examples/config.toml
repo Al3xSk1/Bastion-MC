@@ -237,3 +237,4 @@ telemetry = true           # Microsoft's telemetry hosts; challenge capes may de
 persist_worlds = true      # worlds survive a session; the game's sign-in tokens never do
 seccomp = "enforce"        # "enforce", or "log" once, to profile the real client
 servers = []               # Bedrock servers to join, e.g. [{ host = "play.example.org", port = 19132 }]
+extra_syscalls = []        # calls the client needs beyond its allowlist (found with seccomp = "log")

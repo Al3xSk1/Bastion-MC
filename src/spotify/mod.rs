@@ -157,6 +157,7 @@ async fn connect_mpris(setup: &Setup<'_>) -> std::result::Result<(Live, mpsc::Re
         mode: setup.cfg.sandbox.seccomp,
         tripwire: setup.cfg.sandbox.tripwire,
         extra_allow: Vec::new(),
+        ..Default::default()
     };
     let proxy =
         Proxy::start(&bus, &base, setup.program, seccomp, setup.log.clone()).await.map_err(|e| e.to_string())?;

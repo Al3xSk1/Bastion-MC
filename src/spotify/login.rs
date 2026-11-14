@@ -204,6 +204,7 @@ pub async fn status(paths: &Paths, cfg: &Config, program: &Path, offline: bool, 
                     mode: cfg.sandbox.seccomp,
                     tripwire: cfg.sandbox.tripwire,
                     extra_allow: Vec::new(),
+                    ..Default::default()
                 };
                 let sink: mpris::Sink = Arc::new(|_| {});
                 let checked = async {

@@ -28,6 +28,7 @@
 //! `signin` (the `mcpelauncher-webview` bridge), `policy` plus scram, canary and the
 //! documents.
 
+pub mod launch;
 pub mod net;
 pub mod policy;
 pub mod runtime;
@@ -55,12 +56,18 @@ pub struct BedrockConfig {
     /// never do: its token store is wiped when the session ends, whatever this says.
     pub persist_worlds: bool,
     /// The system-call filter of the client: `enforce`, or `log` to profile the real client
-    /// once (the filter then reports instead of killing; the launch says so loudly).
+    /// once (calls outside its allowlist are then let through and logged by the kernel; the
+    /// tripwire and the refusal of namespaces and keyrings stay; the launch says so loudly).
     pub seccomp: SeccompMode,
     /// Bedrock servers every Bedrock instance may join (RakNet over UDP); an instance adds
     /// its own in its `instance.toml`. Realms and event servers are not listed here: they are
     /// brokered, and each join is approved outside the game (`[realms] approve`).
     pub servers: Vec<BedrockServer>,
+    /// System calls added to the client's own allowlist (names as in `sandbox.extra_syscalls`),
+    /// for what a profile taken with `seccomp = "log"` showed missing. The tripwire, new
+    /// namespaces, the keyrings, io_uring and the argument-checked calls cannot be named.
+    /// (launch package; see `bedrock::launch`)
+    pub extra_syscalls: Vec<String>,
 }
 
 impl Default for BedrockConfig {
@@ -72,6 +79,7 @@ impl Default for BedrockConfig {
             persist_worlds: true,
             seccomp: SeccompMode::Enforce,
             servers: Vec::new(),
+            extra_syscalls: Vec::new(),
         }
     }
 }

@@ -13,6 +13,10 @@
 //! Nothing here trusts a path twice: jars are bound by the descriptor they were hashed from,
 //! generated files are passed as sealed memfds, and bwrap's own option list travels over a
 //! descriptor so the host-visible command line is just `bwrap --args N -- /bastion/init …`.
+//!
+//! Minecraft Bedrock's `mcpelauncher-client` runs in the same sandbox with a profile of its own
+//! (`bedrock::launch::profile`: its mounts and Landlock rights; `seccomp::BEDROCK_ALLOW`: its
+//! system-call allowlist).
 
 pub mod cgroup;
 pub mod display;
@@ -89,6 +93,12 @@ pub enum Mount {
     /// Bind the exact file behind an open descriptor (the one that was verified).
     RoBindFd {
         file: File,
+        dst: PathBuf,
+    },
+    /// Read-write bind of the directory behind an open descriptor (`O_PATH` suffices): the
+    /// directory that was checked is the one mounted, even if its path is replaced meanwhile.
+    BindFd {
+        dir: OwnedFd,
         dst: PathBuf,
     },
     /// Materialise bytes as a read-only file that exists only inside the sandbox.
@@ -290,6 +300,7 @@ pub(crate) fn mount_args(args: &mut Args, mount: Mount) -> Result<()> {
         Mount::Bind { src, dst } => args.push("--bind").push(src).push(dst),
         Mount::DevBind { src, dst } => args.push("--dev-bind").push(src).push(dst),
         Mount::RoBindFd { file, dst } => args.push("--ro-bind-fd").fd(file.into()).push(dst),
+        Mount::BindFd { dir, dst } => args.push("--bind-fd").fd(dir).push(dst),
         Mount::RoData { data, dst, mode } => {
             let fd = sealed_memfd("bastion-data", &data)?;
             args.perms(mode).push("--ro-bind-data").fd(fd).push(dst)

@@ -339,7 +339,7 @@ pub fn decide(cfg: &CompanionConfig, kind: &Kind, minecraft: &str, java_major: u
         return Err(Skip::Disabled);
     }
     let loader = match kind {
-        Kind::Vanilla => None,
+        Kind::Vanilla | Kind::Bedrock(_) => None,
         Kind::Curated { manifest, .. } => manifest.loader.as_ref(),
     };
     let Some(loader) = loader else { return Err(Skip::NoLoader) };

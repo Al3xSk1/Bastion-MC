@@ -314,7 +314,12 @@ fn use_x11(d: &mut Desktop, cfg: &SandboxConfig, paths: &Paths, number: u32, soc
                         dir: paths.cache.join(format!("display-{}", util::hex_encode(&util::random_bytes::<6>()?))),
                         layers: cfg.nested_compositor_layers.clone(),
                         limits: None,
-                        seccomp: SeccompPolicy { mode: cfg.seccomp, tripwire: cfg.tripwire, extra_allow: Vec::new() },
+                        seccomp: SeccompPolicy {
+                            mode: cfg.seccomp,
+                            tripwire: cfg.tripwire,
+                            extra_allow: Vec::new(),
+                            ..Default::default()
+                        },
                         // "require" asks for the whole of what the nested compositor is for.
                         require_clipboard_cut: mode == IsolationMode::Require,
                         preload_clipboard_cut: true,

@@ -860,6 +860,10 @@ pub struct InstanceConfig {
     pub network: InstanceNetwork,
     /// This instance's own companion settings, on top of the global `[companion]`.
     pub companion: crate::companion::CompanionOverride,
+    /// `"bedrock"` for a Minecraft Bedrock instance (absent: Java); see `bedrock::launch::instance`.
+    pub kind: Option<crate::bedrock::launch::instance::InstanceKind>,
+    /// A Bedrock instance's own settings (`[bedrock]`: its version and servers).
+    pub bedrock: Option<crate::bedrock::launch::instance::InstanceSettings>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -893,6 +897,7 @@ impl InstanceConfig {
             s.to_rule()?;
         }
         cfg.companion.validate()?;
+        crate::bedrock::launch::instance::validate(&cfg, &file)?;
         Ok(cfg)
     }
 }
