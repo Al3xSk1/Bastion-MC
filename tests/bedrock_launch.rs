@@ -59,6 +59,23 @@ use tokio_rustls::TlsAcceptor;
 const INSTANCE: &str = "bedrock-test";
 const HOST: &str = "client.discovery.minecraft-services.net";
 const BODY: &str = "standin-ok";
+/// The state the stand-in's sign-in request carries (`tests/support/bedrock_standin.rs`).
+const STATE: &str = "standin-state-1";
+/// The address a browser would end on, for that request: what the user hands back.
+const FINAL: &str = "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.standin-code&lc=1033&state=standin-state-1";
+/// What the game must be given for it: rebuilt from the code and the state alone.
+const REBUILT: &str = "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.standin-code&state=standin-state-1";
+
+/// What the person at the trusted input does when the game's sign-in page is shown outside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtTheInput {
+    /// First pastes the address of another sign-in (refused, the prompt stays), then the right
+    /// one; and, while the page waits (so the session certainly runs), tries to remove the
+    /// version the session runs on.
+    SignIn,
+    /// Refuses the sign-in.
+    Cancel,
+}
 
 /// The stand-in client, compiled once per source text.
 fn standin(tmp: &Path) -> PathBuf {
@@ -188,15 +205,18 @@ impl World {
     }
 
     /// Run one session on the test's own version directory (opened without the store's check).
-    async fn session(&self, number: u32, confine: ConfineMode) -> Session {
+    async fn session(&self, number: u32, confine: ConfineMode, input: AtTheInput) -> Session {
         std::fs::write(self.version.join("standin-probes.txt"), self.probes(number)).unwrap();
         let version = open_dir_unverified("1.26.62.1-standin", &self.version).unwrap();
-        self.session_with(version, confine).await
+        self.session_with(version, confine, input).await
     }
 
-    /// Run one session on `version`; the game's `key=value` lines, the status lines, every event.
-    async fn session_with(&self, version: OpenedVersion, confine: ConfineMode) -> Session {
+    /// Run one session on `version`; the game's `key=value` lines, the status lines, every event,
+    /// and what was done at the trusted input.
+    async fn session_with(&self, version: OpenedVersion, confine: ConfineMode, input: AtTheInput) -> Session {
         let reporter = Reporter::capture();
+        let typed: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let person = tokio::spawn(at_the_input(reporter.clone(), self.paths.clone(), input, typed.clone()));
         let opts = LaunchOptions {
             instance: INSTANCE.into(),
             account: "default".into(),
@@ -220,6 +240,9 @@ impl World {
         )
         .await
         .expect("the session did not end");
+        // What was done at the input is written down to the end (the session's events are all in).
+        let _ = tokio::time::timeout(Duration::from_secs(10), person).await;
+        let typed = typed.lock().unwrap().clone();
         let events = reporter.captured();
         let mut game = BTreeMap::new();
         let mut lines = Vec::new();
@@ -236,7 +259,8 @@ impl World {
                 _ => {}
             }
         }
-        Session { outcome: outcome.map_err(|e| e.to_string()), game, lines, events }
+        lines.extend(typed.iter().map(|t| format!("input    | {t}")));
+        Session { outcome: outcome.map_err(|e| e.to_string()), game, lines, events, typed }
     }
 }
 
@@ -245,6 +269,67 @@ struct Session {
     game: BTreeMap<String, String>,
     lines: Vec<String>,
     events: Vec<Event>,
+    /// What [`at_the_input`] did and saw, in order.
+    typed: Vec<String>,
+}
+
+/// The person at the trusted input (the front end's `answer signin` line, or the terminal):
+/// waits for the sign-in prompt the game's request raised, then acts as `input` says. Writes
+/// down what it did and what the launcher answered.
+async fn at_the_input(reporter: Reporter, paths: Paths, input: AtTheInput, typed: Arc<std::sync::Mutex<Vec<String>>>) {
+    use bastion_mc::events::{Answer, AnswerKind, SignInState};
+    let note = |text: String| typed.lock().unwrap().push(text);
+    let pages = |reporter: &Reporter| -> Vec<bastion_mc_proto::SignInPage> {
+        reporter
+            .captured()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::SignInPage(page) => Some(page),
+                _ => None,
+            })
+            .collect()
+    };
+    let waited = |n: usize| {
+        let reporter = reporter.clone();
+        async move {
+            // Bounded: 60 s of looking, twenty times a second, and no longer than the session.
+            for _ in 0..1200 {
+                let seen = pages(&reporter);
+                let over = reporter.captured().iter().any(|e| matches!(e, Event::Exited { .. }));
+                if seen.len() >= n || over {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            pages(&reporter)
+        }
+    };
+    let first = waited(1).await;
+    let Some(page) = first.first() else { return note("no sign-in prompt appeared".into()) };
+    note(format!("prompt: {:?} {} attempts, page {}", page.state, page.attempts_left, page.url));
+    if page.state != SignInState::Waiting {
+        return;
+    }
+    match input {
+        AtTheInput::Cancel => {
+            note(format!("cancel: {:?}", reporter.answer_for_test(AnswerKind::SignIn, Answer::Cancel)));
+        }
+        AtTheInput::SignIn => {
+            // The session runs (its game waits for this prompt): the version is held.
+            note(match store::remove(&paths, "1.26.62.1") {
+                Ok(_) => "remove: the version was removed during the session".into(),
+                Err(e) => format!("remove refused: {e}"),
+            });
+            let other = FINAL.replace(STATE, "another-sign-in");
+            note(format!("other: {:?}", reporter.answer_for_test(AnswerKind::SignIn, Answer::Text(other))));
+            let verdict = waited(2).await;
+            let said = verdict.get(1).map(|p| (p.state, p.note.clone()));
+            note(format!("verdict on the other: {said:?}"));
+            note(format!("final: {:?}", reporter.answer_for_test(AnswerKind::SignIn, Answer::Text(FINAL.into()))));
+        }
+    }
+    let ended = waited(if input == AtTheInput::Cancel { 2 } else { 3 }).await;
+    note(format!("ended: {:?}", ended.last().map(|p| p.state)));
 }
 
 impl Session {
@@ -376,8 +461,13 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     std::fs::write(source.join("assets/standin-probes.txt"), world.probes(1)).unwrap();
     store::import(&paths, &source, None, &Reporter::capture()).expect("importing the stand-in version");
     let library = std::fs::metadata(source.join("lib/x86_64/libminecraftpe.so")).unwrap().len();
-    let one =
-        world.session_with(store::open(&paths, "1.26.62.1").expect("the imported version"), ConfineMode::Off).await;
+    let one = world
+        .session_with(
+            store::open(&paths, "1.26.62.1").expect("the imported version"),
+            ConfineMode::Off,
+            AtTheInput::SignIn,
+        )
+        .await;
     if std::env::var_os("BASTION_TEST_VERBOSE").is_some() {
         println!("{}", one.dump());
     }
@@ -401,6 +491,37 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     one.expect("webview.path", &client_dir.join("bin/mcpelauncher-webview").display().to_string());
     one.expect("webview.same_as_init", "true");
     one.expect("webview.fake_ran", "false");
+    // The sign-in, end to end: the stand-in (as the client does) ran the stub inside the
+    // sandbox, under the client's Landlock and system-call filter; the stub reached the
+    // launcher's bridge; the server checked the request and showed the page outside the game;
+    // the address of another sign-in was refused (and the prompt stayed); the right one went
+    // back to the stub, which printed it — rebuilt from the code and the state alone — on the
+    // standard output the client reads.
+    let typed = one.typed.join("\n");
+    assert!(
+        typed.contains("prompt: Waiting 10 attempts, page https://login.live.com/oauth20_authorize.srf?"),
+        "{}",
+        one.dump()
+    );
+    assert!(
+        typed.contains("other: Delivered") && typed.contains("verdict on the other: Some((Waiting, Some("),
+        "{}",
+        one.dump()
+    );
+    assert!(typed.contains("state") && typed.contains("final: Delivered"), "{}", one.dump());
+    assert!(typed.contains("ended: Some(Done)"), "{}", one.dump());
+    one.expect("webview.exit", "0");
+    one.expect("webview.answer", REBUILT);
+    // While the game waited for the sign-in, the session held its version: `bedrock remove`
+    // was refused (the shared lock of `store::open`, held by the launch for the session).
+    assert!(typed.contains("remove refused:") && typed.contains("in use"), "{}", one.dump());
+    // The code never reaches a line of the launcher's (its log, its status lines; the game's
+    // own output is the stand-in reporting what it got); the after-session lines about capes
+    // are said, since the game was signed in.
+    let launchers = |l: &&String| !l.starts_with("input") && !l.starts_with("game");
+    assert!(!one.lines.iter().filter(launchers).any(|l| l.contains("standin-code")), "{}", one.dump());
+    assert!(one.said("Capes: a cape earned in this session"), "{}", one.dump());
+    assert_eq!(one.protection()["sign-in"].0, Shield::On, "{:?}", one.protection());
     // Nothing of the host, no keyring, no namespaces.
     one.refused("home");
     for path in [&paths.data, &paths.config, &paths.state, &paths.data.join("vault"), &root.join("instance-dir-marker")]
@@ -457,7 +578,7 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     let toml = inst_dir.join("instance.toml");
     let original = std::fs::read_to_string(&toml).unwrap();
     std::fs::write(&toml, original.replace("# mode = \"filtered\"", "mode = \"none\"")).unwrap();
-    let two = world.session(2, ConfineMode::Off).await;
+    let two = world.session(2, ConfineMode::Off, AtTheInput::Cancel).await;
     if std::env::var_os("BASTION_TEST_VERBOSE").is_some() {
         println!("{}", two.dump());
     }
@@ -472,6 +593,9 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     two.expect("planted_lib.present", "false");
     two.expect("mods.entries", "0");
     two.expect("bridge.present", "false");
+    two.expect("webview.exit", "1");
+    assert!(two.typed.join("\n").contains("no sign-in prompt appeared"), "offline: no bridge, no page");
+    assert!(!two.said("Capes:"), "no sign-in, nothing to say about capes");
     two.refused("dns.unlisted");
     assert!(two.game.contains_key("https.error"), "no network in mode none\n{}", two.dump());
     let shields = two.protection();
@@ -480,7 +604,7 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     std::fs::write(&toml, original).unwrap();
 
     // ---------------------------------------------------------------- session 3 (confines this process)
-    let three = world.session(3, ConfineMode::Auto).await;
+    let three = world.session(3, ConfineMode::Auto, AtTheInput::Cancel).await;
     assert_eq!(three.outcome, Ok(0), "{}", three.dump());
     three.expect("world.present", "true");
     three.expect("token.root.present", "false");
@@ -493,7 +617,14 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert!(detail.contains("Xbox") && detail.contains("no Java token"), "{detail}");
     assert_eq!(shields["network"].0, Shield::On, "{shields:?}");
     assert!(shields["network"].1.starts_with("filtered"), "{shields:?}");
-    assert_eq!(shields["sign-in"].0, Shield::Off, "no bridge server in this build: {shields:?}");
+    assert_eq!(shields["sign-in"].0, Shield::On, "the bridge is served after the confinement: {shields:?}");
+    // The bridge works with the launcher confined: the prompt appeared; it was refused at the
+    // trusted input, and the stub got nothing on its standard output.
+    let typed = three.typed.join("\n");
+    assert!(typed.contains("prompt: Waiting") && typed.contains("ended: Some(Cancelled)"), "{}", three.dump());
+    three.expect("webview.exit", "1");
+    three.expect("webview.answer", "");
+    assert!(!three.said("Capes:"), "{}", three.dump());
     assert_ne!(shields["launcher"].0, Shield::Off, "the launcher confined itself: {shields:?}");
     assert!(three.said("launcher: confined itself") || three.said("only PARTLY confined"), "{}", three.dump());
     for line in three.lines.iter().filter(|l| l.contains("launcher:") || l.contains("data:")) {

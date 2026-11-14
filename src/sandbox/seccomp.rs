@@ -576,6 +576,25 @@ mod tests {
         assert!(only_client.is_empty(), "calls only the client needs: {only_client:?}");
     }
 
+    /// The sign-in stub runs under the client's filter (the client starts it in the sandbox):
+    /// every call it needs (`bedrock::signin::stub::SYSCALLS`, the list `tests/signin_stub.rs`
+    /// runs it under) is in the client's allowlist, or allowed with argument checks that let its
+    /// one socket through (`socket(AF_UNIX, SOCK_STREAM)`).
+    #[test]
+    fn the_bedrock_client_allows_every_system_call_of_the_sign_in_stub() {
+        let allowed: Vec<i64> = BEDROCK_ALLOW.iter().map(|(_, n)| *n).collect();
+        for name in crate::bedrock::signin::stub::SYSCALLS {
+            let nr = syscall_number(name).unwrap_or_else(|| panic!("{name} missing from the tables"));
+            if name == "socket" {
+                assert!(FILTERED.iter().any(|(_, f)| *f == nr), "socket is allowed with argument checks");
+                let rules = allowlist_rules(&bedrock(SeccompMode::Enforce)).unwrap();
+                assert!(!rules[&nr].is_empty(), "socket has argument checks in the client's filter");
+                continue;
+            }
+            assert!(allowed.contains(&nr), "the stub needs {name}, which the Bedrock client's filter refuses");
+        }
+    }
+
     #[test]
     fn bedrock_extra_syscalls_cannot_reopen_what_is_always_denied() {
         let with = |name: &str| SeccompPolicy { extra_allow: vec![name.into()], ..bedrock(SeccompMode::Enforce) };

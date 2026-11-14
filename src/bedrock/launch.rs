@@ -6,35 +6,40 @@
 //! session needs is made before the launcher confines itself (`launch`'s step 9), and nothing
 //! the game sends is read before that.
 //!
-//!  1. the gate (`policy::gate`: the licence substitution accepted), the installed client
-//!     (`runtime::discover`), the imported version opened by descriptor and checked against
-//!     its manifest (`store::open`)
-//!  2. the instance's data: its lock; what earlier sessions left (deleted — it holds their
-//!     sign-in); a fresh data root for this session with the kept worlds and settings bound
+//!  1. the gate first (`policy::gate`: the licence substitution accepted), then the installed
+//!     client (`runtime::discover`, the store package's) and the imported version opened by
+//!     descriptor and checked against its manifest (`store::open`; the `OpenedVersion` is
+//!     held for the whole session, so `bedrock remove` refuses meanwhile); the session's marker
+//!     (`running::Marker::bedrock`)
+//!  2. the instance's data: its lock; what killed or crashed sessions left in the directory of
+//!     Bedrock sessions (deleted — it holds their sign-in: `policy::remove_leftovers`); a fresh
+//!     data root for this session (`policy::SessionDir`) with the kept worlds and settings bound
 //!     into it (`profile`)
-//!  3. network (`filtered`, the default, or `none`; never `open`), display, audio, GPU, limits
+//!  3. network (`filtered`, the default, or `none`; never `open`): the network package's part
+//!     prepared ([`net::prepare`]: the namespace's sockets, Landlock's ports, the per-launch
+//!     authority for the trust store); display, audio, GPU, limits
 //!  4. **no sign-in by the launcher.** No Microsoft or Minecraft token is fetched, read or held
 //!     in a Bedrock session; neither the token store nor the vault is opened. The game signs
 //!     in to Xbox itself, through the sign-in bridge, outside its sandbox
-//!  5. the bridge's socket, the network package's part, the nested compositor — before step 9
-//!  8. the sandbox starts (the client, its arguments, an environment built from scratch)
-//!  9. the limits are read back from the kernel, the launcher confines itself, and the
-//!     protections this session has are reported
-//! 10. the relay and the log until the game exits
+//!  5. the bridge's socket (`signin::Bridge`), the nested compositor — before step 9
+//!  8. the sandbox starts (the client, its arguments, an environment built from scratch); the
+//!     bridge socket's name on the host is removed once the sandbox holds it
+//!  9. the limits are read back from the kernel, the launcher confines itself
+//! 10. the sign-in bridge is served (`signin::serve`), the protections this session has are
+//!     reported, the relay starts (`Prepared::start`) and with it the Realms answers from the
+//!     trusted input (`realms::answers`); the log until the game exits
 //! 11. the session's data root is deleted — with it the game's sign-in — and that is said only
-//!     if it is true
+//!     if it is true; then what to know about capes and the canary, when the game was signed in
+//!     (`policy::report_after_session`)
 //!
 //! What is deliberately not done: no Java credential of any kind, no `--burner`, `--join` or
 //! `--repair` (each refused with what to do instead; `--demo` changes nothing and says so), no
-//! native mods, no `open` network. The network is the network package's (`bedrock::net`:
-//! [`net::prepare`] before the sandbox exists, `Prepared::start` in step 10); the sign-in
-//! bridge's server has one marked place here ([`SignIn`]).
+//! native mods, no `open` network.
 
 pub mod instance;
 pub mod profile;
 
 use std::{
-    os::unix::net::UnixListener,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -324,14 +329,8 @@ pub async fn launch_with(
 
     // 5. Everything the sandbox is made of, before step 9.
     let trust = trust_store(prepared.as_ref().and_then(net::Prepared::trust_anchor), &setup.extra_trust_pem)?;
-    let bridge = match mode {
-        NetworkMode::Filtered => {
-            let dir = profile::bridge_dir(paths)?;
-            Some((signin::Bridge::prepare(&dir)?, dir))
-        }
-        _ => None,
-    };
-    let bridge_socket = bridge.as_ref().map(|(b, _)| b.socket_dir().join(signin::SOCKET_NAME));
+    let mut signin = SignIn::prepare(paths, mode)?;
+    let bridge_socket = signin.socket();
     // Every installed webview the client could find (the store package's discovery: its own
     // directory, the sandbox's PATH, pacman's records, a manual install's tree; links resolved
     // to the files they lead to) is covered by the stub.
@@ -374,7 +373,6 @@ pub async fn launch_with(
     landlock.unix_sockets.extend(desktop.sockets);
     landlock.tcp = tcp;
     landlock.udp_send = Some(udp_send);
-    let signin = SignIn::prepare(bridge.map(|(b, dir)| (b.into_listener(), dir)));
 
     // Resource limits, asked of the user manager now.
     let limits = match cfg.sandbox.cgroup {
@@ -440,7 +438,7 @@ pub async fn launch_with(
             reporter.warn(warning);
         }
     }
-    log.line(Source::Launcher, &signin.describe);
+    log.line(Source::Launcher, &signin.describe());
 
     // The nested compositor (X11 sessions), started last, as for Java.
     let mut nested_limits = None;
@@ -496,9 +494,9 @@ pub async fn launch_with(
     // The bridge socket's name on the host: once the program in the sandbox exists, bubblewrap
     // has bound the socket, and the name is not needed any more — without it no other program
     // of yours can connect to the bridge. Now, while this process may still remove it.
-    if let Some(socket) = &bridge_socket {
+    if bridge_socket.is_some() {
         if payload.is_some() {
-            signin.release_name(socket);
+            signin.release_name();
         } else {
             let warning = "sign-in: WARNING: the program in the sandbox could not be identified in time, so the \
                            bridge socket keeps its name on the host for this session: other programs of yours could \
@@ -591,14 +589,12 @@ pub async fn launch_with(
             shields::launcher(&outcome)
         }
     };
+    // 10 begins: from here on what the game sends is read. The sign-in bridge's server first —
+    // it only accepts on the listener made before step 9 — so that the read-out says whether it
+    // runs.
+    signin.serve(reporter, &log);
     reporter.emit(Event::Protection {
-        items: protection(
-            display_protection,
-            mode,
-            limits_protection,
-            launcher_protection,
-            (signin.shield, signin.summary.clone()),
-        ),
+        items: protection(display_protection, mode, limits_protection, launcher_protection, signin.shield()),
     });
     say(&format!("sandbox started; log: {}", log_path.display()));
     reporter.phase(Phase::Running);
@@ -623,7 +619,6 @@ pub async fn launch_with(
         }
         None => None,
     };
-    let signin_served = signin.serve(&log);
     let out = tokio::spawn(relay_output(running.child.stdout.take().expect("piped"), Source::Game, log.clone()));
     let err = tokio::spawn(relay_output(running.child.stderr.take().expect("piped"), Source::Game, log.clone()));
 
@@ -661,7 +656,7 @@ pub async fn launch_with(
         let _ = err.await;
     })
     .await;
-    drop(signin_served);
+    let signed_in = signin.finish().await;
     if let Some(task) = realms_answering.take() {
         task.abort();
     }
@@ -693,6 +688,9 @@ pub async fn launch_with(
     drop(kept);
     // Only now may the version be removed (`bedrock remove` takes its lock exclusively).
     drop(setup.version);
+    // Capes and the profile canary, after a session in which the game was signed in (the risk
+    // package's text; nothing without a sign-in through the bridge).
+    policy::report_after_session(reporter, signed_in);
 
     let code = status.code().unwrap_or(1);
     if interrupted {
@@ -829,64 +827,113 @@ fn trust_store(anchor: Option<(&str, &[u8])>, extra_pem: &[u8]) -> Result<TrustS
     Ok(TrustStore::from_certificates(&certificates))
 }
 
-// ---------------------------------------------------------------- INTEGRATION: sign-in package
+// ---------------------------------------------------------------- the sign-in bridge
 
-/// The sign-in bridge for one session: the listening socket ([`signin::Bridge`], made before
-/// the sandbox, bound at `signin::SANDBOX_SOCKET`) and whoever serves it.
-///
-/// **Integration point.** Serving the bridge — checking each request, showing the page
-/// outside the game, returning only the final URL — is the sign-in package's. It plugs in
-/// here: whatever it must start before step 9 (a browser helper) in [`SignIn::prepare`], the
-/// server on the listener in [`SignIn::serve`] (step 10: it reads what the game sends).
-/// Until then the listener is closed at step 10, so a sign-in attempt fails at once instead
-/// of hanging, and the `sign-in` protection item says so.
-pub struct SignIn {
-    listener: Option<UnixListener>,
+/// The sign-in bridge of one session (the sign-in package's `bedrock::signin`): the listener,
+/// bound before the sandbox exists ([`signin::Bridge::prepare`], in a private directory of
+/// this launch) and mounted into the sandbox as a file at `signin::SANDBOX_SOCKET`; its name on
+/// the host, removed as soon as the sandbox holds it, so that no other program of the user can
+/// reach the bridge; and from step 10, after the launcher confined itself, the server
+/// ([`signin::serve`]), which only accepts on that listener. Offline there is no bridge.
+struct SignIn {
+    bridge: Option<signin::Bridge>,
     dir: Option<PathBuf>,
-    shield: Shield,
-    /// For the protection event.
-    summary: String,
-    /// For the launch log.
-    describe: String,
+    /// The socket's name is still on the host (the program in the sandbox was not identified).
+    name_kept: bool,
+    serving: Option<signin::Serving>,
+    /// Why the server could not be started, if it could not.
+    failed: Option<String>,
 }
 
 impl SignIn {
-    fn prepare(bridge: Option<(UnixListener, PathBuf)>) -> SignIn {
-        match bridge {
-            Some((listener, dir)) => SignIn {
-                listener: Some(listener),
-                dir: Some(dir),
-                shield: Shield::Off,
-                summary: "the bridge is not served in this build: a sign-in attempt fails".into(),
-                describe: "sign-in: the bridge socket exists, but this build has no bridge server: a sign-in attempt \
-                           in the game fails at once"
-                    .into(),
-            },
-            None => SignIn {
-                listener: None,
-                dir: None,
-                shield: Shield::On,
-                summary: "offline: no sign-in pages at all".into(),
-                describe: "sign-in: none (offline): the stub has no bridge to reach".into(),
-            },
+    fn prepare(paths: &Paths, mode: NetworkMode) -> Result<SignIn> {
+        let mut signin = SignIn { bridge: None, dir: None, name_kept: false, serving: None, failed: None };
+        if mode == NetworkMode::Filtered {
+            let dir = profile::bridge_dir(paths)?;
+            signin.bridge = Some(signin::Bridge::prepare(&dir)?);
+            signin.dir = Some(dir);
+            signin.name_kept = true;
         }
+        Ok(signin)
+    }
+
+    /// The socket on the host, to bind into the sandbox (none offline).
+    fn socket(&self) -> Option<PathBuf> {
+        self.bridge.as_ref().map(|b| b.socket_dir().join(signin::SOCKET_NAME))
     }
 
     /// Remove the socket's name and its directory on the host (the sandbox holds its mount).
-    fn release_name(&self, socket: &std::path::Path) {
-        let _ = std::fs::remove_file(socket);
+    fn release_name(&mut self) {
+        if let Some(socket) = self.socket() {
+            let _ = std::fs::remove_file(socket);
+        }
         if let Some(dir) = &self.dir {
             let _ = std::fs::remove_dir(dir);
         }
+        self.name_kept = false;
     }
 
-    /// Step 10: serve the bridge. Returns what must live as long as the session.
-    fn serve(self, log: &Arc<Log>) -> Option<UnixListener> {
-        if let Some(listener) = self.listener {
-            drop(listener);
-            log.record(Source::Launcher, "sign-in: the bridge socket is closed (no bridge server in this build)");
+    /// The launch log's line about the bridge, before the sandbox starts.
+    fn describe(&self) -> String {
+        if self.bridge.is_some() {
+            format!(
+                "sign-in: the game's sign-in window is bastion-mc's stub; its requests come over the bridge at {} and \
+                 are served once the launcher has confined itself: Microsoft's page is shown outside the game, and \
+                 only this terminal or the front end answers it",
+                signin::SANDBOX_SOCKET
+            )
+        } else {
+            "sign-in: none (offline): the stub has no bridge to reach".into()
         }
-        None
+    }
+
+    /// Step 10: serve the bridge for the rest of the session.
+    fn serve(&mut self, reporter: &Reporter, log: &Arc<Log>) {
+        let Some(bridge) = self.bridge.take() else { return };
+        let sink = log.clone();
+        let line: signin::server::Log = Arc::new(move |text: &str| sink.line(Source::Launcher, text));
+        match signin::serve(bridge, reporter, line) {
+            Ok(serving) => self.serving = Some(serving),
+            Err(e) => {
+                let warning = format!(
+                    "sign-in: WARNING: the bridge could not be served ({e}); a sign-in attempt in the game fails at once"
+                );
+                log.record(Source::Launcher, &warning);
+                reporter.warn(&warning);
+                self.failed = Some(e.to_string());
+            }
+        }
+    }
+
+    /// The `sign-in` item of the protection read-out.
+    fn shield(&self) -> (Shield, String) {
+        match (&self.serving, &self.failed) {
+            (_, Some(why)) => {
+                (Shield::Off, format!("the bridge could not be served ({why}): a sign-in attempt in the game fails"))
+            }
+            (Some(_), None) if self.name_kept => (
+                Shield::Partial,
+                "Microsoft's page is shown outside the game, but the bridge kept its name on the host: other \
+                 programs of yours could send it sign-in requests (each is checked like the game's)"
+                    .into(),
+            ),
+            (Some(_), None) => (
+                Shield::On,
+                "Microsoft's page (login.live.com, Minecraft's own client) is shown outside the game; only this \
+                 terminal or the front end answers it"
+                    .into(),
+            ),
+            (None, None) => (Shield::On, "offline: no sign-in pages at all".into()),
+        }
+    }
+
+    /// The end of the session: the server stops (a waiting prompt is withdrawn). Whether a
+    /// sign-in was handed to the game.
+    async fn finish(self) -> bool {
+        match self.serving {
+            Some(serving) => serving.shutdown().await,
+            None => false,
+        }
     }
 }
 

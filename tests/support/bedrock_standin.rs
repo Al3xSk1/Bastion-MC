@@ -41,9 +41,13 @@ const CLONE_NEWNET: c_int = 0x4000_0000;
 const CLONE_NEWUSER: c_int = 0x1000_0000;
 const SIGCHLD: c_long = 17;
 
+/// A sign-in page's address in the shape the game's sign-in library asks for one (the bridge
+/// checks every part: Minecraft's client, its redirect, a code, Xbox sign-in only, a PKCE
+/// challenge and a state).
 const START: &str = "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&redirect_uri=ms-xal-\
                      0000000048183522%3A%2F%2Fauth&response_type=code&scope=service%3A%3Auser.auth.xboxlive.com%3A%3A\
-                     MBI_SSL";
+                     MBI_SSL&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256\
+                     &state=standin-state-1&display=android_phone";
 const END: &str = "ms-xal-0000000048183522://auth";
 
 fn say(key: &str, value: impl std::fmt::Display) {
@@ -200,6 +204,9 @@ fn webview() {
             say("webview.exit", status.unwrap_or_else(|e| format!("{e}")));
             say("webview.fake_ran", String::from_utf8_lossy(&out).contains("FAKE-WEBVIEW-RAN"));
             say("webview.stdout_bytes", out.len());
+            // What the client hands its sign-in library: the first line, as it reads it.
+            let first = String::from_utf8_lossy(&out).lines().next().unwrap_or("").to_string();
+            say("webview.answer", first.chars().filter(|c| c.is_ascii_graphic()).collect::<String>());
         }
         Err(e) => say("webview.exit", outcome::<()>(Err(e))),
     }

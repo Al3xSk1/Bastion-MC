@@ -182,19 +182,14 @@ fn killing_the_stub_withdraws_the_prompt() {
 #[test]
 fn the_stub_needs_no_system_call_beyond_its_documented_list() {
     use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
-    #[rustfmt::skip]
-    let allowed: &[i64] = &[
-        // Starting and ending a dynamically linked program (the loader, glibc, Rust's runtime).
-        libc::SYS_execve, libc::SYS_brk, libc::SYS_arch_prctl, libc::SYS_set_tid_address,
-        libc::SYS_set_robust_list, libc::SYS_rseq, libc::SYS_prlimit64, libc::SYS_mmap,
-        libc::SYS_munmap, libc::SYS_mprotect, libc::SYS_openat, libc::SYS_read, libc::SYS_pread64,
-        libc::SYS_fstat, libc::SYS_newfstatat, libc::SYS_close, libc::SYS_access, libc::SYS_getrandom,
-        libc::SYS_rt_sigaction, libc::SYS_rt_sigprocmask, libc::SYS_sigaltstack, libc::SYS_poll,
-        libc::SYS_exit_group, libc::SYS_exit,
-        // The stub's own (its module header).
-        libc::SYS_socket, libc::SYS_connect, libc::SYS_setsockopt, libc::SYS_write, libc::SYS_sendto,
-        libc::SYS_recvfrom,
-    ];
+    // The list the Bedrock client's filter is held to (`stub::SYSCALLS`), and nothing else.
+    let allowed: Vec<i64> = bastion_mc::bedrock::signin::stub::SYSCALLS
+        .iter()
+        .map(|name| bastion_mc::sandbox::seccomp::syscall_number(name).unwrap_or_else(|| panic!("{name}")))
+        .collect();
+    let expected: &[i64] =
+        &[libc::SYS_execve, libc::SYS_socket, libc::SYS_connect, libc::SYS_recvfrom, libc::SYS_exit_group];
+    assert!(expected.iter().all(|nr| allowed.contains(nr)) && allowed.len() == 30, "{allowed:?}");
     let rules = allowed.iter().map(|nr| (*nr, Vec::new())).collect();
     let filter =
         SeccompFilter::new(rules, SeccompAction::Errno(libc::ENOSYS as u32), SeccompAction::Allow, TargetArch::x86_64)

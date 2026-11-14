@@ -32,7 +32,10 @@
 use std::{
     collections::BTreeMap,
     os::unix::net::UnixListener as StdUnixListener,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -102,12 +105,16 @@ impl Default for Options {
 pub struct Serving {
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
+    signed_in: Arc<AtomicBool>,
 }
 
 impl Serving {
-    pub async fn shutdown(mut self) {
+    /// End the server; whether a sign-in was handed to the game in this session (an address
+    /// that passed every check reached the stub), for what the launch says at its end.
+    pub async fn shutdown(mut self) -> bool {
         drop(self.stop.take());
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut self.task).await;
+        self.signed_in.load(Ordering::SeqCst)
     }
 }
 
@@ -130,6 +137,7 @@ pub fn serve_with(listener: StdUnixListener, reporter: &Reporter, log: Log, opti
     let listener = UnixListener::from_std(listener).map_err(|e| Error::io("preparing the sign-in bridge", e))?;
     let answers = reporter.answers(AnswerKind::SignIn)?;
     let (stop, stopped) = oneshot::channel();
+    let signed_in = Arc::new(AtomicBool::new(false));
     let session = Session {
         reporter: reporter.clone(),
         log,
@@ -139,9 +147,10 @@ pub fn serve_with(listener: StdUnixListener, reporter: &Reporter, log: Log, opti
         accepted: 0,
         next_allowed: None,
         refusals: BTreeMap::new(),
+        signed_in: signed_in.clone(),
     };
     let task = tokio::spawn(session.run(listener, stopped));
-    Ok(Serving { stop: Some(stop), task })
+    Ok(Serving { stop: Some(stop), task, signed_in })
 }
 
 /// A prompt that waits.
@@ -162,6 +171,8 @@ struct Session {
     next_allowed: Option<Instant>,
     /// Refused requests per reason (each reason is logged once, with the count at the end).
     refusals: BTreeMap<&'static str, u32>,
+    /// Set once an address was handed to the game.
+    signed_in: Arc<AtomicBool>,
 }
 
 /// A request read from a connection, or why none could be.
@@ -352,6 +363,7 @@ impl Session {
             Ok(url) => {
                 if reply(&mut pending.stream, &Reply::Url(url)).await {
                     (self.log)("signin: the address the sign-in ended on was handed to the game");
+                    self.signed_in.store(true, Ordering::SeqCst);
                     self.finish(SignInState::Done, None);
                 } else {
                     self.end(SignInState::Cancelled, "the game stopped waiting before the address arrived").await;

@@ -50,6 +50,42 @@ use super::{
     wire::{self, Reply},
 };
 
+/// The stub's system calls (see the module header), by name as `sandbox::seccomp` knows them:
+/// what the Bedrock client's filter must allow (a unit test there holds it to that), and the
+/// exact allowlist `tests/signin_stub.rs` runs the stub under.
+pub const SYSCALLS: [&str; 30] = [
+    "execve",
+    "brk",
+    "arch_prctl",
+    "set_tid_address",
+    "set_robust_list",
+    "rseq",
+    "prlimit64",
+    "mmap",
+    "munmap",
+    "mprotect",
+    "openat",
+    "read",
+    "pread64",
+    "fstat",
+    "newfstatat",
+    "close",
+    "access",
+    "getrandom",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sigaltstack",
+    "poll",
+    "exit_group",
+    "exit",
+    "socket",
+    "connect",
+    "setsockopt",
+    "write",
+    "sendto",
+    "recvfrom",
+];
+
 /// How long the stub waits for the launcher's reply (see the module header).
 pub const STUB_TIMEOUT: Duration = Duration::from_secs(PROMPT_TTL.as_secs() + 60);
 /// How long sending the request may take. The launcher reads requests as they arrive.
