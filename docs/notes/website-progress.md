@@ -1,7 +1,7 @@
 # Website: hand-over file
 
-State: **closed, then brought up to the documents of the third and fourth rounds
-(2026-11-14); never published.** The site builds from the repository's own documents,
+State: **closed, then brought up to the documents of the third and fourth rounds and of
+the fifth (Bedrock) (2026-11-14); never published.** The site builds from the repository's own documents,
 passes its own checks as a preview and as deployed, was reviewed through three lenses,
 every finding was fixed or handed to the owner of the file it concerns, and every page was
 looked at again at five widths. After it was merged into the tree of the fourth round it
@@ -36,6 +36,40 @@ acted on the findings side by side, each in an area of files (engine: `site/md.p
 the shells; content: the pages, the workflow, the screenshot script and
 `docs/notes/website.md`); and last one engineer **closed** the website alone in the
 working copy.
+
+## Round 5: Bedrock on the site (2026-11-14)
+
+Done by the documents pass of the fifth round, in the clone `target/agents/r5-docs`, together
+with the documents themselves; `docs/notes/website.md`, section 12, is the account for the
+owner.
+
+- `docs/BEDROCK.md` is a page, `bedrock.html`, added the way the three documents of the
+  fourth round were (`DOCUMENTS` in `site/build.py`, both footers, `404.html`,
+  `site/CONTRACT.md`, the page list of `tests/site.rs`, and the small site of
+  `site/test_build.py`: a ninth short document, the counts of files, pages and links to the
+  security overview, the sitemap, and its link to the phone's page). Its HTML comment at the
+  top (who wrote and checked the guide; the notes say it too) was taken out: the converter
+  refuses a raw HTML block, which a comment on lines of its own is.
+- The three hand-written pages say what Bedrock is, where their structure had room: the
+  overview a third lede, a sentence in the callout, block 08 (with "In force" and "Stays
+  open") and a panel under "Where to read on"; getting started a sentence in the callout and a
+  section `#bedrock` with the three commands; the security overview the new asset, a
+  paragraph on what S, M and C mean in a Bedrock session, a section `#bedrock` ("Stops",
+  "Does not stop") and points 17 to 19. Every new statement has its row in Appendix B and,
+  where it can go stale, a tie.
+- The ties the documents' changes broke, and what became of each: block 03's "Voice chat is
+  the only UDP … out of the sandbox" (now "out of a Java game's sandbox": a Bedrock session
+  relays RakNet to listed servers; the statement says the same); getting started's two
+  quotes of the Status table (the packages built on the fifth round's tree; five emulator
+  tests, one with a Bedrock instance), re-quoted; the not-defended chain at point 7 (its
+  Bedrock sentence) and after point 16 (points 17 to 19), extended.
+
+Run on the final tree of this pass: `python3 -I site/build.py --check` passes (13 pages,
+1082 internal links, 86 outbound links, two runs byte-identical), and so does the deployable
+build; `python3 -I -B -m unittest discover -s site -p "test_*.py"`: 361 tests, OK;
+`cargo test --test site`: 5 passed. Not done: the new and changed pages were not rendered in
+a browser or measured at the 44 widths (the tools of the earlier passes are not in this
+clone).
 
 ## Rounds 3 and 4: the site brought up to the documents (2026-11-14)
 
@@ -734,9 +768,10 @@ statement, then the phrase.
 
 Every tie stands on its own line directly after the statement (or the list item, or the
 panel) that it backs; in the claim maps of Appendix B a statement with a tie is marked
-**†**. On 2026-11-14, after the pass of the third and fourth rounds: 336 ties, 64 on the
-overview, 67 on getting started, 204 on the security overview, 1 on the error page (142
-before that pass: 18, 36, 87, 1). Tied:
+**†**. On 2026-11-14, after the pass of the fifth round (Bedrock): 386 ties, 81 on the
+overview, 77 on getting started, 227 on the security overview, 1 on the error page (336
+after the pass of the third and fourth rounds: 64, 67, 204, 1; 142 before it: 18, 36, 87,
+1). Tied:
 
 - every statement of the kind "not run", "not exercised", "not assessed", "only … was
   tested", "not built", "has not run against the real service";
@@ -754,11 +789,15 @@ before that pass: 18, 36, 87, 1). Tied:
 - the statements about the companion mod, the phone and its services (README "The
   companion mod", "The in-game phone", "The phone's helpers"; TM §3, J19 to J24, H1 to
   H23; `docs/COMPANION.md`);
-- **the sixteen points of `security.html#not-defended`**: directives after the list, each
-  beginning with the last words of the point (or heading) before it, the last one ending
-  with the first words of the heading of section 6; and ties over the parts of points 1,
-  6, 7 and 12 that the page restates. So a reworded point, a seventeenth point, a removed
-  point or a changed order stops the build. Not tied there, on purpose: the remark about
+- the statements about Minecraft: Bedrock Edition (README "Minecraft: Bedrock Edition" and
+  the Status paragraph; TM §1, §2, §4.8 B1 to B39, §5 items 7 and 17 to 19), on all three
+  pages since 2026-11-14;
+- **the nineteen points of `security.html#not-defended`** (sixteen until the pass of the
+  fifth round added Bedrock's three): directives after the list, each beginning with the
+  last words of the point (or heading) before it, the last one ending with the first words
+  of the heading of section 6; and ties over the parts of points 1, 6, 7 and 12 that the
+  page restates (point 7's tie runs over its Bedrock sentence into point 8). So a reworded
+  point, a twentieth point, a removed point or a changed order stops the build. Not tied there, on purpose: the remark about
   the development machine's `docker` group in point 1, and most of the parenthesis on the
   launcher's bounds in point 6, which the page summarises.
 
@@ -816,7 +855,8 @@ changed meaning stops nothing.
 `README.md` (sections by their heading; "intro" is its first two paragraphs). Where the
 page gives a residual risk, the source of the residual is named too. Statements that are
 included word for word are marked "include"; **†** marks a statement with a tie. Brought up
-to the documents of the third and fourth rounds on 2026-11-14.
+to the documents of the third and fourth rounds on 2026-11-14, and of the fifth round
+(Bedrock) the same day.
 
 #### Hero and the callout under it
 
@@ -829,6 +869,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | "it holds a placeholder instead of your access token" (by default) | README "Network filtering and the credential broker" ("It is given a placeholder"); TM J13 |
 | "for people who … assume that a mod, a server or a downloaded world may be malicious" | TM §2 (M, S); README "The sandbox" ("Content you do not trust") |
 | "prepared to build the launcher themselves and to sign in through an Azure application of their own" | README "Requirements"; README "Your own OAuth application" |
+| third lede: "It can also run Minecraft: Bedrock Edition, the Android build, started by your installed `mcpelauncher-client` from your own Google Play purchase, in the same sandbox with a profile of its own, mainly for Mojang's Bedrock-only cape events. There, unlike on Java, the game itself holds your Xbox sign-in for the session (block 08)" | README intro, third paragraph, nearly word for word † |
 | second lede: "Fabric instances also get the launcher's own companion mod, with an in-game phone: Spotify, Discord and other sites you list in a browser that runs in a sandbox of its own, clips, approvals of Realms joins and settings sync. The mod is interface only: the launcher decides what each command from the phone may do, and no secret of these services enters the game" | README intro, second paragraph (the list and the last sentence nearly word for word) † (two) |
 | callout: "Sign-in has not yet been run against the live Microsoft, Xbox and Mojang services" | README "Status" (first paragraph; the row "Microsoft → Xbox → Minecraft sign-in…") † |
 | "neither has anything that needs a signed-in account, such as joining a real multiplayer server" | the same; TM §7 "Not exercised" † |
@@ -836,6 +877,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | "The sign-in chain is implemented and tested against scripted replies and a stand-in Mojang" | README "Status", the sign-in row |
 | "What has run with the real game is Mojang's demo mode, without an account, vanilla and as a signed Fabric profile" | README "Status", row "Real Minecraft 26.3 client in the sandbox (demo mode, no account)…"; TM §7 E7 † |
 | "and the companion mod with its phone on one version of each of its ten families of Minecraft versions, with stand-in apps behind the phone" | README "Status", row "Companion mod on every Fabric release from 1.20.1 to 26.3 (ten families)…" ("on the representative of each family"; "against the demo service (fake apps, a test switch)") † (two) |
+| "Minecraft: Bedrock Edition has not run with the real game at all: every part of it was run against stand-ins" | README "Status", first paragraph ("Nor has Minecraft: Bedrock Edition (the fifth round) run with the real game at all…") † |
 | "There are no releases and no binary downloads" (also in "How to get it") | README "Status" ("There is no release, no signed tag and no binary download"); the footer says the same |
 
 #### What it does, layer by layer
@@ -847,7 +889,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | caption: "The trust boundaries on your machine, drawn after section 3 of the threat model. The launcher is the trusted part; the game is not, and runs inside a systemd scope, namespaces, Landlock and a seccomp filter, with three deliberate holes" | TM §3; README "The sandbox" |
 | caption: "The audio socket among them is what the default setting `audio = "pulse"` hands over; `audio = "none"` removes it, and `audio = "alsa"` hands over the raw sound devices instead" | TM D3; README "Sound" († in block 02) |
 | caption: "The drawing shows a launch without the companion mod: in a Fabric profile the sandbox also gets the mod, read-only, and one socket to the launcher (block 07)" | TM §3 (the drawing's "ro: /bastion/companion" and the holes' "Fabric profiles: 1 socket to the launcher"); TM J2; README "The sandbox" († in block 02) |
-| caption: "blocks 01 to 05 below go through it and say what stays open at each. Blocks 06 and 07 are about the account itself and about the phone, which the drawing does not show" | a statement about this page and the drawing |
+| caption: "blocks 01 to 05 below go through it and say what stays open at each. Blocks 06 to 08 are about the account itself, the phone and Bedrock, which the drawing does not show" | a statement about this page and the drawing |
 | "The game's Java process is treated as hostile from its first instruction"; "A malicious or compromised mod …"; "a server or a piece of content …" | TM §3; TM §2, M and S |
 | "Each block below says what is in force at one layer and names what stays open there…" | a statement about this page; "where there is one": rows without a test, see "What has been tested" |
 | **01** "What the game is started from is fixed before it starts…" | README "Verified downloads and signed profiles"; TM C1, C2, C5 |
@@ -873,7 +915,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | link "Threat model 4.2, rows J1 to J17" | TM §4.2 |
 | **03** "In the default, filtered network mode the sandbox's network namespace has no route out. The only exits are sockets held by the launcher" | TM J10; TM J13 † |
 | in force: DNS responder, relay to Mojang on 443 with SNI and to allowlisted servers; servers allowlisted, `--join` | TM J10, J11; README "Network filtering and the credential broker" |
-| "Voice chat is the only UDP the launcher relays out of the sandbox, and only to a port that a server's rule names, only while a game connection to that server is open and only to the address that connection uses" | README "Network filtering and the credential broker", "Voice chat on a server" † (two); TM J20 |
+| "Voice chat is the only UDP the launcher relays out of a Java game's sandbox, and only to a port that a server's rule names, only while a game connection to that server is open and only to the address that connection uses" ("a Java game's" since 2026-11-14: a Bedrock session relays RakNet to the servers you list) | README "Network filtering and the credential broker", "Voice chat on a server" † (two); TM J20, B29 |
 | placeholder, broker, explicit list; skin, cape and name refused; token never on a command line or in the environment | README "Network filtering and the credential broker"; TM J13, A5, P1, P2 |
 | "Realms is refused unless you choose how its joins are approved. Then the broker also answers for Realms, and every join waits for an approval you give outside the game, typed into the phone, before the game gets one connection to that Realm's server" | README "Network filtering and the credential broker" †; TM §5.7 † |
 | open: "Code in the game can still ask for what is switched on: the account reads, and one join per game connection it opens to an allowlisted server. That join is not tied to that server: a mod that learns the hash another server is waiting for can authorise a login as you on that other server, once for every game connection it opens" (until 2026-11-14 this item said the opposite, without a tie) | TM J13, residual † (two); §5.3 |
@@ -917,13 +959,22 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | open: "Code in the game of one instance can change the synced settings of your other instances…" | README "Settings sync" †; TM J24 |
 | open: "The services that need an account of yours… have not run against the real services" | README "Status" (first paragraph, and the rows of the fourth round) |
 | links "Threat model 4.7, rows H1 to H23" · "The phone" · "The companion mod" | TM §4.7; `phone.html`, `companion.html` |
+| **08** (since 2026-11-14) "The launcher runs the `mcpelauncher-client` you installed from the AUR on game files from your own Google Play purchase, in the sandbox Java games run in, with a profile of its own" | README "Minecraft: Bedrock Edition", first paragraph and "What you need"; TM §4.8, introduction, B9 |
+| "It does not run the Windows edition in any form: that build runs on Linux only after the game is decrypted outside Microsoft's protected path. Nothing in the launcher decrypts, patches or answers a licence check, and every Bedrock launch is refused until you accept that `mcpelauncher-client` answers the game's licence query itself" | README "Minecraft: Bedrock Edition" ("What it is not", "The licence substitution, and its switch") † (three); TM B1 |
+| in force: "The game reaches Microsoft's and Mojang's Bedrock services by name, the servers you listed and the Realms and event servers you approved, and nothing else. It may execute only the client, its libraries, the dynamic loader and the launcher's sign-in stub; native mods are not supported" | README "Importing a version and playing" † (two); TM B9, B28 |
+| in force: "Microsoft's sign-in page opens outside the game, every session; your password and two-factor codes never reach it. A Realms or event-server join is approved outside the game too, in the front end or on the terminal" | README "Signing in, every session" †, "Servers, Realms and event servers" †; TM B19, B20, B31 |
+| in force: "No Java credential exists in a Bedrock session. The game's data directory belongs to the session alone and is deleted at its end, with the game's sign-in in it; only the worlds and settings are kept" | README "Importing a version and playing" † (two); TM B17, B16, B12 |
+| open: "The game holds your Xbox sign-in for the whole session: its own sign-in code needs it. A game taken over can use it and carry it away through any server, Realm or Xbox endpoint it may reach; your Realms, your Minecoins, your Bedrock character and possibly your Java profile are at stake until you sign out everywhere at Microsoft" | TM §5 item 17 † (two); B15 |
+| open: "The launcher cannot check that a version you import was bought, and it cannot see the Bedrock side of the account: the profile canary watches the Java profile only" | TM §5 item 18 †, B38 † |
+| open: "None of it has run with the real client, the real game or an account; the client's system-call allowlist was derived from its source and never profiled" | TM B9 (residual) †; README "Status" (the Bedrock rows) |
+| links "Threat model 4.8, rows B1 to B39" · "The Bedrock page" | TM §4.8; `bedrock.html` |
 
 #### What it does not defend
 
 | On the page | Source |
 |---|---|
 | label "Read this before relying on it" | TM, the heading of §5 |
-| the sixteen numbered items | include: TM §5, complete |
+| the nineteen numbered items (17 to 19 are Bedrock's, since 2026-11-14) | include: TM §5, complete |
 | "The codes in brackets name rows of the threat model, for example P7, reading the game's memory; D1, X11; J13, the access token inside the game; D3, audio; J20, the voice relay; and H8, the phone's browser. §4.6 is its section on the account itself" | TM rows P7, D1, J13, D3, J20, H8; heading of §4.6 |
 | "What to do about other software running as you is the subject of the dedicated-account guide" | README "Documentation"; TM P7, residual |
 | "Out of scope: …" (now with the services the phone reaches) | include: TM §2, paragraph "Out of scope:" |
@@ -936,6 +987,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | "`bastion-mc-gui` is an optional window around it, of its own design: a dark instrument panel with a ring gauge around the launch control, and no advertising, news, shop or telemetry" | README "The graphical front end", first paragraph † |
 | "A rail leads to five pages: the launch, with the instance, the stages of a launch and, once the game starts, which protections that launch runs with; the accounts, with sign-in; the instances; a console with the launcher's, the relay's and the game's output; and security, with the emergency panel" | README "The graphical front end" (the rail; Launch, Accounts, Instances, Console, Security) † |
 | "While a Realms join waits for your approval, the launch page shows its prompt" | README, "Launch" † |
+| "and while a Bedrock game waits for a Microsoft sign-in, the panel that opens the sign-in page" | README, "Launch" (the *Microsoft sign-in for Bedrock* panel) † |
 | "The phone's own commands are run in a terminal: the window offers none of them" | README "The graphical front end" ("It offers none of the fourth round's commands…") † |
 | "These pictures are not captures of a session… its tests draw every state of the window in software from fixed test data. No game was running and nobody was signed in…" | README "Tests" (the snapshots); README "Status", row "Graphical front end"; `gui/src/view/tests.rs` (the snapshot test) and `gui/src/app.rs` (its fixtures) |
 | the four `alt` texts and captions | the committed pictures (`shot-security.png` refreshed and looked at on 2026-11-14, its `alt` text with the recovery pages' new line and "no report yet for any of the five"; the other three unchanged since 2026-11-13); what the views are for: README "The graphical front end", "Sound", "Accounts", "Where the refresh token rests", TM G6 |
@@ -966,6 +1018,7 @@ to the documents of the third and fourth rounds on 2026-11-14.
 | "The phone: the in-game phone and its services: Spotify, Discord and the browser, clips, Realms approvals and settings sync, their settings and limits, and what the game can see" | `docs/PHONE.md`, first paragraph and headings; README "Documentation" |
 | "Companion mod: the launcher's own Fabric mod: what it adds on which Minecraft version, its settings, its channel to the launcher, how it is built and what was verified" | `docs/COMPANION.md`, headings |
 | "Mods: signed profiles, fetching mods from Modrinth with verified hashes, what Modrinth learns, ViaFabric, and the server rule that lets voice chat through" | `docs/MODS.md`, title and headings |
+| "Bedrock Edition: the Android build in the sandbox: what you need, importing a version, signing in every session, servers, Realms and event servers, capes on your Java profile, and what the launcher cannot protect" | `docs/BEDROCK.md`, headings; README "Documentation" |
 | "The emergency page is the runbook the launcher carries…" | README "If you think the account is compromised"; TM A2, A3 |
 
 ### Getting started, the security overview, the error page
@@ -975,7 +1028,8 @@ or row), **H** = the `HELP` constant in `src/cli.rs`, **C** = `docs/COMPANION.md
 Everything on the three pages is listed; a sentence that is only a link or a heading is
 not. **†** = a `{{REQUIRE}}` with the source's words stands next to the statement in the
 page; "included" = the generator copies the text from the document. Brought up to the
-documents of the third and fourth rounds on 2026-11-14.
+documents of the third and fourth rounds on 2026-11-14, and of the fifth round (Bedrock)
+the same day.
 
 #### `getting-started.html`
 
@@ -987,13 +1041,14 @@ documents of the third and fourth rounds on 2026-11-14.
 | callout | "Built and tested on Arch Linux (…)" (now with the phone's Firefox, ffmpeg and xdg-dbus-proxy) | R "Status" | included |
 | callout | sign-in chain and what needs an account: implemented, tested against scripted replies and a stand-in Mojang, not yet run against the live services; nor the phone's services that need an account of yours | R "Status", the sign-in row; R "Status", first paragraph | † (two) |
 | callout | not exercised, among other things: NVIDIA, a real Wayland desktop session, Java 8-era versions, the real `age` program and its plugins, coverage-guided fuzzing; the security overview has the threat model's whole list | R "Status", rows "NVIDIA…" (the whole row) and "Display isolation"; T section 7 | † (the whole row, into its second cell; and the Wayland row) |
+| callout | Minecraft: Bedrock Edition has not run with the real game at all: no Google Play purchase, game file or Microsoft account to run it with | R "Status", first paragraph | † |
 | Requirements | kernel 6.12 or newer, `landlock` in the LSM list, unprivileged user namespaces, Arch defaults; the launcher's own confinement needs Landlock ABI 8 for files and network and ABI 9 for all of it (partial, and said so, on an older kernel); ABI 10, Linux 7.2, adds UDP rules | R "Requirements" | † (two) |
 | Requirements | bubblewrap; the Java release each game version declares; never downloaded, root-owned under `/usr/lib/jvm`; for Java 17 and later only from a jdk package (`jdk17-openjdk`, `jdk21-openjdk`, `jdk25-openjdk`), not a jre package; `jre8-openjdk` for Java 8; 26.3 needs Java 25; `match = "newer"`; the refusal message still suggests the jre package | R "Requirements"; T row C5 | † (six) |
 | Requirements | gamescope on X11; for the phone `xdg-dbus-proxy`, Firefox, ffmpeg; systemd user session gives the limits; cargo, a C compiler, a JDK of release 17 or newer (the companion mod is compiled with `--release 17`) | R "Requirements" | † (phone, session, building) |
 | Requirements | the three `pacman` lines | R "Requirements", copied (the first line's "see below" reads "see above" here) | |
 | Build | build with cargo; `export PATH=…`; `bastion-mc --help` lists every command and option; the launcher is `target/release/bastion-mc`; the commands call it by name, so put the directory on `PATH` or call it by its path | R "Requirements" (the second code block and the sentence before it) | † |
 | Build | `--workspace` also builds the front end | R "The graphical front end" (code block) | |
-| Build | "The Arch packages are a template": two packages; until there is a release a template that does not build your checkout, and `makepkg` builds whatever its `source=` line points to; on the development machine both built from a tarball of the tree, `check()` passes, the binaries pass the hardening check | R "Requirements" (the PKGBUILD sentence); R "Source map" (`packaging/arch/PKGBUILD`); R "Status", row "Arch packages" | † (two) |
+| Build | "The Arch packages are a template": two packages; until there is a release a template that does not build your checkout, and `makepkg` builds whatever its `source=` line points to; on the development machine both built from a tarball of the tree, `check()` passes, the binaries pass the hardening check | R "Requirements" (the PKGBUILD sentence); R "Source map" (`packaging/arch/PKGBUILD`); R "Status", row "Arch packages" (re-quoted to the fifth round's tree on 2026-11-14) | † (two) |
 | Build | the settings file does not exist until you create it; `config example`, `config path` | R "Requirements"; H | † |
 | Display and sound | a launch can be refused for either reason; `doctor` shows the display isolation | R "Display isolation" ("Without gamescope the launch is refused"; the last paragraph); T row D3, E10 | † |
 | Display panel | what X11 lets a client do; gamescope; refused without it unless `allow_x11 = true`; Wayland socket marked as sandboxed; without the protocol (GNOME) the session socket, or `require` refuses; the manual's "Display isolation"; only sway; playability inside gamescope not assessed | R "Display isolation"; R "Status", row "Display isolation"; T row D1 | † (five) |
@@ -1010,13 +1065,15 @@ documents of the third and fourth rounds on 2026-11-14.
 | Mods | a voice-chat mod needs a rule that names the server's voice port, or it stays silent | R "Voice chat on a server" | † |
 | Mods | the companion mod added by itself to Fabric profiles of the ten versions it was run with; `force = true` for the others from 1.20.1 to 26.3; press R in a world or on the title screen; the phone shows the apps set up for this launch | R "The companion mod"; R "The in-game phone" | † (three) |
 | Mods | out of the box the Spotify desktop app over D-Bus, its album art and settings sync are on; the browser, the Web API, clips and Realms approval off; sign in to sites outside the game with `browser login <site>`; type no password into the phone: every mod can read it | R "Configuration" (the defaults); R "The in-game phone" | † (two) |
-| Front end | a rail with five pages and what each does; the Realms prompt, in `code` mode with the code; the phone's commands in a terminal, the window offers none | R "The graphical front end" | † (three) |
+| Bedrock (since 2026-11-14) | the Android build: `mcpelauncher-client` from the AUR (`mcpelauncher-linux`, and `mcpelauncher-ui` to download), your own Google Play purchase, an x86_64 computer; not the Windows edition in any form; a Google account of its own; every launch refused until `accept_licence_substitution = true`, which accepts that the client answers the licence query itself and that the launcher cannot check that a version was bought; the three commands | R "Minecraft: Bedrock Edition" (first paragraphs, "What you need", "Importing a version and playing"); H (`bedrock import`, `instance new --bedrock`, `launch`) | † (four) |
+| Bedrock | a sign-in on Microsoft's page outside the game each session; where the package's handler is registered the browser hands the address back, otherwise you paste it into the front end or the terminal; the game holds your Xbox sign-in for the whole session, and a game taken over can use it and copy it out; read the Bedrock page; none of it run with the real game | R "Signing in, every session" (two), "What it protects, and what it cannot", "Status" (first paragraph); T B15 | † (four) |
+| Front end | a rail with five pages and what each does; the Realms prompt, in `code` mode with the code; the Bedrock sign-in panel, which opens the page and takes the address it ended on; the phone's commands in a terminal, the window offers none | R "The graphical front end" ("Launch") | † (four) |
 | Front end | the two build/run commands; finds `bastion-mc` next to itself, else `/usr/bin`; only the Rust toolchain; the five `pacman` lines; software rendering, `ICED_BACKEND=tiny-skia` | R "The graphical front end" | † (finds …) |
 | Front end | separate program: tokens stay in the launcher, no field for one, no shared dependencies; the window never waits; a closed window or dead front end stops the game; a scram is the exception | R "The graphical front end" (the three bullets) | † (the scram) |
 | Front end | not covered: the window can be made to click (launch, sign out, scram); other software or any X11 client can read the sign-in code off it, and a Realms approval code while a join waits | T rows G1, G6, G5 (residuals) | † (four) |
 | Front end | an `age` identity that asks for a PIN on the terminal cannot be unlocked from the window | R "The graphical front end", last paragraph | † |
-| Front end | tests without a display, in software and in iced's emulator against a stand-in launcher; a real demo launch through the backend and the window's own controls; the real window started and closed on a private X11 display; no click in a real window, not on Wayland, the Realms prompt never shown for a real join | R "Status", row "Graphical front end" | † (four) |
-| Where to go | security overview, manual (descriptions); emergency: scram removes every credential the launcher keeps, revokes nothing at Microsoft, the runbook is the second step; the phone, the companion mod, mods (descriptions) | the pages' own sections; R "Emergency: canary and scram", "If you think the account is compromised"; the documents' headings | † (two) |
+| Front end | tests without a display, in software and in iced's emulator against a stand-in launcher; a real demo launch through the backend and the window's own controls; the real window started and closed on a private X11 display; no click in a real window, not on Wayland, the Realms prompt never shown for a real join | R "Status", row "Graphical front end" (re-quoted on 2026-11-14: one of the emulator's tests plays a Bedrock instance) | † (four) |
+| Where to go | security overview, manual (descriptions); emergency: scram removes every credential the launcher keeps, revokes nothing at Microsoft, the runbook is the second step; the phone, the companion mod, mods, Bedrock (descriptions) | the pages' own sections; R "Emergency: canary and scram", "If you think the account is compromised"; the documents' headings | † (two) |
 
 #### `security.html`
 
@@ -1025,7 +1082,7 @@ documents of the third and fourth rounds on 2026-11-14.
 | lede | the game is treated as hostile code, from its first instruction, through a mod or through what a server sent; so are the companion mod and its phone, which run inside it | R first line; T section 3 ("and so is the launcher's own companion mod … and with it the in-game phone"); T section 2, M and S | † |
 | intro | the threat model names defence and what remains, and for most attacks the test or experiment | T introduction; T section 4 | |
 | callout | the cited tests pass on the development machine, an Arch Linux system | T introduction | † |
-| What is being protected | the refresh token, the access token, the signing key, files and session, the integrity of what runs (with the companion mod in Fabric profiles); the phone browser's site sessions; the Spotify refresh token (with the Web API; playback state and control, nothing of the library); the Realms TOTP secret (with `totp`) | T section 1 | † (six) |
+| What is being protected | the refresh token, the access token, the signing key, files and session, the integrity of what runs (with the companion mod in Fabric profiles); the phone browser's site sessions; the Spotify refresh token (with the Web API; playback state and control, nothing of the library); the Realms TOTP secret (with `totp`); since 2026-11-14 the Xbox identity in the Bedrock game (what it is, weeks to months, one session on this machine, what its holder can do, the game holds it and nothing can broker it) | T section 1 | † (nine) |
 | Adversaries, M | arbitrary Java and native code in the game from the first instruction | T section 2 | † |
 | Adversaries, S | data that triggers code execution; same capability as M; patched logging configuration, lookups off; deserialisation filter, mods with their own filter remain | T section 2; rows J14, J15 | † |
 | Adversaries, N | capability and limit; TLS 1.3, fixed hosts, no redirects, no plaintext; pins; what remains | T section 2; rows N1, N2, N3 | † (six) |
@@ -1033,6 +1090,7 @@ documents of the third and fourth rounds on 2026-11-14.
 | Adversaries, O | world-readable things; no program arguments, nothing secret in the environment; non-dumpable; "none for O" | T section 2; rows P1, P2, P6 | † |
 | Adversaries, W | any content and script in the phone's browser on the hosts its site lists, with an exploit code as you in the browser's sandbox; the browser headless in a sandbox of its own, outside the game's, without home directory, display, D-Bus or sound, out only through the launcher's relay, which answers only for the open site's hosts; what remains: a compromised browser changes its own profile, which persists; its filter is a deny-list, more of the kernel in reach than the game's allowlist | T section 2 (W); rows H9, H11 (defence and residual) | † (three) |
 | Adversaries, U | not defended: game memory, keyring, launcher binary, `config.toml`; some things hold; the remedies outside the launcher, neither exercised | T section 5 item 1; rows P6, P7; section 7 "Not exercised"; `docs/MC_VAULT_ACCOUNT.md` | † (four) |
+| Adversaries, Bedrock | in a Bedrock session S also a hostile Bedrock server, Realm, event server or add-on, native code with a script engine for add-ons, a memory-safety bug giving M's capability; M native code loaded by mcpelauncher's own mod loader, which gets no mods directory; C also the `mcpelauncher-client` build, about thirty repositories built from the AUR, its manifest downloading its HTTP library without a checksum, and the game files imported from `mcpelauncher-ui` | T section 2, the paragraph under the table; rows B3, B9 | † (two) |
 | Out of scope | root, kernel, firmware, physical access, Mojang or Microsoft acting maliciously; the services the phone reaches treated like Mojang's | T section 2 | † (two) |
 | Layers, intro | namespaces, Landlock, seccomp allowlist, systemd scope; layers tested alone; the launcher is the trusted part | R "The sandbox"; T rows J7, J4; T section 3 | † (three) |
 | Layers, figure | `alt` (the corrected confinement label, "holds no token") and caption: the four frames; the holes; the audio socket with `pulse`, removed with `none`, the raw sound devices with `alsa`; a launch without the companion mod: in a Fabric profile two read-only files and one socket to the launcher, and the phone's helpers beside the launcher, outside the game's sandbox | the two drawings as committed (looked at on 2026-11-14); T section 3, J2, D3; R "Sound", "The sandbox" | † (in `#holes` and under the figure, two) |
@@ -1070,19 +1128,22 @@ documents of the third and fourth rounds on 2026-11-14.
 | Phone, Realms | refused unless `[realms] approve`; the broker answers for Realms by a fixed table; a join held until you approve it outside the game (the Realm, the address, in `code` mode a code; in `totp` mode your authenticator's); one connection within two minutes to exactly the server Realms named, through the dialer; a signed-in account, the filtered network with the broker, and the phone; a launch without a phone refuses approvals up front; stops: owner operations; a join you did not approve (503, the pass leads nowhere); the token (the cookie rebuilt, other cookies and headers dropped); does not stop: invitations, invite codes, the terms, your list; in `totp` mode a code spent on another prompt; your reading of the prompt, the code on your terminal and in the front end; never run | T rows J21, J22, J23 | † (seventeen) |
 | Phone, settings sync | on by default; the listed kinds of settings, translated between versions; a burner session takes no part; stops: anything but a listed setting of the right shape; does not stop: one instance's game changing the listed settings of your other instances | T row J24; R "Settings sync" | † (four) |
 | Phone, closing | Spotify, the browser and clips only with a phone to serve; everything run against stand-ins; the services that need an account of yours not run against the real service | T section 4.7 (introduction); R "Status", first paragraph | † (two) |
-| Not defended | the sixteen points | T section 5, items 1 to 16, same order (item 1 without the remark about the development machine's `docker` group; item 6 with the launcher's bounds summarised; item 7's UDP sentence qualified with row J10's DNS responder, see closing-1; item 10's link text "noticing and reacting" is the item's own words) | † (each point, their number and order, and the restated parts of points 1, 6, 7, 12) |
+| Bedrock (since 2026-11-14) | the Android build in the sandbox Java runs in, with a profile of its own; the game's own sign-in library needs the Xbox identity, so the game holds it; the launcher cannot keep it out, limits where it can go, keeps it one session, keeps sign-in pages and Java credentials out, removes what is left; none of it run with the real client or game | T section 4.8, introduction | † |
+| Bedrock, stops | files, desktop, other programs (only the client, its libraries, the loader and the stub execute; the client's own allowlist); other hosts (listed Bedrock names, listed servers, approved joins, no LAN or NetherNet); phishing through the launcher (Microsoft's page for Minecraft for Android only, answers only from outside the game); a Java credential; the sign-in at rest | T rows B9, B28, B29, B31, B35, B19, B20, B17, B16, B37 | † (nine) |
+| Bedrock, does not stop | the game using the Xbox identity and copying it out through any allowed connection until you sign out everywhere, with what is at stake; the broad suffixes; a version that was not bought; the unaudited client and its build's unchecked download; the Bedrock side of the account | T rows B15, B28, B1, B2, B3, B38 (residuals) | † (six) |
+| Not defended | the nineteen points | T section 5, items 1 to 19, same order (item 1 without the remark about the development machine's `docker` group; item 6 with the launcher's bounds summarised; item 7's UDP sentence qualified with row J10's DNS responder, see closing-1, and since 2026-11-14 with its Bedrock sentence; item 10's link text "noticing and reacting" is the item's own words; items 17 to 19 Bedrock's, since 2026-11-14) | † (each point, their number and order, and the restated parts of points 1, 6, 7, 12) |
 | Not verified | the list | T section 7, the paragraph "Not exercised" | included |
 | Account | lost elsewhere more often; cannot prevent, can notice and make the response quick | T section 4.6, introduction | † |
 | Canary | pins name, skin, cape; compared at every sign-in before the token is used; by default stops the launch until `canary accept`; visible tampering only; the pin is a file of the user | T row A1; R "The profile canary" | † (three) |
 | Scram | first stops what could still store a credential (running launches with the phone's helpers, pending sign-ins, the token keeper); then every refresh token in the keyring and every vault file, in a full run also the Spotify token and the TOTP secret; every run deletes the phone browser's profile, unless a `browser login` window holds it; `COULD NOT` and exit status 1; no network; revokes nothing at Microsoft or Mojang, no secure wipe, says so; copied token, session token up to about 24 hours; nothing revoked at Spotify or the sites; the removal of the two keys never run against a real keyring | T row A2 | † (nine) |
 | Runbook | steps and exact addresses built in; links can go stale; only the existence of the request form checked; a compromised machine can show a different text | T row A3 | † (three) |
-| Read further | what the six documents are | the documents' own titles and first paragraphs | |
+| Read further | what the seven documents are | the documents' own titles and first paragraphs | |
 
 #### `404.html`
 
 | What the page says | Source | |
 |---|---|---|
-| nothing is published at this address; the list of pages (since 2026-11-14 with mods, the companion mod and the in-game phone) | the site's own page list (`PAGES`, `DOCUMENTS` in `site/build.py`) | |
+| nothing is published at this address; the list of pages (since 2026-11-14 with mods, the companion mod, the in-game phone and Bedrock Edition) | the site's own page list (`PAGES`, `DOCUMENTS` in `site/build.py`) | |
 | one line about each page | the same descriptions as above; T introduction and section 4 for the threat model; the three documents' first paragraphs | |
 | the launcher carries the same text: `bastion-mc wiki scram` | R "Documentation" ("the emergency text the launcher carries"); H | † |
 

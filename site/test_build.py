@@ -3,7 +3,7 @@
 
     python3 -m unittest discover -s site -p "test_*.py"
 
-Every test builds a small site of its own in a temporary directory: eight short documents,
+Every test builds a small site of its own in a temporary directory: nine short documents,
 a help text, a list of emergency links, a page shell, four pages, a style sheet, a mark and
 one picture (`FIXTURE` below). That site passes every check. A test then changes one thing
 and states exactly what must happen: which error stops the build, or which problems
@@ -158,6 +158,14 @@ PHONE = """\
 ## The apps
 
 Part of [the companion mod](COMPANION.md).
+"""
+
+BEDROCK = """\
+# Minecraft: Bedrock Edition
+
+## Signing in, every session
+
+Outside the game, unlike [the phone's apps](PHONE.md#the-apps); see the [threat model](THREAT_MODEL.md).
 """
 
 RUNBOOK = """\
@@ -383,6 +391,7 @@ FIXTURE = {
     "docs/MODS.md": MODS,
     "docs/COMPANION.md": COMPANION,
     "docs/PHONE.md": PHONE,
+    "docs/BEDROCK.md": BEDROCK,
     "docs/SCRAM_RUNBOOK.md": RUNBOOK,
     "crates/proto/src/runbook.rs": RUNBOOK_RS,
     "src/cli.rs": CLI_RS,
@@ -402,8 +411,8 @@ FIXTURE = {
     "site/src/assets/shot-one.png": png(),
 }
 
-PAGES = ("404.html", "companion.html", "dedicated-account.html", "emergency.html", "getting-started.html", "index.html",
-         "manual.html", "mods.html", "phone.html", "security.html", "threat-model.html", "token-injection.html")
+PAGES = ("404.html", "bedrock.html", "companion.html", "dedicated-account.html", "emergency.html", "getting-started.html",
+         "index.html", "manual.html", "mods.html", "phone.html", "security.html", "threat-model.html", "token-injection.html")
 LINKS = ("https://account.example.com/password", "https://account.example.com/sessions?all=1&now=1")
 
 
@@ -531,15 +540,15 @@ class TheSmallSite(SiteCase):
     def test_the_command_line(self):
         status, out, err = self.run_main("--check")
         self.assertEqual((status, err), (0, ""))
-        self.assertIn("wrote 17 files to %s\n" % self.out, out)
-        self.assertIn("check passed: 12 pages, ", out)
+        self.assertIn("wrote 18 files to %s\n" % self.out, out)
+        self.assertIn("check passed: 13 pages, ", out)
         self.assertIn("two runs byte-identical\n", out)
         self.assertIn("preview build: pass --repo-url and --site-url for a deployable one\n", out)
 
     def test_the_command_line_of_a_deployable_build(self):
         status, out, err = self.run_main("--check", "--repo-url", REPO, "--site-url", SITE)
         self.assertEqual((status, err), (0, ""))
-        self.assertIn("check passed: 12 pages, ", out)
+        self.assertIn("check passed: 13 pages, ", out)
         self.assertNotIn("preview build", out)
 
     def test_without_check_nothing_is_checked(self):
@@ -606,7 +615,7 @@ class Addresses(SiteCase):
         self.generate(deploy=True)
         expected = "".join("  <url><loc>%s%s</loc></url>\n" % (SITE, page) for page in (
             "", "getting-started.html", "security.html", "manual.html", "threat-model.html", "token-injection.html",
-            "dedicated-account.html", "mods.html", "companion.html", "phone.html", "emergency.html"))
+            "dedicated-account.html", "mods.html", "companion.html", "phone.html", "bedrock.html", "emergency.html"))
         self.assertEqual(
             (self.out / "sitemap.xml").read_text(encoding="utf-8"),
             '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
@@ -1102,6 +1111,8 @@ class Documents(SiteCase):
         # site the same way, instead of in the repository)
         self.assertIn('It brings <a href="phone.html#the-apps">the phone</a>.', self.page("companion.html"))
         self.assertIn('Part of <a href="companion.html">the companion mod</a>.', self.page("phone.html"))
+        self.assertIn('unlike <a href="phone.html#the-apps">the phone\'s apps</a>; see the <a href="threat-model.html">threat '
+                      'model</a>.', self.page("bedrock.html"))
         self.assertIn('see the <a href="threat-model.html">threat model</a>.', self.page("mods.html"))
         self.edit("docs/COMPANION.md", "(PHONE.md#the-apps)", "(PHONE.md#no-such-section)")
         self.assertFails("companion.html: link 'phone.html#no-such-section': phone.html has no element with id "
@@ -1297,7 +1308,7 @@ class WholeBuild(SiteCase):
         status, out, err = self.run_main("--keep-going", "--check")
         self.assertEqual((status, out), (1, ""))
         self.assertEqual(err, "error: site/src/pages/security.html does not exist\n"
-                              "check failed: 11 link(s) to security.html could not be checked: that page was not built\n"
+                              "check failed: 12 link(s) to security.html could not be checked: that page was not built\n"
                               "error: INCOMPLETE site in %s: 1 problem(s) in the sources (listed above as 'error:')\n"
                               "error: 1 problem(s) in the generated site\n" % self.out)
 

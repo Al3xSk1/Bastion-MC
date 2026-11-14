@@ -1,5 +1,5 @@
 title: Get started | bastion-mc
-description: Requirements, building bastion-mc with cargo, registering your own sign-in application, and the first commands: doctor, an instance, a demo launch that needs no account, signing in, playing, a signed mod profile with the companion mod and its phone, and the graphical front end.
+description: Requirements, building bastion-mc with cargo, registering your own sign-in application, and the first commands: doctor, an instance, a demo launch that needs no account, signing in, playing, a signed mod profile with the companion mod and its phone, Minecraft: Bedrock Edition, and the graphical front end.
 nav: start
 ---
 <p class="label">Get started</p>
@@ -8,11 +8,12 @@ nav: start
 <div class="callout warning">
 <p class="label">What has been run, and what has not</p>
 {{PARAGRAPH README.md "Built and tested on Arch Linux"}}
-<p>The sign-in chain (Microsoft, Xbox, Minecraft) and everything that needs a signed-in account are implemented and tested against scripted replies and a stand-in for Mojang. They have not yet been run against the live services, and neither have the phone's services that need an account of yours: the Spotify Web API, a signed-in Discord, Realms. Not exercised on the development machine either, among other things: NVIDIA graphics, a real Wayland desktop session, launching game versions from the Java 8 era, the real <code>age</code> program with its hardware plugins, and coverage-guided fuzzing, which needs a nightly toolchain. The <a href="manual.html#status">status table in the manual</a> has the details, and the security overview has <a href="security.html#not-verified">the threat model's whole list</a>.</p>
+<p>The sign-in chain (Microsoft, Xbox, Minecraft) and everything that needs a signed-in account are implemented and tested against scripted replies and a stand-in for Mojang. They have not yet been run against the live services, and neither have the phone's services that need an account of yours: the Spotify Web API, a signed-in Discord, Realms. Not exercised on the development machine either, among other things: NVIDIA graphics, a real Wayland desktop session, launching game versions from the Java 8 era, the real <code>age</code> program with its hardware plugins, and coverage-guided fuzzing, which needs a nightly toolchain. Minecraft: Bedrock Edition has not run with the real game at all: there was no Google Play purchase, game file or Microsoft account to run it with. The <a href="manual.html#status">status table in the manual</a> has the details, and the security overview has <a href="security.html#not-verified">the threat model's whole list</a>.</p>
 {{REQUIRE README.md "implemented and tested against scripted replies and a stand-in Mojang; not yet run against the live services"}}
 {{REQUIRE README.md "Neither has anything of the fourth round that needs an account of yours: the Spotify Web API, a signed-in Discord in the phone's browser, Realms."}}
 {{REQUIRE README.md "NVIDIA, Java 8-era versions end to end, real age binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) implemented, not exercised on the development machine"}}
 {{REQUIRE README.md "Not on a real Wayland desktop session, and playability inside gamescope is not assessed"}}
+{{REQUIRE README.md "Nor has Minecraft: Bedrock Edition (the fifth round) run with the real game at all: there was no mcpelauncher-client, no game file, no Google Play purchase and no Microsoft account on the development machine"}}
 </div>
 <nav class="toc" aria-label="On this page">
 <p class="label">On this page</p>
@@ -23,6 +24,7 @@ nav: start
 <li><a href="#oauth">Your own sign-in application</a></li>
 <li><a href="#first-commands">The first commands</a></li>
 <li><a href="#mods">Mods, the companion mod and the phone</a></li>
+<li><a href="#bedrock">Minecraft: Bedrock Edition</a></li>
 <li><a href="#front-end">The graphical front end</a></li>
 <li><a href="#next">Where to go from here</a></li>
 </ol>
@@ -73,7 +75,7 @@ bastion-mc --help</code></pre>
 <p><code>packaging/arch/PKGBUILD</code> makes two packages, <code>bastion-mc</code> and <code>bastion-mc-gui</code>. Until there is a release it is a template: it does not build your checkout, and <code>makepkg</code> builds whatever its <code>source=</code> line points to.</p>
 <p>On the development machine both packages were built from a tarball of the tree: their <code>check()</code> passes, and both binaries pass the hardening check.</p>
 {{REQUIRE README.md "packaging/arch/PKGBUILD does not build this checkout: until there is a release it is a template, and makepkg builds whatever its source= line points to."}}
-{{REQUIRE README.md "both build, their check() passes and both binaries pass the hardening check — run again on the merged tree of the fourth round, from a git archive of that tree"}}
+{{REQUIRE README.md "both build, their check() passes and both binaries pass the hardening check — run again on the merged tree of the fifth round, from a git archive of that tree"}}
 </article>
 </div>
 <p>Settings go in <code>~/.config/bastion-mc/config.toml</code>, which does not exist until you create it: <code>bastion-mc config example</code> prints a commented template of every key, and <code>bastion-mc config path</code> prints where the file goes.</p>
@@ -215,12 +217,30 @@ bastion-mc launch perf                 # add --demo until your client ID is appr
 {{REQUIRE README.md "Type no password into the phone: sign in to sites with bastion-mc browser login <site>, outside the game."}}
 </section>
 
+<section class="section" id="bedrock">
+<h2>Minecraft: Bedrock Edition</h2>
+<p>bastion-mc can also run the Android build of Bedrock: the <code>mcpelauncher-client</code> you install from the AUR (<code>mcpelauncher-linux</code>, and <code>mcpelauncher-ui</code> to download the game), on game files from your own Google Play purchase, on an x86_64 computer. It does not run the Windows edition, in any form. Use a Google account of its own for the purchase. Every Bedrock launch is refused until you set <code>accept_licence_substitution = true</code> under <code>[bedrock]</code>: with it you accept that <code>mcpelauncher-client</code> answers the game's licence query itself, and that the launcher cannot check that a version you import was bought. Then:</p>
+{{REQUIRE README.md "An x86_64 computer, and mcpelauncher-linux (the client) and mcpelauncher-ui (the download tool) from the AUR"}}
+{{REQUIRE README.md "It is not the Windows edition, in any form."}}
+{{REQUIRE README.md "Use a Google account of its own for it"}}
+{{REQUIRE README.md "bastion-mc cannot check that a version you import was bought"}}
+<pre tabindex="0"><code>bastion-mc bedrock import ~/.local/share/mcpelauncher/versions/&lt;version&gt;
+bastion-mc instance new bedrock --bedrock 1.26.62.1
+bastion-mc launch bedrock</code></pre>
+<p>Each session that needs your Microsoft account starts with a sign-in on Microsoft's page, outside the game. Where the Arch package's handler for the address the sign-in ends on is registered, your browser hands that address back by itself; otherwise you paste it into the front end or the terminal. <strong>The game holds your Xbox sign-in for the whole session</strong>, and a game taken over can use it and copy it out: read <a href="bedrock.html">the Bedrock page</a> before you sign in. None of it has run with the real game.</p>
+{{REQUIRE README.md "Where bastion-mc's handler for these links is registered, the browser hands it back by itself"}}
+{{REQUIRE README.md "Otherwise, paste the address into the front end's panel or into the terminal."}}
+{{REQUIRE README.md "A game taken over (by a flaw that a hostile server, Realm or add-on exploits, or through a compromised client) can use that sign-in, and copy it out through any connection it is allowed."}}
+{{REQUIRE README.md "Nor has Minecraft: Bedrock Edition (the fifth round) run with the real game at all"}}
+</section>
+
 <section class="section" id="front-end">
 <h2>The graphical front end</h2>
-<p><code>bastion-mc-gui</code> is an optional window around the same launcher. A rail on its left leads to five pages: the launch, where you pick the instance, start the game, follow the download and, once the game has started, see which protections that launch runs with; the accounts, where you pick an account and sign in; the instances, where you create one; a console with the launcher's, the relay's and the game's output; and the security page with the emergency functions: scram, the runbook and its links. While a Realms join waits for your approval, the launch page shows its prompt, in <code>code</code> mode with the code. The phone's own commands, <code>browser login</code>, <code>spotify …</code> and <code>realms totp-setup</code>, are run in a terminal: the window offers none of them.</p>
+<p><code>bastion-mc-gui</code> is an optional window around the same launcher. A rail on its left leads to five pages: the launch, where you pick the instance, start the game, follow the download and, once the game has started, see which protections that launch runs with; the accounts, where you pick an account and sign in; the instances, where you create one; a console with the launcher's, the relay's and the game's output; and the security page with the emergency functions: scram, the runbook and its links. While a Realms join waits for your approval, the launch page shows its prompt, in <code>code</code> mode with the code, and while a Bedrock game waits for a Microsoft sign-in, the panel that opens the sign-in page and takes the address it ended on. The phone's own commands, <code>browser login</code>, <code>spotify …</code> and <code>realms totp-setup</code>, are run in a terminal: the window offers none of them.</p>
 {{REQUIRE README.md "A navigation rail on the left leads to five pages"}}
 {{REQUIRE README.md "While a Realms join waits for your approval, the page shows the prompt: the Realm, the server address the game would connect to, in code mode the six-digit code"}}
 {{REQUIRE README.md "It offers none of the fourth round's commands (browser login, spotify …, realms totp-setup): they are run in a terminal."}}
+{{REQUIRE README.md "While its game waits for a Microsoft sign-in, the page shows the Microsoft sign-in for Bedrock panel (Open the sign-in page, Copy link, a field to paste the address into with Send, and Cancel)"}}
 <pre tabindex="0"><code>cargo build --release --workspace
 target/release/bastion-mc-gui</code></pre>
 <p>The first command builds both programs. The front end looks for <code>bastion-mc</code> next to itself, and otherwise in <code>/usr/bin</code>. Building it needs nothing beyond the Rust toolchain; its system libraries are loaded at run time:</p>
@@ -246,7 +266,7 @@ pacman -S --needed xdg-utils                         # the "Open link" button</c
 {{REQUIRE docs/THREAT_MODEL.md "U, or any other X11 client, reads the device code or the sign-in link off the window, or injects clicks"}}
 {{REQUIRE docs/THREAT_MODEL.md "A Realms approval code read off the window (the Launch page shows it while a join waits) is not useless"}}
 {{REQUIRE README.md "cannot be unlocked from the window"}}
-{{REQUIRE README.md "tests of the whole application against a stand-in launcher, run by iced's emulator without a display"}}
+{{REQUIRE README.md "tests of the whole application against a stand-in launcher (one of them plays a Bedrock instance), run by iced's emulator without a display"}}
 {{REQUIRE README.md "a real demo launch driven through its backend worker and through the application's own controls"}}
 {{REQUIRE README.md "the real window started and closed on a private X11 display"}}
 {{REQUIRE README.md "No click in a real window; not run on Wayland; the Realms prompt never shown for a real join"}}
@@ -280,6 +300,10 @@ pacman -S --needed xdg-utils                         # the "Open link" button</c
 <div class="panel quiet">
 <h3><a href="mods.html">Mods</a></h3>
 <p>Signed profiles in practice, <code>profile add</code> and <code>profile check</code>, the aliases, ViaFabric and voice chat on a server.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="bedrock.html">Bedrock Edition</a></h3>
+<p>Importing a version, signing in every session, servers, Realms and event servers, capes on your Java profile, troubleshooting, and what the launcher cannot protect.</p>
 </div>
 </div>
 </section>

@@ -19,9 +19,9 @@ something a page needs, change the generator and its tests, not the page around 
 Pages (fixed): `index.html` (overview), `getting-started.html`, `security.html`,
 `404.html`, and the rendered documents `manual.html` (README.md), `threat-model.html`,
 `token-injection.html`, `dedicated-account.html`, `mods.html` (docs/MODS.md),
-`companion.html` (docs/COMPANION.md), `phone.html` (docs/PHONE.md), `emergency.html` (the
-runbook). Navigation (fixed): Get started, Security, Manual, Threat model, Emergency; the
-footers list every page.
+`companion.html` (docs/COMPANION.md), `phone.html` (docs/PHONE.md), `bedrock.html`
+(docs/BEDROCK.md), `emergency.html` (the runbook). Navigation (fixed): Get started,
+Security, Manual, Threat model, Emergency; the footers list every page.
 
 ## The class vocabulary
 

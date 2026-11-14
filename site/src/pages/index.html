@@ -8,6 +8,8 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 <p class="lede">Fabric instances also get the launcher's own companion mod, with an in-game phone: Spotify, Discord and other sites you list in a browser that runs in a sandbox of its own, clips, approvals of Realms joins and settings sync. The mod is interface only: the launcher decides what each command from the phone may do, and no secret of these services enters the game.</p>
 {{REQUIRE README.md "an in-game phone (Spotify, Discord and other sites you list in a browser that runs in a sandbox of its own, clips, approvals of Realms joins, settings sync)"}}
 {{REQUIRE README.md "The mod is interface only: the launcher decides what each command from the phone may do, and no token, cookie or other secret of these services enters the game."}}
+<p class="lede">It can also run Minecraft: Bedrock Edition, the Android build, started by your installed <code>mcpelauncher-client</code> from your own Google Play purchase, in the same sandbox with a profile of its own, mainly for Mojang's Bedrock-only cape events. There, unlike on Java, the game itself holds your Xbox sign-in for the session (<a href="#bedrock">block 08</a>).</p>
+{{REQUIRE README.md "It can also run Minecraft: Bedrock Edition — the Android build, started by your installed mcpelauncher-client from your own Google Play purchase — in the same sandbox, with a profile of its own, mainly for Mojang's Bedrock-only cape events. There, unlike on Java, the game itself holds your Xbox sign-in for the session"}}
 <p class="actions">
 <a class="button primary" href="getting-started.html">Get started</a>
 <a class="button" href="#not-defended">What it does not defend</a>
@@ -17,13 +19,14 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 
 <div class="callout warning">
 <p class="label">Pre-release</p>
-<p><strong>Sign-in has not yet been run against the live Microsoft, Xbox and Mojang services</strong>, and neither has anything that needs a signed-in account, such as joining a real multiplayer server, nor anything of the phone's services that needs an account of yours: the Spotify Web API, a signed-in Discord, Realms. The sign-in chain is implemented and tested against scripted replies and a stand-in Mojang. What has run with the real game is Mojang's demo mode, without an account, vanilla and as a signed Fabric profile, and the companion mod with its phone on one version of each of its ten families of Minecraft versions, with stand-in apps behind the phone. There are no releases and no binary downloads. The section <a href="#status">What has been tested, and what has not</a> has the whole list.</p>
+<p><strong>Sign-in has not yet been run against the live Microsoft, Xbox and Mojang services</strong>, and neither has anything that needs a signed-in account, such as joining a real multiplayer server, nor anything of the phone's services that needs an account of yours: the Spotify Web API, a signed-in Discord, Realms. The sign-in chain is implemented and tested against scripted replies and a stand-in Mojang. What has run with the real game is Mojang's demo mode, without an account, vanilla and as a signed Fabric profile, and the companion mod with its phone on one version of each of its ten families of Minecraft versions, with stand-in apps behind the phone. Minecraft: Bedrock Edition has not run with the real game at all: every part of it was run against stand-ins. There are no releases and no binary downloads. The section <a href="#status">What has been tested, and what has not</a> has the whole list.</p>
 {{REQUIRE README.md "not yet run against the live services"}}
 {{REQUIRE docs/THREAT_MODEL.md "joining a real multiplayer server (needs a signed-in session"}}
 {{REQUIRE README.md "Neither has anything of the fourth round that needs an account of yours: the Spotify Web API, a signed-in Discord in the phone's browser, Realms."}}
 {{REQUIRE README.md "(demo mode, no account), vanilla and as a signed Fabric profile"}}
 {{REQUIRE README.md "in the real game (demo mode, Fabric Loader 0.20.1, the nested compositor on a private X display), on the representative of each family"}}
 {{REQUIRE README.md "all of it against the demo service (fake apps, a test switch)"}}
+{{REQUIRE README.md "Nor has Minecraft: Bedrock Edition (the fifth round) run with the real game at all: there was no mcpelauncher-client, no game file, no Google Play purchase and no Microsoft account on the development machine, so all of it ran against stand-ins."}}
 </div>
 
 <section class="section" id="layers">
@@ -32,7 +35,7 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 <figure class="diagram">
 <img src="{{ROOT}}assets/layers-stacked.svg" width="328" height="1453" alt="Diagram of the trust boundaries on the host, under your user account. On one side the launcher, the trusted computing base: sign-in, the verified store, the egress relay and DNS responder, the credential broker, the log relay and the launch frame; before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. On the other side the game's Java process, treated as hostile from its first instruction and by default holding a placeholder, not the access token. It sits inside four nested frames: systemd scope, namespaces, Landlock and seccomp. Inside them: an empty root, a scratch directory and the saves, logs and config of one instance writable, mods and packs read-only, a network with no route. Three deliberate holes lead out of the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device. The network is outside the host; the game has no route to it. An optional front end is a separate process that holds no token.">
 <img src="{{ROOT}}assets/layers.svg" width="960" height="606" alt="Diagram of the trust boundaries on the host, under your user account. On one side the launcher, the trusted computing base: sign-in, the verified store, the egress relay and DNS responder, the credential broker, the log relay and the launch frame; before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. On the other side the game's Java process, treated as hostile from its first instruction and by default holding a placeholder, not the access token. It sits inside four nested frames: systemd scope, namespaces, Landlock and seccomp. Inside them: an empty root, a scratch directory and the saves, logs and config of one instance writable, mods and packs read-only, a network with no route. Three deliberate holes lead out of the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device. The network is outside the host; the game has no route to it. An optional front end is a separate process that holds no token." hidden>
-<figcaption>The trust boundaries on your machine, drawn after section 3 of the <a href="threat-model.html#3-trust-boundaries">threat model</a>. The launcher is the trusted part; the game is not, and runs inside a systemd scope, namespaces, Landlock and a seccomp filter, with three deliberate holes. The audio socket among them is what the default setting <code>audio = "pulse"</code> hands over; <code>audio = "none"</code> removes it, and <code>audio = "alsa"</code> hands over the raw sound devices instead. The drawing shows a launch without the companion mod: in a Fabric profile the sandbox also gets the mod, read-only, and one socket to the launcher (block 07). It shows the mechanisms, not their limits: blocks 01 to 05 below go through it and say what stays open at each. Blocks 06 and 07 are about the account itself and about the phone, which the drawing does not show.</figcaption>
+<figcaption>The trust boundaries on your machine, drawn after section 3 of the <a href="threat-model.html#3-trust-boundaries">threat model</a>. The launcher is the trusted part; the game is not, and runs inside a systemd scope, namespaces, Landlock and a seccomp filter, with three deliberate holes. The audio socket among them is what the default setting <code>audio = "pulse"</code> hands over; <code>audio = "none"</code> removes it, and <code>audio = "alsa"</code> hands over the raw sound devices instead. The drawing shows a launch without the companion mod: in a Fabric profile the sandbox also gets the mod, read-only, and one socket to the launcher (block 07). It shows the mechanisms, not their limits: blocks 01 to 05 below go through it and say what stays open at each. Blocks 06 to 08 are about the account itself, the phone and Bedrock, which the drawing does not show.</figcaption>
 </figure>
 <p>Each block below says what is in force at one layer and names what stays open there. The blocks are a summary: the <a href="security.html">security overview</a> goes through the mechanisms one by one, and the <a href="threat-model.html#4-attack-surface-matrix">attack surface matrix</a> of the threat model has every row, with the attack, the defence, what remains and, where there is one, the test or the experiment behind the claim.</p>
 <div class="grid two">
@@ -99,13 +102,13 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 <ul class="defended">
 <li>The launcher's DNS responder answers only for allowlisted names and never forwards a query. Its relay passes TCP only to Mojang's service domains on port 443, with a matching SNI, and to the game servers you allowlisted.</li>
 <li>Multiplayer servers must be allowlisted, in the configuration or for one session with <code>--join</code>. Everything else is unreachable.</li>
-<li>Voice chat is the only UDP the launcher relays out of the sandbox, and only to a port that a server's rule names, only while a game connection to that server is open and only to the address that connection uses.</li>
+<li>Voice chat is the only UDP the launcher relays out of a Java game's sandbox, and only to a port that a server's rule names, only while a game connection to that server is open and only to the address that connection uses.</li>
 <li>By default the game does not get your access token. It is given a per-launch placeholder; the launcher's credential broker keeps the real token and attaches it only to an explicit list of Mojang API requests that playing needs.</li>
 <li>The broker refuses requests from the game to change your skin, cape or name under every configuration.</li>
 <li>Realms is refused unless you choose how its joins are approved. Then the broker also answers for Realms, and every join waits for an approval you give outside the game, typed into the phone, before the game gets one connection to that Realm's server.</li>
 <li>Where the token does have to be in the game, it still never touches a command line or the environment.</li>
 </ul>
-{{REQUIRE README.md "Voice chat is the only UDP the launcher relays out of the sandbox, and only to a port that a server's rule names"}}
+{{REQUIRE README.md "Voice chat is the only UDP the launcher relays out of a Java game's sandbox, and only to a port that a server's rule names"}}
 {{REQUIRE README.md "Datagrams are relayed to that port only while a game connection to that server is open, and only to the address that game connection is using"}}
 {{REQUIRE README.md "Realms is refused unless you choose how its joins are approved ([realms] approve). Then the broker also answers for the Realms hosts, and every join waits for an approval you give outside the game before the game gets one connection to that Realm's server"}}
 {{REQUIRE docs/THREAT_MODEL.md "every join needs an approval given outside the game — a code shown by the launcher, or your authenticator's, typed into the phone"}}
@@ -232,6 +235,38 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 {{REQUIRE README.md "code in the game of one instance can change, through what it leaves in its options.txt, the listed settings of your other instances — bind a key elsewhere, change a volume, the field of view, the language"}}
 <p><a href="threat-model.html#47-the-in-game-phone-and-its-services">Threat model 4.7, rows H1 to H23</a> · <a href="phone.html">The phone</a> · <a href="companion.html">The companion mod</a></p>
 </article>
+<article class="panel caution" id="bedrock">
+<p class="label">08 · Minecraft: Bedrock Edition</p>
+<h3>The Android build, in the same sandbox</h3>
+<p>The launcher runs the <code>mcpelauncher-client</code> you installed from the AUR on game files from your own Google Play purchase, in the sandbox Java games run in, with a profile of its own. It does not run the Windows edition in any form: that build runs on Linux only after the game is decrypted outside Microsoft's protected path. Nothing in the launcher decrypts, patches or answers a licence check, and every Bedrock launch is refused until you accept that <code>mcpelauncher-client</code> answers the game's licence query itself.</p>
+{{REQUIRE README.md "that build runs on Linux only after keys are extracted from Microsoft's licence data and the game is decrypted outside Microsoft's protected path"}}
+{{REQUIRE README.md "Nothing in bastion-mc decrypts, patches or answers a licence check."}}
+{{REQUIRE README.md "Every Bedrock launch is refused until you accept this"}}
+<p class="label">In force</p>
+<ul class="defended">
+<li>The game reaches Microsoft's and Mojang's Bedrock services by name, the servers you listed and the Realms and event servers you approved, and nothing else. It may execute only the client, its libraries, the dynamic loader and the launcher's sign-in stub; native mods are not supported.</li>
+<li>Microsoft's sign-in page opens outside the game, every session; your password and two-factor codes never reach it. A Realms or event-server join is approved outside the game too, in the front end or on the terminal.</li>
+<li>No Java credential exists in a Bedrock session. The game's data directory belongs to the session alone and is deleted at its end, with the game's sign-in in it; only the worlds and settings are kept.</li>
+</ul>
+{{REQUIRE README.md "In a session the game reaches Microsoft's and Mojang's Bedrock services by name, the servers you listed and the Realms and event servers you approved, and nothing else. It may execute only the client, its libraries, the dynamic loader and bastion-mc's sign-in stub"}}
+{{REQUIRE README.md "Only Microsoft's page for Minecraft for Android's own client (https://login.live.com/…) is ever offered, and your password and two-factor codes never reach the game."}}
+{{REQUIRE README.md "native mods are not supported (the mods directory is empty and read-only)"}}
+{{REQUIRE README.md "There is no phone in a Bedrock session, so you approve outside the game: in the front end's Realms panel (Approve join, Refuse), or by typing the code on the terminal of a terminal launch — never in the game"}}
+{{REQUIRE README.md "No Java credential exists in a Bedrock session"}}
+{{REQUIRE README.md "The game's data directory belongs to the session alone and is deleted at its end, with the game's sign-in in it. Kept between sessions, in the instance's bedrock-data/, are only the worlds"}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li><strong>The game holds your Xbox sign-in for the whole session</strong>: its own sign-in code needs it. A game taken over can use it and carry it away through any server, Realm or Xbox endpoint it may reach; your Realms, your Minecoins, your Bedrock character and possibly your Java profile are at stake until you sign out everywhere at Microsoft.</li>
+<li>The launcher cannot check that a version you import was bought, and it cannot see the Bedrock side of the account: the profile canary watches the Java profile only.</li>
+<li>None of it has run with the real client, the real game or an account; the client's system-call allowlist was derived from its source and never profiled.</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "can carry it away through any server, Realm or Xbox or Minecraft endpoint it is allowed to reach: the filtered network narrows those paths, it does not close them"}}
+{{REQUIRE docs/THREAT_MODEL.md "At stake: your Realms (with the owner's rights), your Minecoins, your Bedrock character and cape, your Xbox friends, and possibly your Java profile (not verified)"}}
+{{REQUIRE docs/THREAT_MODEL.md "bastion-mc cannot tell a bought version from one that was not"}}
+{{REQUIRE docs/THREAT_MODEL.md "The canary sees the Java profile only, and only at the next Java sign-in"}}
+{{REQUIRE docs/THREAT_MODEL.md "The allowlist was derived from the client's source, never profiled on the real client"}}
+<p><a href="threat-model.html#48-minecraft-bedrock-edition-the-android-build">Threat model 4.8, rows B1 to B39</a> · <a href="bedrock.html">The Bedrock page</a></p>
+</article>
 </div>
 </section>
 
@@ -250,10 +285,11 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 
 <section class="section" id="front-end">
 <h2>The front end</h2>
-<p>The launcher is a command-line program. <code>bastion-mc-gui</code> is an optional window around it, of its own design: a dark instrument panel with a ring gauge around the launch control, and no advertising, news, shop or telemetry. A rail leads to five pages: the launch, with the instance, the stages of a launch and, once the game starts, which protections that launch runs with; the accounts, with sign-in; the instances; a console with the launcher's, the relay's and the game's output; and security, with the emergency panel. While a Realms join waits for your approval, the launch page shows its prompt. The phone's own commands are run in a terminal: the window offers none of them.</p>
+<p>The launcher is a command-line program. <code>bastion-mc-gui</code> is an optional window around it, of its own design: a dark instrument panel with a ring gauge around the launch control, and no advertising, news, shop or telemetry. A rail leads to five pages: the launch, with the instance, the stages of a launch and, once the game starts, which protections that launch runs with; the accounts, with sign-in; the instances; a console with the launcher's, the relay's and the game's output; and security, with the emergency panel. While a Realms join waits for your approval, the launch page shows its prompt, and while a Bedrock game waits for a Microsoft sign-in, the panel that opens the sign-in page. The phone's own commands are run in a terminal: the window offers none of them.</p>
 {{REQUIRE README.md "It is its own design — a dark instrument panel with a ring gauge around the launch control — and it has no advertising, no news, no shop and no telemetry"}}
 {{REQUIRE README.md "A navigation rail on the left leads to five pages"}}
 {{REQUIRE README.md "While a Realms join waits for your approval, the page shows the prompt"}}
+{{REQUIRE README.md "While its game waits for a Microsoft sign-in, the page shows the Microsoft sign-in for Bedrock panel"}}
 {{REQUIRE README.md "It offers none of the fourth round's commands (browser login, spotify …, realms totp-setup): they are run in a terminal."}}
 <div class="callout note">
 <p><strong>These pictures are not captures of a session.</strong> They are the front end's own test snapshots: its tests draw every state of the window in software from fixed test data. No game was running and nobody was signed in; the player name, the account labels, the instance and the timer are test data.</p>
@@ -346,6 +382,10 @@ description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch
 <div class="panel quiet">
 <h3><a href="mods.html">Mods</a></h3>
 <p>Signed profiles, fetching mods from Modrinth with verified hashes, what Modrinth learns, ViaFabric, and the server rule that lets voice chat through.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="bedrock.html">Bedrock Edition</a></h3>
+<p>The Android build in the sandbox: what you need, importing a version, signing in every session, servers, Realms and event servers, capes on your Java profile, and what the launcher cannot protect.</p>
 </div>
 </div>
 <div class="callout danger">

@@ -174,6 +174,7 @@ fn the_site_builds_and_passes_its_checks_as_a_preview_and_as_deployed() {
             "mods.html",
             "companion.html",
             "phone.html",
+            "bedrock.html",
             "emergency.html",
             "404.html",
             "sitemap.xml",

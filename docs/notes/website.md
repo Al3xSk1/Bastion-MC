@@ -3,8 +3,9 @@
 Written on 2026-11-13 by the deploy role of the website team, brought up to date on
 2026-11-14 by the integrator who made the parts one site, by the fixers who acted on the
 review of the site, by the engineer who closed the website after them (section 10 is the
-short account of the review), and last, the same day, by the engineer who brought the site
-up to the documents of the third and fourth rounds after it was merged (section 11).
+short account of the review), by the engineer who brought the site up to the documents of
+the third and fourth rounds after it was merged (section 11), and last, the same day, by
+the documents pass of the fifth round (Minecraft: Bedrock Edition, section 12).
 Everything here comes from what was run in the
 working copy. "Verified" means run or looked at on the development machine. What could not
 be verified there is listed in section 8, not left out. What was done and verified in
@@ -24,7 +25,7 @@ GitHub spells it. Whether those stay is the owner's decision.
 
 ## 1. What exists
 
-A static site of twelve pages: no JavaScript, one style sheet, no request to any other host.
+A static site of thirteen pages: no JavaScript, one style sheet, no request to any other host.
 
 | Page | Made from |
 |---|---|
@@ -37,6 +38,7 @@ A static site of twelve pages: no JavaScript, one style sheet, no request to any
 | `mods.html` | `docs/MODS.md` (since 2026-11-14, section 11) |
 | `companion.html` | `docs/COMPANION.md` (since 2026-11-14) |
 | `phone.html` | `docs/PHONE.md` (since 2026-11-14) |
+| `bedrock.html` | `docs/BEDROCK.md` (since 2026-11-14, section 12) |
 | `emergency.html` | `docs/SCRAM_RUNBOOK.md`, the device warning moved to the top |
 
 `docs/README.md`, the index of the documents, is not rendered: most of its lines point to
@@ -320,13 +322,13 @@ On paper (the print rules): text #000, secondary #222 (15.91), labels #333 (12.6
 | When | What | How |
 |---|---|---|
 | The front end changes (its look, a text on a page the pictures show, its test fixtures) | The four pictures of the overview (`launch`, `refused`, `accounts`, `security`) and what the page says about them | `cargo test -p bastion-mc-gui`, then `site/update-screenshots.sh` (it reads `target/gui-snapshots/`; another directory can be given as its argument; it copies the files as they are and installs all of them or none). Look at every picture it reports as "updated" and read that picture's `alt` text and caption in `site/src/pages/index.html` against it. Then `python3 site/build.py --check`. Last done 2026-11-14 on the merged front end (section 11). |
-| `README.md` or a document under `docs/` changes | The eight rendered pages follow by themselves. The pieces that hand-written pages include word for word (`{{SECTION …}}`, `{{PARAGRAPH …}}`) follow too, or stop the build and name the heading or paragraph that is gone: then the document was restructured, so change the prefix in the directive and read the sentences around it again. A hand-written sentence follows nothing, unless it carries a `{{REQUIRE source "phrase"}}`, which stops the build when the phrase has left the document. | `python3 site/build.py --check`. Then the claim maps in `docs/notes/website-progress.md` (Appendix B): they name the source of every hand-written statement. First the callout under the overview's title and the "Stays open" lists, against the new "Status" table and the new "Not exercised" paragraph. |
+| `README.md` or a document under `docs/` changes | The nine rendered pages follow by themselves. The pieces that hand-written pages include word for word (`{{SECTION …}}`, `{{PARAGRAPH …}}`) follow too, or stop the build and name the heading or paragraph that is gone: then the document was restructured, so change the prefix in the directive and read the sentences around it again. A hand-written sentence follows nothing, unless it carries a `{{REQUIRE source "phrase"}}`, which stops the build when the phrase has left the document. | `python3 site/build.py --check`. Then the claim maps in `docs/notes/website-progress.md` (Appendix B): they name the source of every hand-written statement. First the callout under the overview's title and the "Stays open" lists, against the new "Status" table and the new "Not exercised" paragraph. |
 | A release is made, or binaries are offered | "Pre-release" (the chip next to the name and the footer of every page; the overview, the security overview and getting started say it too) and "There are no releases and no binary downloads" (both footers, and twice on the overview) | By hand; nothing checks these. `grep -rni -e pre-release -e 'no releases' site/src` finds them. |
 | Section 3 of the threat model changes (its drawing, the launcher's parts, the holes) | The two drawings `site/src/assets/layers.svg` and `layers-stacked.svg`, their `alt` texts (on the overview and the security overview) and captions | The drawings are plain SVG with comments and can be edited by hand; the script that drew them is not committed (see section 9). They show a launch without the companion mod: the companion channel, the phone's dispatcher and helpers and the Fabric profile's socket to the launcher are left to the captions, which say so. Their words were corrected by hand on 2026-11-14 (section 11); `--check` holds the `img` sizes in the pages to the drawings' proportions. |
-| Section 5 of the threat model changes | `security.html#not-defended` restates its sixteen points by hand (the overview includes them word for word) | Read that section of `site/src/pages/security.html` again; its ties fail on a new, removed or reworded point. |
+| Section 5 of the threat model changes | `security.html#not-defended` restates its nineteen points by hand (the overview includes them word for word) | Read that section of `site/src/pages/security.html` again; its ties fail on a new, removed or reworded point. |
 | What the documents say about sound changes (`audio`: row D3, the README's "Sound") | The sound statements of the overview (blocks 02 and 05), getting started (the sound panel), the security overview (`#holes`, the sound and graphics panels) and both drawings' captions describe all three values, `pulse`, `none` and `alsa`, since the documents describe `alsa` (2026-11-14) | `grep -n 'audio = ' site/src/pages/*.html`; read each against the new text. |
 | README.md's `<!-- COUNTS -->` markers are filled in or move | Nothing: the converter leaves HTML comments out, as GitHub does, and the hand-written pages carry no test counts | — |
-| A new user document under `docs/` that the README links to | Whether it becomes a page: `DOCUMENTS` in `site/build.py`, both footers, `404.html`, `site/CONTRACT.md`, the page list in `tests/site.rs` and the small site in `site/test_build.py` | As `docs/MODS.md`, `docs/COMPANION.md` and `docs/PHONE.md` were added (section 11). Until then the manual's link leads to the repository. |
+| A new user document under `docs/` that the README links to | Whether it becomes a page: `DOCUMENTS` in `site/build.py`, both footers, `404.html`, `site/CONTRACT.md`, the page list in `tests/site.rs` and the small site in `site/test_build.py` | As `docs/MODS.md`, `docs/COMPANION.md` and `docs/PHONE.md` were added (section 11), and `docs/BEDROCK.md` after them (section 12). Until then the manual's link leads to the repository. A comment on lines of its own (`<!-- … -->`) is a raw HTML block, which the converter refuses: take it out or make it part of a paragraph. |
 | The help text in `src/cli.rs` changes | Commands shown on hand-written pages | `--check` fails and names the command. |
 | `runbook::LINKS` or `docs/SCRAM_RUNBOOK.md` changes | The emergency page | `--check` fails unless the page links to exactly the launcher's list. |
 | An action publishes a release | The four pins | The header of `.github/workflows/pages.yml`. |
@@ -369,53 +371,38 @@ third and fourth rounds were merged):
   does not build the checkout and that `makepkg` builds whatever its `source=` line points
   to. Whether it should build the local tree or a signed tag is still the owner's decision.
 
+**Settled by the documents of the fourth round** (read again against the current documents
+and code on 2026-11-14, section 12):
+
+- **Realms without a phone**: the README says, as rows J21 and J22 do, that a launch without a
+  phone does not broker Realms (and, since the fifth round, that a Bedrock session approves
+  outside the game without one).
+- **Clips in a burner session**: the README says that a burner session records no clips.
+- **UDP in section 5, item 7** names the launcher's DNS responder (row J10) as well.
+- **`audio = "alsa"`**: row D4 and section 3's drawing name `/dev/snd`, and
+  `examples/config.toml` says what `alsa` hands over.
+- **The front end and its secret**: the README's drawing says "no tokens", and section 3 of
+  the threat model names the one secret (the Realms code; since the fifth round also what you
+  answer a Bedrock prompt with).
+- **The front end's scram line** names what scram removes since the fourth round.
+
 **Still open, for the owner of the documents:**
 
-- **The README contradicts the threat model and the code about Realms without a phone.**
-  Its "Realms" ("In an instance without the phone Realms is still brokered when `approve`
-  is set — the game sees your Realms list —, but nothing can approve a join: its prompt runs
-  out") and its phone section ("Settings sync and the brokering of Realms work without
-  it — in a vanilla instance too —") say that Realms is brokered without a phone. Rows J21
-  and J22, `docs/PHONE.md` and `src/launch.rs` (`realms_on` requires `phone_possible`) say
-  that a launch without a phone does not broker Realms and refuses its approvals up front.
-  The pages follow the threat model.
-- **The README says clips are recorded in a burner session** ("clips are recorded as in any
-  other launch, and a clip saved there stays", in "The in-game phone"); `docs/PHONE.md` says
-  "no clips (a burner session keeps nothing)", and `src/launch.rs` logs "clips: not
-  recording — a burner session keeps nothing". The pages say nothing about clips in a
-  burner session.
-- **UDP in section 5, item 7** now reads "UDP exists only as relayed datagrams to the UDP
-  ports that a server rule names"; row J10 and experiment E15 describe UDP to the launcher's
-  DNS port as well. The security overview restates the item with that qualification (as it
-  did for the item's earlier wording). Fix, if wanted: the same qualification in the item.
-- **`audio = "alsa"` and the device right.** Row D4 says the device-ioctl right is "limited
-  to those nodes" (the graphics card's); with `alsa` the raw sound devices get it too
-  (`src/sandbox/display.rs` puts `/dev/snd` on the sandbox's device list; read in the code,
-  not run). Section 3's drawing shows "1 audio socket" only, and `examples/config.toml`
-  still offers `alsa` without the warning the README now gives. The security overview says
-  only what D3 and D4 say.
-- **The front end and its secret.** The README's drawing of the front end says "(no
-  secrets: window, fonts, GPU)"; section 3 of the threat model says that the event protocol
-  carries one secret, the code of a waiting Realms approval. The pages and the layer
-  drawings now say that the front end holds no token, and name that code.
 - **Not every row of the attack surface matrix names a test.** In the column "Verified by",
   N2, G5, H4 and H5 have a dash, H14 says "from the design and Firefox's documented
   behaviour; not tested separately", D4 "No test of its own; real launches render through
-  it" and J17 "best effort; not measured". The overview says "where there is one" and "a
-  few rows name none".
+  it" and J17 "best effort; not measured"; since the fifth round B3 is a finding read in the
+  client's manifest, B39 has a dash (not the launcher's to defend) and B15 names the network
+  rows' tests. The overview says "where there is one" and "a few rows name none".
 
 **Still open, for the owner of the front end:**
 
 - **Its Realms approval snapshot pairs the prompt with a vanilla instance**
   (`launch-realms-approval-*.png`: "vanilla, Minecraft 26.3"), a state the launcher never
-  reports, since a launch without a phone refuses Realms approvals up front. The overview
-  therefore shows no picture of the prompt; with a Fabric instance in that fixture it could
-  (a `MENU` line in `site/update-screenshots.sh` and a `{{SHOT}}` on the overview).
-- **Its scram line** ("Stops running games, deletes refresh tokens and vault files. Revokes
-  nothing at Microsoft.", `gui/src/view/security.rs`), which `shot-security.png` shows,
-  does not name what scram removes since the fourth round besides the sign-ins: the Spotify
-  token, the Realms TOTP secret and the phone browser's profile. The picture's `alt` text
-  quotes the line as it is.
+  reports for a Java launch, since a Java launch without a phone refuses Realms approvals up
+  front. The overview therefore shows no picture of the prompt; with a Fabric instance in that
+  fixture it could (a `MENU` line in `site/update-screenshots.sh` and a `{{SHOT}}` on the
+  overview).
 
 ## 8. Not verified
 
@@ -663,3 +650,43 @@ maps.
   front end's one secret, rows without a test; for the owner of the front end: the Realms
   prompt's fixture and the scram line), the PKGBUILD decision, and the owner's two
   publishing steps (section 3).
+
+## 12. Minecraft: Bedrock Edition on the site (2026-11-14)
+
+The fifth round added Minecraft: Bedrock Edition (the Android build, run by the user's
+installed `mcpelauncher-client` in the launcher's sandbox) and, in its documents pass, the
+README's section on it, the threat model's section 4.8 (rows B1 to B39) with additions to
+sections 1, 2, 3, 5, 6, 7 and 8, the runbook's Bedrock sentences and the user guide
+`docs/BEDROCK.md`. The site was brought along in the same pass; the hand-over file's section
+"Round 5" has the detail and Appendix B the new claim maps.
+
+- **A page more**: `bedrock.html`, from `docs/BEDROCK.md`, in the footers, on the error page
+  and in "Where to read on" on the overview, getting started and the security overview. The
+  navigation keeps its five entries. The guide's HTML comment at the top (who wrote and
+  checked it) was taken out of the document: the converter refuses a raw HTML block, which a
+  comment on lines of its own is. The guide converts as it is otherwise.
+- **The hand-written pages**: the overview has a third lede, a sentence in the callout (Bedrock
+  has not run with the real game at all) and block 08, with what is in force and what stays
+  open (above all: the game holds your Xbox sign-in for the session); getting started a
+  sentence in the callout and a section with the three commands, the licence switch and the
+  sign-in; the security overview the new asset, what S, M and C mean in a Bedrock session, a
+  section on Bedrock with what it stops and what it does not, and section 5's points 17 to 19.
+  The pages carry 386 ties now (336 before). The commands on them passed the check against
+  the help text.
+- **What the documents' changes broke** (five ties): block 03's "Voice chat is the only UDP
+  the launcher relays out of the sandbox" — the README now says "out of a Java game's
+  sandbox", because a Bedrock session relays RakNet to the servers you list; the page says
+  the same now; two quotes of the Status table on getting started (re-quoted: the packages
+  built on the fifth round's tree, five emulator tests); and the chain of the not-defended
+  list, at point 7 (its Bedrock sentence) and after point 16.
+- **Section 7, brought up to date**: six of its items were settled by the documents of the
+  fourth round (TODO.md, the fourth round's "Integration") and are listed as settled now,
+  after reading them again against the current documents and code; still open are the rows
+  without a test (B3, B15 and B39 added) and the Realms prompt's fixture.
+- **Verified**: `python3 -I site/build.py --check` passes (13 pages, 1082 internal links, 86
+  outbound links, two runs byte-identical), and so does the deployable build;
+  `python3 -I -B -m unittest discover -s site -p "test_*.py"`: 361 tests, OK; `cargo test
+  --test site`: 5 passed. **Not done**: the new and changed pages were not rendered in a
+  browser or measured at the 44 widths of section 11 (the tools of the earlier passes are not
+  in this clone); the drawings were not changed — they show a Java launch, and a Bedrock
+  session's sandbox is described in words only.

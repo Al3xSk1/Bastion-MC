@@ -100,8 +100,8 @@ MARKER = ".bastion-site-output"
 DOCUMENTS = (
     ("README.md", "manual.html", "Manual", "manual",
      "The bastion-mc manual: a demo launch without an account, each layer of protection with its limits, the "
-     "graphical front end, mods, the companion mod and the in-game phone, Realms, settings sync, accounts, the "
-     "emergency steps, the configuration and the tests."),
+     "graphical front end, mods, the companion mod and the in-game phone, Realms, settings sync, Minecraft: Bedrock "
+     "Edition, accounts, the emergency steps, the configuration and the tests."),
     ("docs/THREAT_MODEL.md", "threat-model.html", "Threat model", "threat-model",
      "What bastion-mc defends, against whom, with which mechanism and how each claim is checked, and what it does "
      "not defend."),
@@ -121,6 +121,10 @@ DOCUMENTS = (
     ("docs/PHONE.md", "phone.html", "In-game phone", "",
      "The in-game phone and its services: Spotify, Discord and the browser, clips, Realms approvals and settings sync; "
      "what each app does, its settings and limits, what leaves the machine and what the game can see."),
+    ("docs/BEDROCK.md", "bedrock.html", "Bedrock Edition", "",
+     "Minecraft: Bedrock Edition under bastion-mc: the Android build run by your installed mcpelauncher-client in the "
+     "sandbox, what it is and is not, the licence substitution, importing a version, signing in every session, "
+     "servers, Realms and event servers, capes, and what bastion-mc cannot protect: the game holds your Xbox sign-in."),
     ("docs/SCRAM_RUNBOOK.md", "emergency.html", "Emergency runbook", "emergency",
      "What to do when you think the account is compromised: remove the credentials from this machine, then secure "
      "the Microsoft account, with the exact addresses."),
