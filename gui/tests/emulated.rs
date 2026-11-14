@@ -22,7 +22,9 @@ use iced_test::program::Program;
 use support::Session;
 
 /// The stand-in launcher. Every command appends its arguments to `<script>.calls`; what
-/// `scram` does is chosen by the presence of `<script>.scram-fails`.
+/// `scram` does is chosen by the presence of `<script>.scram-fails`; with `<script>.bedrock` it
+/// lists a Bedrock instance first, reports the default account signed out, and plays a Bedrock
+/// session.
 const FAKE_LAUNCHER: &str = r#"#!/bin/sh
 [ "$1" = "--events" ] || exit 99
 shift
@@ -36,9 +38,13 @@ accounts() {
 }
 case "$1" in
   status)
-    if [ "$3" = "alt" ]; then account alt false ""; else account default true '"player":"Alex",'; fi
+    if [ "$3" = "alt" ] || [ -e "$0.bedrock" ]; then account "${3:-default}" false ""; else account default true '"player":"Alex",'; fi
     accounts
-    echo '{"event":"instances","instances":[{"id":"vanilla","minecraft":"26.3","kind":"vanilla"},{"id":"modded","minecraft":"26.3","kind":"curated","detail":"serial 2, signed by me"}]}'
+    if [ -e "$0.bedrock" ]; then
+      echo '{"event":"instances","instances":[{"id":"phone","minecraft":"1.26.62.1","kind":"bedrock","detail":"Minecraft Bedrock, the Android build"},{"id":"vanilla","minecraft":"26.3","kind":"vanilla"}]}'
+    else
+      echo '{"event":"instances","instances":[{"id":"vanilla","minecraft":"26.3","kind":"vanilla"},{"id":"modded","minecraft":"26.3","kind":"curated","detail":"serial 2, signed by me"}]}'
+    fi
     ;;
   launch)
     if [ -e "$0.bedrock" ]; then
@@ -47,6 +53,7 @@ case "$1" in
       echo '{"event":"phase","phase":"preparing"}'
       echo '{"event":"answerable","kind":"signin"}'
       echo '{"event":"answerable","kind":"realms"}'
+      echo '{"event":"protection","items":[{"aspect":"display","shield":"on","detail":"no display"},{"aspect":"network","shield":"on","detail":"filtered: only allowlisted Bedrock hosts, by name, through the launcher"},{"aspect":"credential","shield":"partial","detail":"the game signs in to Xbox itself"},{"aspect":"sign-in","shield":"on","detail":"shown outside the game"},{"aspect":"limits","shield":"on","detail":"limits"},{"aspect":"launcher","shield":"on","detail":"confined"}]}'
       echo '{"event":"phase","phase":"running"}'
       page() {
         echo "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s\",\"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":900,\"attempts_left\":$1,\"state\":\"$2\"$3}"
@@ -121,8 +128,17 @@ fn calls(launcher: &Path) -> Vec<String> {
 /// this file starts a process, so no child of another thread can be holding the script
 /// open for writing at the moment it is executed (which would fail with "text file busy").
 fn start(name: &str) -> (PathBuf, Session<impl Program + 'static>) {
+    start_with(name, &[])
+}
+
+/// [`start`], with the stand-in's switches (`<script>.<flag>` files) made before it is first
+/// called.
+fn start_with(name: &str, flags: &[&str]) -> (PathBuf, Session<impl Program + 'static>) {
     let one_at_a_time = support::one_at_a_time();
     let launcher = fake_launcher(name);
+    for flag in flags {
+        std::fs::write(launcher.with_file_name(format!("bastion-mc.{flag}")), "").unwrap();
+    }
     let program = application(Options { launcher: launcher.clone(), account: "default".into() });
     (launcher, Session::boot(program, one_at_a_time))
 }
@@ -255,11 +271,14 @@ fn a_scram_the_launcher_reports_as_incomplete_is_shown_as_incomplete_end_to_end(
 
 #[test]
 fn a_bedrock_sign_in_and_a_realms_join_are_answered_on_the_launchers_input_end_to_end() {
-    let (launcher, mut ui) = start("bedrock");
-    std::fs::write(launcher.with_file_name("bastion-mc.bedrock"), "").unwrap();
+    // A Bedrock instance, listed first (so chosen), and no Java account signed in, no demo
+    // mode: Play is offered all the same, since the game signs in inside its session.
+    let (launcher, mut ui) = start_with("bedrock", &["bedrock"]);
     ui.idle();
     ui.click(&caps("Play"));
     ui.eventually(&caps("Microsoft sign-in for Bedrock"));
+    // The sixth aspect of a Bedrock launch is on the page.
+    assert!(ui.shows(&caps("sign-in")));
     // The field for the address has the keyboard as soon as the prompt is up.
     let address = "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.0e5b2bbb&state=s";
     ui.type_text(address);
@@ -280,7 +299,7 @@ fn a_bedrock_sign_in_and_a_realms_join_are_answered_on_the_launchers_input_end_t
         calls(&launcher),
         [
             "status --account default".to_string(),
-            "launch vanilla --account default".to_string(),
+            "launch phone".to_string(),
             format!("answer signin {address}"),
             format!("answer signin {address}"),
             "answer realms 123456".to_string(),

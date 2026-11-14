@@ -248,6 +248,13 @@ impl InstanceChoice {
         self.0.error.is_none()
     }
 
+    /// A Bedrock instance (the Android build, `kind = "bedrock"`): its game signs in to Xbox
+    /// itself, inside its own session, so its launch needs neither a Java sign-in nor demo mode,
+    /// and the launcher is given neither an account nor `--demo` for it.
+    pub fn is_bedrock(&self) -> bool {
+        self.0.kind == "bedrock"
+    }
+
     /// The instance on one line of at most `chars` characters, for a drop-down or a
     /// sentence: as much of its name as fits, and a mark on one that cannot be launched.
     /// Everything else about it is shown next to the drop-down, as text that can wrap.
@@ -741,6 +748,7 @@ impl App {
             None if self.instances.is_empty() => return Some("Create an instance first."),
             None => return Some("Choose an instance."),
             Some(choice) if !choice.launchable() => return Some("This instance cannot be launched."),
+            Some(choice) if choice.is_bedrock() => return None,
             Some(_) => {}
         }
         if !self.demo && !self.signed_in() {
@@ -751,6 +759,18 @@ impl App {
 
     pub fn can_play(&self) -> bool {
         !self.busy() && self.play_blocker().is_none()
+    }
+
+    /// The launcher command for a launch of `choice`. A Java instance takes the account and the
+    /// demo switch; a Bedrock instance neither: nobody is signed in by the launcher in a Bedrock
+    /// session (its game signs in itself, through the sign-in prompt), and `--demo` would only
+    /// earn a note that it changes nothing.
+    pub fn launch_request(&self, choice: &InstanceChoice) -> Request {
+        if choice.is_bedrock() {
+            Request::Launch { instance: choice.0.id.clone(), account: String::new(), demo: false }
+        } else {
+            Request::Launch { instance: choice.0.id.clone(), account: self.account_name.clone(), demo: self.demo }
+        }
     }
 
     /// May a sign-in be started for the account `entry`? Needs a launcher with nothing to
@@ -978,8 +998,7 @@ impl App {
                 }
                 let Some(choice) = &self.selected else { return Task::none() };
                 let instance = choice.0.id.clone();
-                let request =
-                    Request::Launch { instance: instance.clone(), account: self.account_name.clone(), demo: self.demo };
+                let request = self.launch_request(choice);
                 self.notice = None;
                 self.progress = None;
                 self.protection.clear();
@@ -1954,6 +1973,34 @@ mod tests {
         let mut empty = app;
         empty.set_instances(Vec::new());
         assert_eq!(empty.play_blocker(), Some("Create an instance first."));
+    }
+
+    /// A Bedrock instance signs in inside its own session: Play needs neither a Java sign-in
+    /// nor demo mode, and the launcher is started with neither an account nor `--demo`.
+    #[test]
+    fn a_bedrock_instance_plays_without_a_java_sign_in_or_demo_mode() {
+        let mut app = ready(false);
+        let mut bedrock = instance("phone", None);
+        bedrock.kind = "bedrock".into();
+        app.set_instances(vec![instance("vanilla", None), bedrock]);
+        let phone = app.instances.iter().find(|i| i.0.id == "phone").cloned().unwrap();
+        assert!(phone.is_bedrock() && !app.instances[0].is_bedrock());
+        let _ = app.update(Message::InstanceSelected(phone.clone()));
+        assert_eq!(app.play_blocker(), None, "not signed in, no demo mode: still playable");
+        assert_eq!(app.launch_request(&phone).args(), ["launch", "phone"]);
+        let _ = app.update(Message::DemoToggled(true));
+        assert_eq!(app.launch_request(&phone).args(), ["launch", "phone"], "no --demo for Bedrock");
+        // A Java instance next to it still needs one or the other.
+        let java = app.instances.iter().find(|i| i.0.id == "vanilla").cloned().unwrap();
+        let _ = app.update(Message::DemoToggled(false));
+        let _ = app.update(Message::InstanceSelected(java.clone()));
+        assert_eq!(app.play_blocker(), Some("Sign in, or switch on demo mode."));
+        let _ = app.update(Message::DemoToggled(true));
+        assert_eq!(app.launch_request(&java).args(), ["launch", "vanilla", "--account", "default", "--demo"]);
+        // Selected again, the Bedrock instance starts.
+        let _ = app.update(Message::InstanceSelected(phone));
+        let _ = app.update(Message::Play);
+        assert_eq!(app.job_kind(), Some(JobKind::Launch));
     }
 
     #[test]

@@ -467,6 +467,27 @@ fn the_three_shield_levels_are_told_apart_in_words_on_both_pages() {
     assert!(all.iter().any(|text| text == "Covers what the game holds of your account."));
     assert!(all.iter().any(|text| text == "The game that is running was started with:"));
 
+    // A Bedrock launch's sixth aspect, its sign-in pages, is shown with what it covers.
+    let mut bedrock = ready(true);
+    launching(&mut bedrock);
+    let mut six: Vec<Protection> = ["display", "network", "credential", "limits", "launcher"]
+        .into_iter()
+        .map(|aspect| Protection { aspect: aspect.into(), shield: Shield::On, detail: "as for Java".into() })
+        .collect();
+    six.insert(
+        3,
+        Protection {
+            aspect: "sign-in".into(),
+            shield: Shield::On,
+            detail: "Microsoft's page (login.live.com, Minecraft's own client) is shown outside the game".into(),
+        },
+    );
+    feed(&mut bedrock, events([Event::Protection { items: six }]));
+    assert!(shows(&bedrock, &caps("sign-in")));
+    on(&mut bedrock, Page::Security);
+    let all = texts(&bedrock, SMALL);
+    assert!(all.iter().any(|text| text == "Covers where the game's sign-in pages are shown, and who may answer them."));
+
     // An aspect this build has never heard of is shown under its own name, with its level.
     let mut future = ready(true);
     launching(&mut future);
@@ -1431,6 +1452,34 @@ fn states() -> Vec<(&'static str, App)> {
         events([sign_in_page(SignInState::Waiting, 10, None), sign_in_page(SignInState::Done, 10, None)]),
     );
     add("launch-bedrock-sign-in-done", signed);
+    // A Bedrock session's read-out: six aspects, with the launcher's own words for them.
+    let mut six = ready(true);
+    let _ = answering_launch(&mut six);
+    let item = |aspect: &str, shield, detail: &str| Protection { aspect: aspect.into(), shield, detail: detail.into() };
+    feed(
+        &mut six,
+        events([Event::Protection {
+            items: vec![
+                item("display", Shield::Partial, "nested compositor: the game sees only its own window"),
+                item("network", Shield::On, "filtered: only allowlisted Bedrock hosts, by name, through the launcher"),
+                item(
+                    "credential",
+                    Shield::Partial,
+                    "the game signs in to Xbox itself and holds that sign-in while it runs (deleted with the \
+                     session's data at the end); no Java token exists in this session",
+                ),
+                item(
+                    "sign-in",
+                    Shield::On,
+                    "Microsoft's page (login.live.com, Minecraft's own client) is shown outside the game; only this \
+                     terminal or the front end answers it",
+                ),
+                item("limits", Shield::On, "memory, swap and task limits (systemd scope)"),
+                item("launcher", Shield::On, "confines itself while the game runs"),
+            ],
+        }]),
+    );
+    add("launch-bedrock-six-aspects", six);
     let mut here = ready(true);
     let _ = answering_launch(&mut here);
     feed(&mut here, events([realms_prompt(bastion_mc_proto::ApprovalState::Waiting, Some("123456"))]));

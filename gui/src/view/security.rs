@@ -54,7 +54,10 @@ fn last_launch(app: &App) -> Element<'_, Message> {
             "The launch under way has not reported yet: the read-outs arrive once the launcher has checked the game it \
              started."
         }
-        (true, false) => "No game has been started in this window yet. A launch reports these five things:",
+        (true, false) => {
+            "No game has been started in this window yet. A launch reports these five things (a Bedrock launch a \
+             sixth: its sign-in pages):"
+        }
         (false, true) => "The game that is running was started with:",
         (false, false) => "The last game was started with:",
     };

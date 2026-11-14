@@ -316,8 +316,13 @@ pub const ASPECTS: [(&str, &str); 5] = [
     ("launcher", "what the launcher itself can still reach while the game runs"),
 ];
 
+/// Aspects a launch may report besides the five: the Bedrock launch's sixth, its game's
+/// sign-in pages (shown outside the game; answered only at the terminal or here).
+pub const MORE_ASPECTS: [(&str, &str); 1] =
+    [("sign-in", "where the game's sign-in pages are shown, and who may answer them")];
+
 pub fn aspect_meaning(aspect: &str) -> Option<&'static str> {
-    ASPECTS.iter().find(|(name, _)| *name == aspect).map(|(_, meaning)| *meaning)
+    ASPECTS.iter().chain(MORE_ASPECTS.iter()).find(|(name, _)| *name == aspect).map(|(_, meaning)| *meaning)
 }
 
 /// The square with a letter that stands for an account. There is no picture of a player in
