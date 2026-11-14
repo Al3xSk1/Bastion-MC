@@ -214,7 +214,34 @@ pub const ALL: &[(&str, Harness)] = &[
     // extracted, the libraries' ELF headers, the store's own per-file manifest (re-read at every
     // launch), and pacman's records about the client.
     ("bedrock_store", crate::bedrock::store::fuzz),
+    // Bedrock's network (round 5): RakNet's offline messages and the relay's decisions for a
+    // Bedrock session, and the join answers and join requests of Realms and the gatherings
+    // service that the launcher reads to broker a join.
+    ("raknet", raknet),
+    ("bedrock_realms", bedrock_realms),
+    ("bedrock_gatherings", bedrock_gatherings),
 ];
+
+/// RakNet's offline messages as the relay reads a flow's first datagram (`egress::raknet`), and
+/// the datagram relay's decisions in a Bedrock session (`egress::udp::fuzz_bedrock_table`): a
+/// flow opens only with a RakNet opening, only to the address resolved for a rule naming the
+/// port or to the server an approval named, within the limits.
+pub fn raknet(data: &[u8]) {
+    crate::egress::raknet::fuzz(data);
+    crate::egress::udp::fuzz_bedrock_table(data);
+}
+
+/// Realms join answers and the classification of requests to the terminated hosts
+/// (`egress::services`): an accepted answer names an address and a RakNet server, and the game
+/// is given the pass and nothing else of a server.
+pub fn bedrock_realms(data: &[u8]) {
+    crate::egress::services::fuzz_realms(data);
+}
+
+/// The gatherings service's join answers (event servers) and join requests (`egress::services`).
+pub fn bedrock_gatherings(data: &[u8]) {
+    crate::egress::services::fuzz_gatherings(data);
+}
 
 /// The WebSocket decoder of the browser's remote control.
 pub fn websocket(data: &[u8]) {

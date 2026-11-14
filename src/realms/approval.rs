@@ -269,9 +269,19 @@ impl Approvals {
             ) else {
                 continue;
             };
-            if inner.names.len() < MAX_NAMES || inner.names.contains_key(&id) {
-                inner.names.insert(id, util::sanitize_line(name.as_bytes(), 64));
-            }
+            Self::remember(&mut inner, id, name);
+        }
+    }
+
+    /// Remember the name of one Realm or event server for its prompt (Bedrock: the gatherings
+    /// service names an event server in its join answer). Bounded and sanitised like a list's.
+    pub fn note_name(&self, world: u64, name: &str) {
+        Self::remember(&mut self.inner.lock().expect("approvals"), world, name);
+    }
+
+    fn remember(inner: &mut Inner, world: u64, name: &str) {
+        if inner.names.len() < MAX_NAMES || inner.names.contains_key(&world) {
+            inner.names.insert(world, util::sanitize_line(name.as_bytes(), 64));
         }
     }
 

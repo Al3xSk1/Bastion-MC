@@ -31,9 +31,18 @@
 //! leaves through that SOCKS5 proxy, which also resolves the name: the pass-through HTTPS
 //! connections of the first row, like the texture gateway's and the credential broker's own
 //! requests. Game servers are dialled directly, and their names are resolved here.
+//!
+//! A **Bedrock** session ([`Policy::bedrock`]) runs behind the same relay with another policy:
+//! HTTPS by exact names, sub-domain suffixes and a deny list; no TCP game servers; RakNet over
+//! UDP to the servers the user listed, each rule its own anchor; and Realms and event-server
+//! joins through a pass the user approves outside the game. See [`bedrock`], [`raknet`] and
+//! [`services`]. Nothing above changes for a Java session.
 
+pub mod bedrock;
 pub mod broker;
 pub mod dns;
+pub mod raknet;
+pub mod services;
 pub mod sni;
 pub mod udp;
 
@@ -132,6 +141,9 @@ pub struct Policy {
     /// Realms is brokered (`[realms] approve`): its hosts are resolvable, and the one-time pass
     /// has a listener (see `realms`).
     realms: bool,
+    /// A Bedrock session (see [`bedrock`]): `None` for Java, and then nothing about the relay
+    /// differs from before Bedrock existed.
+    bedrock: Option<bedrock::Rules>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +182,7 @@ impl Policy {
             proxied: global.launcher_proxy.is_some(),
             udp_limits: udp::Limits::default(),
             realms: false,
+            bedrock: None,
         };
         // Each port is a socket in the sandbox's namespace and a task here.
         if policy.udp_ports().len() > udp::MAX_PORTS {
@@ -180,6 +193,65 @@ impl Policy {
             )));
         }
         Ok(policy)
+    }
+
+    /// The relay's policy for a Bedrock session (see [`bedrock`]). `joins`: Realms and
+    /// event-server joins are brokered, so there is a pass ([`bedrock::PASS`]); `proxied`:
+    /// `network.launcher_proxy` is set (the launcher then reaches HTTPS through it, never
+    /// directly). Refuses a plan whose servers or lists are malformed, with the entry named.
+    pub fn bedrock(plan: &crate::bedrock::net::NetPlan, joins: bool, proxied: bool) -> Result<Self> {
+        let policy = Policy {
+            service_domains: Vec::new(),
+            servers: Vec::new(),
+            texture_gateway: false,
+            proxied,
+            udp_limits: udp::Limits::raknet(),
+            realms: false,
+            bedrock: Some(bedrock::rules(plan, joins)?),
+        };
+        if policy.udp_ports().len() > udp::MAX_PORTS {
+            return Err(Error::Config(format!(
+                "[bedrock] servers name {} different UDP ports (with the join pass's); at most {} in total",
+                policy.udp_ports().len(),
+                udp::MAX_PORTS
+            )));
+        }
+        Ok(policy)
+    }
+
+    /// Is this a Bedrock session's policy?
+    pub fn is_bedrock(&self) -> bool {
+        self.bedrock.is_some()
+    }
+
+    /// Where approved Bedrock joins are served, when they are brokered.
+    pub fn bedrock_pass(&self) -> Option<std::net::SocketAddrV4> {
+        self.bedrock.as_ref().and_then(|b| b.pass)
+    }
+
+    /// The Bedrock server rules (empty for Java).
+    fn raknet(&self) -> &[ServerRule] {
+        self.bedrock.as_ref().map_or(&[], |b| b.servers.as_slice())
+    }
+
+    /// Test support, never reachable from a configuration file: the Bedrock server rules accept
+    /// non-public addresses, so that a stand-in server on the loopback address can be reached.
+    #[doc(hidden)]
+    pub fn allowing_private_bedrock_servers_for_tests(mut self) -> Self {
+        if let Some(rules) = &mut self.bedrock {
+            for rule in &mut rules.servers {
+                rule.allow_private = true;
+            }
+        }
+        self
+    }
+
+    /// Why the responder refused a name, for the one log line per name.
+    fn name_refusal(&self, name: &str) -> String {
+        match &self.bedrock {
+            Some(rules) => rules.name_refusal(name),
+            None => "not allowlisted".into(),
+        }
     }
 
     /// Other limits for the datagram relay than the built-in ones. Not reachable from a
@@ -203,6 +275,9 @@ impl Policy {
     }
 
     fn is_service(&self, name: &str) -> bool {
+        if let Some(rules) = &self.bedrock {
+            return rules.sni.allows(name);
+        }
         self.service_domains
             .iter()
             .any(|d| name == d || name.strip_suffix(d.as_str()).is_some_and(|p| p.ends_with('.')))
@@ -211,7 +286,13 @@ impl Policy {
 
     /// May the sandbox learn an address for this name at all?
     pub fn resolvable(&self, name: &str) -> bool {
-        self.is_service(name) || self.servers.iter().any(|r| matches!(&r.host, HostSpec::Name(n) if n == name))
+        self.is_service(name)
+            || self.servers.iter().chain(self.raknet()).any(|r| matches!(&r.host, HostSpec::Name(n) if n == name))
+    }
+
+    /// Is HTTPS reached by name in this session at all (port 443 in the sandbox and out of it)?
+    fn has_https(&self) -> bool {
+        !self.service_domains.is_empty() || self.bedrock.as_ref().is_some_and(|b| !b.sni.is_empty())
     }
 
     fn route(&self, dest: &Dest, port: u16) -> Route {
@@ -248,6 +329,9 @@ impl Policy {
                 ports.push(80);
             }
         }
+        if self.bedrock.is_some() && self.has_https() {
+            ports.push(443);
+        }
         if self.realms {
             ports.push(crate::realms::PASS_ADDRESS.port());
         }
@@ -256,9 +340,12 @@ impl Policy {
         ports
     }
 
-    /// UDP ports that server rules name: each needs a socket in the sandbox's namespace.
+    /// UDP ports that server rules name (and, for Bedrock, the join pass's): each needs a
+    /// socket in the sandbox's namespace.
     pub fn udp_ports(&self) -> Vec<u16> {
-        let mut ports: Vec<u16> = self.servers.iter().flat_map(|r| r.udp.iter().copied()).collect();
+        let mut ports: Vec<u16> =
+            self.servers.iter().chain(self.raknet()).flat_map(|r| r.udp.iter().copied()).collect();
+        ports.extend(self.bedrock_pass().map(|pass| pass.port()));
         ports.sort_unstable();
         ports.dedup();
         ports
@@ -278,6 +365,7 @@ impl Policy {
         let of_host: Vec<&ServerRule> = self
             .servers
             .iter()
+            .chain(self.raknet())
             .filter(|r| match (dest, &r.host) {
                 (Dest::Name(name), HostSpec::Name(host)) => name == host,
                 (Dest::Ip(ip), HostSpec::Ip(host)) => ip == host,
@@ -312,6 +400,7 @@ impl Policy {
         let mut local_addrs: Vec<Ipv4Addr> = self
             .servers
             .iter()
+            .chain(self.raknet())
             .filter_map(|r| match &r.host {
                 // Loopback addresses are already local inside the namespace.
                 HostSpec::Ip(ip) if !ip.is_loopback() => Some(*ip),
@@ -355,7 +444,7 @@ impl Policy {
     pub fn outbound_ports(&self, srv: &SrvTargets) -> Vec<u16> {
         let mut ports: Vec<u16> = self.servers.iter().map(|r| r.port).collect();
         ports.extend(srv.values().flatten().map(|(_, port)| *port));
-        if !self.service_domains.is_empty() && !self.proxied {
+        if self.has_https() && !self.proxied {
             ports.push(443);
         }
         ports.sort_unstable();
@@ -364,6 +453,9 @@ impl Policy {
     }
 
     pub fn describe(&self) -> Vec<String> {
+        if let Some(rules) = &self.bedrock {
+            return rules.describe(&self.udp_limits);
+        }
         let mut lines = vec![format!(
             "network: filtered — HTTPS to *.{{{}}} only{}",
             self.service_domains.join(", "),
@@ -504,6 +596,9 @@ struct Shared {
     gate: broker::JoinGate,
     /// The datagram relay. `None` unless a server rule names a UDP port.
     udp: Option<udp::Relay>,
+    /// Bedrock: the broker that terminates the Realms and gatherings hosts, when joins are
+    /// brokered (`services`). Always `None` for Java.
+    services: Option<services::Services>,
 }
 
 impl Shared {
@@ -547,11 +642,50 @@ pub fn start(
     srv: SrvTargets,
     broker: Option<broker::Broker>,
 ) -> Result<Egress> {
+    if policy.is_bedrock() {
+        return Err(Error::Sandbox("a Bedrock policy is started with egress::start_bedrock".into()));
+    }
+    start_with(policy, spec, sockets, http, log, srv, broker, None)
+}
+
+/// [`start`] for a Bedrock session ([`Policy::bedrock`]): no SRV targets and no credential
+/// broker (a Bedrock session has no Java credential); `services` terminates the Realms and
+/// gatherings hosts when joins are brokered. The server rules' names are resolved by tasks
+/// started here (literal addresses need none); until a name has resolved, datagrams to it are
+/// refused and the log says why.
+pub fn start_bedrock(
+    policy: Policy,
+    spec: &NetnsSpec,
+    sockets: Vec<OwnedFd>,
+    http: HttpClient,
+    log: Logger,
+    services: Option<services::Services>,
+) -> Result<Egress> {
+    if !policy.is_bedrock() {
+        return Err(Error::Sandbox("egress::start_bedrock needs a Bedrock policy".into()));
+    }
+    if services.is_some() != policy.bedrock_pass().is_some() {
+        return Err(Error::Sandbox("the Bedrock service broker and the join pass go together".into()));
+    }
+    start_with(policy, spec, sockets, http, log, SrvTargets::new(), None, services)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_with(
+    policy: Policy,
+    spec: &NetnsSpec,
+    sockets: Vec<OwnedFd>,
+    http: HttpClient,
+    log: Logger,
+    srv: SrvTargets,
+    broker: Option<broker::Broker>,
+    services: Option<services::Services>,
+) -> Result<Egress> {
     if sockets.len() != spec.socket_count() {
         return Err(Error::Sandbox("socket count does not match the namespace specification".into()));
     }
     let stats = Arc::new(Stats::default());
-    let udp = (!spec.udp_ports.is_empty()).then(|| udp::Relay::new(policy.udp_limits.clone()));
+    let udp = (!spec.udp_ports.is_empty()).then(|| udp::Relay::new(policy.udp_limits.clone(), policy.is_bedrock()));
     let shared = Arc::new(Shared {
         policy,
         fake: Mutex::new(FakeIps::new()),
@@ -564,8 +698,11 @@ pub fn start(
         broker,
         gate: broker::JoinGate::default(),
         udp,
+        services,
     });
     let mut tasks = Vec::new();
+    // Bedrock: each server rule is the anchor of its own flows, once its address is known.
+    tasks.extend(udp::stand(&shared));
     // Which socket is which is a matter of position: `NetnsSpec::sockets` is the order the
     // helper created them in (and `sandbox::spawn` checked each against it).
     for (role, fd) in spec.sockets().into_iter().zip(sockets) {
@@ -609,10 +746,9 @@ async fn serve_dns(shared: Arc<Shared>, sock: UdpSocket) {
                 shared.stats.names_refused.fetch_add(1, Ordering::Relaxed);
                 let mut seen = shared.refused_seen.lock().expect("refused lock");
                 if seen.len() < 512 && seen.insert(q.name.clone()) {
-                    (shared.log)(format!(
-                        "egress: DENY  name lookup {:?} (not allowlisted)",
-                        util::sanitize_line(q.name.as_bytes(), 120)
-                    ));
+                    // (The name passed the responder's LDH check; it is sanitised all the same.)
+                    let name = util::sanitize_line(q.name.as_bytes(), 120);
+                    (shared.log)(format!("egress: DENY  name lookup {name:?} ({})", shared.policy.name_refusal(&name)));
                 }
                 dns::answer_empty(&q, dns::Rcode::NxDomain)
             }
@@ -683,7 +819,14 @@ async fn handle(shared: &Shared, mut inbound: TcpStream) {
                 let ctx = broker::Context { gate: &shared.gate, log: &shared.log, stats: &shared.stats };
                 broker.serve(&ctx, inbound, &name).await.map(|requests| format!("{requests} request(s)"))
             }
-            None => relay_service(shared, &mut inbound, &name, &label).await,
+            // Bedrock: the Realms and gatherings hosts, to read and rewrite join answers.
+            None => match shared.services.as_ref().filter(|_| services::Services::terminates(&name)) {
+                Some(services) => {
+                    allow(shared, &label, "tls terminated to broker joins (the game's own token passes through)");
+                    services.serve(&shared.log, &shared.stats, inbound, &name).await.map(|n| format!("{n} request(s)"))
+                }
+                None => relay_service(shared, &mut inbound, &name, &label).await,
+            },
         },
         Route::Texture => serve_texture(shared, &mut inbound, &label).await,
         Route::Game(rule) => relay_game(shared, &mut inbound, &rule, &label).await,
@@ -1343,5 +1486,118 @@ mod tests {
         ] {
             assert!(parse_texture_request(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
+    }
+
+    // ------------------------------------------------------------ Bedrock
+
+    fn http() -> HttpClient {
+        let config = crate::net::tls::client_config(
+            crate::net::tls::load_system_roots().unwrap(),
+            crate::net::tls::PinSet::default(),
+        )
+        .unwrap();
+        HttpClient::new(config, &[])
+    }
+
+    fn bedrock_policy(servers: &[(&str, u16)], telemetry: bool, joins: bool, proxied: bool) -> Policy {
+        let cfg = crate::bedrock::BedrockConfig {
+            telemetry,
+            servers: servers
+                .iter()
+                .map(|(host, port)| crate::bedrock::BedrockServer { host: host.to_string(), port: *port })
+                .collect(),
+            ..Default::default()
+        };
+        Policy::bedrock(&crate::bedrock::net::plan(&cfg, &[]), joins, proxied).unwrap()
+    }
+
+    #[test]
+    fn a_bedrock_session_reaches_https_by_its_lists_and_no_game_server_over_tcp() {
+        let p = bedrock_policy(&[("play.example.org", 19132), ("203.0.113.9", 19133)], true, true, false);
+        let name = |n: &str| Dest::Name(n.to_string());
+        for ok in ["login.live.com", "user.auth.xboxlive.com", "b980a380.playfabapi.com", "vortex.data.microsoft.com"] {
+            assert!(p.resolvable(ok), "{ok}");
+            assert_eq!(p.route(&name(ok), 443), Route::Service(ok.into()), "{ok}");
+        }
+        for no in
+            ["api.minecraftservices.com", "sessionserver.mojang.com", "xboxlive.com", "evil.example", "minecraft.net"]
+        {
+            assert!(!p.resolvable(no), "{no}");
+        }
+        // The servers' names resolve (to synthetic addresses) — for UDP; TCP to them goes nowhere.
+        assert!(p.resolvable("play.example.org"));
+        for (dest, port) in [
+            (name("play.example.org"), 19132),
+            (name("play.example.org"), 443),
+            (Dest::Ip(Ipv4Addr::new(203, 0, 113, 9)), 19133),
+            (name("login.live.com"), 80),
+        ] {
+            assert!(matches!(p.route(&dest, port), Route::Deny(_)), "{dest:?}:{port}");
+        }
+        assert_eq!(p.tcp_ports(), [443], "HTTPS and nothing else over TCP");
+        assert_eq!(p.udp_ports(), [19132, 19133], "the servers' ports, the pass's (19132) among them");
+        assert_eq!(p.sandbox_udp_ports(), [53, 19132, 19133]);
+        let spec = p.netns_spec();
+        assert_eq!(spec.local_addrs, [Ipv4Addr::new(203, 0, 113, 9)], "a literal server is captured locally");
+        assert_eq!(spec.udp_ports, [19132, 19133]);
+        assert!(spec.dns);
+        assert_eq!(p.outbound_ports(&SrvTargets::new()), [443], "UDP is not the confinement's to restrict");
+        assert!(p.srv_names().is_empty(), "Bedrock has no SRV indirection");
+        assert_eq!(p.bedrock_pass(), Some(bedrock::PASS));
+        // With a proxy the launcher reaches HTTPS through it, never directly.
+        let proxied = bedrock_policy(&[], true, false, true);
+        assert!(proxied.outbound_ports(&SrvTargets::new()).is_empty());
+        assert_eq!(proxied.bedrock_pass(), None);
+        assert_eq!(proxied.udp_ports(), Vec::<u16>::new(), "no servers, no joins: no UDP socket at all");
+        assert_eq!(proxied.sandbox_udp_ports(), [53]);
+    }
+
+    #[test]
+    fn a_bedrock_session_without_telemetry_refuses_it_and_says_why() {
+        let p = bedrock_policy(&[], false, true, false);
+        assert!(!p.resolvable("vortex.data.microsoft.com"));
+        assert!(!p.resolvable("browser.events.data.microsoft.com"));
+        assert!(p.name_refusal("vortex.data.microsoft.com").contains("telemetry = false"));
+        assert!(p.name_refusal("play.example.org").contains("[bedrock] servers"));
+        // Java's line is what it always was.
+        assert_eq!(policy(&[]).name_refusal("play.example.org"), "not allowlisted");
+    }
+
+    #[test]
+    fn the_launch_log_says_what_a_bedrock_session_reaches() {
+        let p = bedrock_policy(&[("play.example.org", 19132)], true, true, false);
+        let text = p.describe().join("\n");
+        for said in [
+            "filtered (Bedrock)",
+            ".xboxlive.com",
+            "never: api.minecraftservices.com",
+            "Bedrock server play.example.org:19132",
+            "RakNet",
+            "1472 bytes",
+            "approval outside the game",
+            "127.127.255.253:19132",
+            "NetherNet",
+        ] {
+            assert!(text.contains(said), "{said}: {text}");
+        }
+        let off = bedrock_policy(&[], false, false, false).describe().join("\n");
+        assert!(off.contains("joins are refused ([realms] approve = \"off\")"), "{off}");
+        assert!(off.contains("telemetry switched off") && off.contains("no Bedrock servers listed"), "{off}");
+    }
+
+    #[test]
+    fn each_profile_starts_only_with_its_own_entry_point() {
+        let spec = NetnsSpec::default();
+        let log: Logger = Arc::new(|_| {});
+        let java = policy(&[]);
+        let bedrock = bedrock_policy(&[], true, false, false);
+        let err = start(bedrock.clone(), &spec, Vec::new(), http(), log.clone(), SrvTargets::new(), None);
+        assert!(err.err().is_some_and(|e| e.to_string().contains("start_bedrock")));
+        let err = start_bedrock(java, &spec, Vec::new(), http(), log.clone(), None);
+        assert!(err.err().is_some_and(|e| e.to_string().contains("needs a Bedrock policy")));
+        // Joins brokered without a broker (or the reverse) is a wiring mistake, refused.
+        let joins = bedrock_policy(&[], true, true, false);
+        let err = start_bedrock(joins, &spec, Vec::new(), http(), log, None);
+        assert!(err.err().is_some_and(|e| e.to_string().contains("go together")));
     }
 }

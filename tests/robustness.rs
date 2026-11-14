@@ -695,6 +695,48 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             text("browser frames on"),
         ],
         "bedrock_store" => bastion_mc::bedrock::store::fuzz_seeds(),
+        "raknet" => {
+            use bastion_mc::egress::raknet::{Offline, PROTOCOL};
+            let server: std::net::SocketAddr = "127.64.0.5:19132".parse().unwrap();
+            let v6: std::net::SocketAddr = "[2001:db8::7]:19133".parse().unwrap();
+            vec![
+                Offline::UnconnectedPing { open_connections: false, time: 1, client_guid: 2 }.encode(),
+                Offline::UnconnectedPing { open_connections: true, time: 1, client_guid: 2 }.encode(),
+                Offline::UnconnectedPong { time: 1, server_guid: 2, data: b"MCPE;motd;800;1.26.62;0;10".to_vec() }
+                    .encode(),
+                Offline::OpenConnectionRequest1 { protocol: PROTOCOL, mtu: 576 }.encode(),
+                Offline::OpenConnectionReply1 { server_guid: 9, cookie: Some(5), mtu: 1400 }.encode(),
+                Offline::OpenConnectionRequest2 { cookie: Some(5), server, mtu: 1400, client_guid: 1 }.encode(),
+                Offline::OpenConnectionRequest2 { cookie: None, server: v6, mtu: 1400, client_guid: 1 }.encode(),
+                Offline::OpenConnectionReply2 { server_guid: 9, client: server, mtu: 1400, security: false }.encode(),
+                Offline::IncompatibleProtocol { protocol: 10, server_guid: 9 }.encode(),
+                // A script for the Bedrock relay's decisions (four bytes an event).
+                vec![
+                    1, 0, 0, 0, 5, 0, 0, 0x81, 5, 0, 0, 3, 2, 0, 0, 0, 5, 1, 4, 0x81, 5, 2, 4, 0x81, 3, 0, 10, 0, 0,
+                    255, 0, 0, 4, 0, 0, 0,
+                ],
+            ]
+        }
+        "bedrock_realms" => vec![
+            text(
+                r#"{"address":"203.0.113.9:19132","networkProtocol":"DEFAULT","pendingUpdate":false,"sessionRegionData":{"regionName":"EastUS","serviceQuality":1}}"#,
+            ),
+            text(r#"{"address":"[2001:db8::9]:19133"}"#),
+            text(r#"{"address":"1234567890","networkProtocol":"NETHERNET_JSONRPC"}"#),
+            text(r#"{"address":"realm.example.org:19132","networkProtocol":"DEFAULT"}"#),
+            text("/worlds/7/join"),
+            text("/Worlds/123456789/JOIN"),
+            text("/api/v2.0/join/world/client"),
+        ],
+        "bedrock_gatherings" => vec![
+            text(
+                r#"{"result":{"networkProtocol":"Default","ipV4Address":"198.51.100.20","port":19132,"destinationInfo":{"creatorId":"1","experienceId":"6b3d2a5e-0c1f-4a7e-9a52-2f3c9d0e1b44","experienceName":"Live Event","worldName":"Lobby"}}}"#,
+            ),
+            text(r#"{"result":{"networkProtocol":"NetherNet","ipV4Address":"","port":0}}"#),
+            text(
+                r#"{"experienceId":"6b3d2a5e-0c1f-4a7e-9a52-2f3c9d0e1b44","worldId":"00000000-0000-0000-0000-000000000001"}"#,
+            ),
+        ],
         other => panic!("no seeds for {other}"),
     }
 }
@@ -769,6 +811,9 @@ fn every_harness_has_a_test_here() {
         "bidi",
         "browser_command",
         "bedrock_store",
+        "raknet",
+        "bedrock_realms",
+        "bedrock_gatherings",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
@@ -785,6 +830,44 @@ fn bedrock_android_manifests_version_manifests_and_elf_headers() {
 #[test]
 fn realms_table_cookie_and_join_answer() {
     run("realms");
+}
+
+#[test]
+fn raknet_offline_messages_and_bedrock_relay_decisions() {
+    run("raknet");
+}
+
+#[test]
+fn bedrock_realms_join_answers() {
+    run("bedrock_realms");
+}
+
+#[test]
+fn bedrock_gatherings_join_answers_and_requests() {
+    run("bedrock_gatherings");
+}
+
+/// The Bedrock starting points are what their parsers accept (a mutation of nothing tests
+/// nothing).
+#[test]
+fn the_bedrock_starting_points_are_accepted() {
+    use bastion_mc::egress::{raknet, services, udp};
+    let raknet_seeds = seeds("raknet");
+    let (script, messages) = raknet_seeds.split_last().unwrap();
+    for message in messages {
+        assert!(raknet::parse(message).is_ok(), "{}", hex(message));
+    }
+    let (relayed, refused) = udp::fuzz_bedrock_table(script);
+    assert!(relayed > 0 && refused > 0, "the script relays and refuses: {relayed}/{refused}");
+    let realms = seeds("bedrock_realms");
+    assert!(services::parse_realms_join(&realms[0]).is_ok());
+    assert!(services::parse_realms_join(&realms[1]).is_ok());
+    assert!(matches!(services::parse_realms_join(&realms[2]), Err(services::JoinError::NetherNet(_))));
+    assert_eq!(services::parse_realms_join(&realms[3]), Err(services::JoinError::HostName));
+    let gatherings = seeds("bedrock_gatherings");
+    assert!(services::parse_gatherings_join(&gatherings[0]).is_ok());
+    assert!(matches!(services::parse_gatherings_join(&gatherings[1]), Err(services::JoinError::NetherNet(_))));
+    assert!(services::experience_key(&gatherings[2]).is_ok());
 }
 
 #[test]

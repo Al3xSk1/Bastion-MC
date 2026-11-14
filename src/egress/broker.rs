@@ -91,11 +91,11 @@ const JOIN_PATH: &str = "/session/minecraft/join";
 
 /// A join is honoured only for a game connection opened this recently…
 const JOIN_WINDOW: Duration = Duration::from_secs(30);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_IDLE: Duration = Duration::from_secs(60);
-const CONNECTION_LIFETIME: Duration = Duration::from_secs(30 * 60);
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const REQUEST_IDLE: Duration = Duration::from_secs(60);
+pub(super) const CONNECTION_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const MAX_REQUEST_BODY: usize = 2 << 20;
-const MAX_RESPONSE_BODY: u64 = 8 << 20;
+pub(super) const MAX_RESPONSE_BODY: u64 = 8 << 20;
 const MAX_NAMES: usize = 64;
 /// Most bytes of request and reply bodies the broker holds at one time, over all of the
 /// game's connections together. Room for a handful of the largest replies at once; what the
@@ -124,7 +124,7 @@ const REQUEST_HEADERS: [HeaderName; 6] = [
     header::IF_MODIFIED_SINCE,
 ];
 /// Copied from Mojang's response to the game's.
-const RESPONSE_HEADERS: [HeaderName; 7] = [
+pub(super) const RESPONSE_HEADERS: [HeaderName; 7] = [
     header::CONTENT_TYPE,
     header::ETAG,
     header::RETRY_AFTER,
@@ -159,6 +159,17 @@ impl Authority {
     /// (`[realms] approve` is on): its name constraints then also permit
     /// `realms.minecraft.net` and `realms.minecraft-services.net`, and nothing else is added.
     pub fn generate_for(realms: bool) -> Result<Self> {
+        let realms_domains: &[&str] = if realms { &crate::realms::table::DOMAINS } else { &[] };
+        let domains: Vec<&str> = DOMAINS.iter().chain(realms_domains).copied().collect();
+        let mut authority = Self::generate_constrained("credential broker", &domains)?;
+        authority.realms = realms;
+        Ok(authority)
+    }
+
+    /// An authority whose name constraints permit exactly `domains` (each: that name and the
+    /// names below it), with `purpose` in its common name. The Bedrock service broker
+    /// (`services`) uses one for its four hosts; it holds no credential.
+    pub fn generate_constrained(purpose: &str, domains: &[&str]) -> Result<Self> {
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(pki)?;
         let mut params = CertificateParams::new(Vec::<String>::new()).map_err(pki)?;
         let now = time::OffsetDateTime::now_utc();
@@ -171,20 +182,15 @@ impl Authority {
         name.push(DnType::OrganizationName, "bastion-mc (this computer, this launch only)");
         name.push(
             DnType::CommonName,
-            format!("bastion-mc credential broker {}", util::hex_encode(&util::random_bytes::<4>()?)),
+            format!("bastion-mc {purpose} {}", util::hex_encode(&util::random_bytes::<4>()?)),
         );
         params.distinguished_name = name;
-        let realms_domains: &[&str] = if realms { &crate::realms::table::DOMAINS } else { &[] };
         params.name_constraints = Some(NameConstraints {
-            permitted_subtrees: DOMAINS
-                .iter()
-                .chain(realms_domains)
-                .map(|d| GeneralSubtree::DnsName((*d).to_string()))
-                .collect(),
+            permitted_subtrees: domains.iter().map(|d| GeneralSubtree::DnsName((*d).to_string())).collect(),
             excluded_subtrees: Vec::new(),
         });
         let certificate = params.self_signed(&key).map_err(pki)?.der().clone();
-        Ok(Authority { params, key, certificate, realms })
+        Ok(Authority { params, key, certificate, realms: false })
     }
 
     /// The certificate to put into the sandbox's trust store.
@@ -192,7 +198,18 @@ impl Authority {
         self.certificate.as_ref()
     }
 
-    fn issue(&self, name: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
+    /// The same certificate as PEM (64 columns), for a trust bundle written as text.
+    pub fn certificate_pem(&self) -> String {
+        let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+        for line in util::b64_encode(self.certificate.as_ref()).as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+            out.push('\n');
+        }
+        out.push_str("-----END CERTIFICATE-----\n");
+        out
+    }
+
+    pub(super) fn issue(&self, name: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(pki)?;
         let mut params = CertificateParams::new(vec![name.to_string()]).map_err(pki)?;
         params.not_before = self.params.not_before;
@@ -347,7 +364,7 @@ pub fn path_is_canonical(path: &str) -> bool {
         && path.split('/').all(|segment| segment != "." && segment != "..")
 }
 
-fn query_is_plain(query: &str) -> bool {
+pub(super) fn query_is_plain(query: &str) -> bool {
     query.len() <= 2048
         && query.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -458,27 +475,33 @@ impl RealmsBroker {
     }
 }
 
-/// The one budget all buffered bodies come out of (see the module documentation).
-struct Budget {
+/// The one budget all buffered bodies come out of (see the module documentation). The Bedrock
+/// service broker (`services`) keeps one of its own, of the same kind.
+pub(super) struct Budget {
     permits: Arc<tokio::sync::Semaphore>,
     bytes: usize,
     wait: Duration,
 }
 
 /// A share of the [`Budget`], returned to it when dropped.
-struct Room(tokio::sync::OwnedSemaphorePermit);
+pub(super) struct Room(tokio::sync::OwnedSemaphorePermit);
 
 fn budget_units(bytes: usize) -> usize {
     bytes.div_ceil(BUDGET_UNIT)
 }
 
 impl Budget {
-    fn new(bytes: usize, wait: Duration) -> Self {
+    pub(super) fn new(bytes: usize, wait: Duration) -> Self {
         Budget { permits: Arc::new(tokio::sync::Semaphore::new(budget_units(bytes))), bytes, wait }
     }
 
+    /// The budget every broker of a launch gets ([`BUFFER_BUDGET`], waiting ten seconds).
+    pub(super) fn standard() -> Self {
+        Self::new(BUFFER_BUDGET, BUDGET_WAIT)
+    }
+
     /// Room for `bytes`, waiting for it if need be — but not for long. `None`: there is none.
-    async fn reserve(&self, bytes: usize) -> Option<Room> {
+    pub(super) async fn reserve(&self, bytes: usize) -> Option<Room> {
         let units = u32::try_from(budget_units(bytes)).ok()?;
         match timeout(self.wait, self.permits.clone().acquire_many_owned(units)).await {
             Ok(Ok(permit)) => Some(Room(permit)),
@@ -486,14 +509,14 @@ impl Budget {
         }
     }
 
-    fn in_use(&self) -> usize {
+    pub(super) fn in_use(&self) -> usize {
         (budget_units(self.bytes) - self.permits.available_permits()) * BUDGET_UNIT
     }
 }
 
 impl Room {
     /// Give back what turned out not to be needed.
-    fn shrink_to(&mut self, bytes: usize) {
+    pub(super) fn shrink_to(&mut self, bytes: usize) {
         let excess = self.0.num_permits().saturating_sub(budget_units(bytes));
         drop(self.0.split(excess));
     }
@@ -509,8 +532,13 @@ pub struct ReplyBody {
 }
 
 impl ReplyBody {
-    fn local(bytes: Bytes) -> Self {
+    pub(super) fn local(bytes: Bytes) -> Self {
         ReplyBody { bytes, _room: None }
+    }
+
+    /// A reply from upstream that keeps its share of the budget until it has been taken.
+    pub(super) fn held(bytes: Bytes, room: Room) -> Self {
+        ReplyBody { bytes, _room: Some(room) }
     }
 }
 

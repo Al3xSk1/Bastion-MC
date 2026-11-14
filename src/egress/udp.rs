@@ -42,6 +42,21 @@
 //! already exchanges arbitrary bytes with over TCP — not *why* they are sent. See
 //! `docs/notes/voice-chat.md` for the threat-model consequences.
 //!
+//! **Bedrock** (a [`Policy::bedrock`] session) has no TCP game connection to tie flows to: the
+//! game speaks RakNet over UDP to the server itself. There the anchor is the server rule: once
+//! the launcher has resolved the rule's name (or at once, for a literal address), a *standing*
+//! anchor holds that address for the session, and flows to the rule's port go there and
+//! nowhere else — still no lookup per datagram, still one host-side socket per flow,
+//! `connect`ed, replies from the address the game sent to. Three things are added: a flow opens
+//! only with a datagram that starts a RakNet exchange (`raknet::opens_flow`); the limits are
+//! RakNet's ([`Limits::raknet`]: datagrams of an MTU discovery, gameplay rates); and a flow to
+//! the **join pass** (`bedrock::PASS`) goes to the one server whose Realms or event-server join
+//! the user approved outside the game — the first such flow spends the approval
+//! (`realms::approval::Approvals::take_pass`), and at most three more flows of the same join, to
+//! the same server and within 30 s, follow it (`services::Services::take_pass`). Without Landlock
+//! ABI 10 the sandbox may send UDP to any port of any address inside its namespace, but the
+//! only sockets there besides its own are these; the namespace still has no route out.
+//!
 //! Decisions and I/O are kept apart. [`Table`] decides, from addresses, sizes and times
 //! alone, and is what the unit tests and the generated-input harness drive; the functions
 //! below it own the sockets and do what the table said.
@@ -58,9 +73,15 @@ use std::{
 use nix::sys::socket::{
     ControlMessage, ControlMessageOwned, MsgFlags, SockaddrIn, recvmsg, send, sendmsg, setsockopt, sockopt,
 };
-use tokio::{io::Interest, net::UdpSocket, sync::watch, task::JoinSet};
+use tokio::{
+    io::Interest,
+    net::UdpSocket,
+    sync::watch,
+    task::{JoinHandle, JoinSet},
+    time::timeout,
+};
 
-use super::{Dest, FakeIps, Policy, Shared, is_public};
+use super::{Dest, FakeIps, Policy, Shared, is_public, raknet};
 use crate::{
     config::{HostSpec, ServerRule},
     error::{Context, Result},
@@ -118,6 +139,31 @@ impl Default for Limits {
             to_server: Rate { per_second: 100, burst: 100 },
             // The server forwards one stream per audible speaker: ten of them at once.
             to_game: Rate { per_second: 500, burst: 500 },
+        }
+    }
+}
+
+impl Limits {
+    /// What a Bedrock session's relay carries: RakNet to the servers the user listed. Like
+    /// [`Limits::default`], nothing in a configuration file changes it.
+    pub fn raknet() -> Self {
+        Limits {
+            // The game pings every server on its list (one flow per server and socket) besides
+            // the one it plays on; a list of a few dozen servers fits.
+            max_flows: 32,
+            // A RakNet connection is never silent that long: both sides ping every few seconds.
+            idle: Duration::from_secs(30),
+            // Datagrams of an MTU discovery and what a server that negotiated MTU 1500 sends.
+            max_datagram: raknet::MAX_DATAGRAM,
+            // The client sends its input every tick (20 a second), acknowledgements for what it
+            // receives (RakNet's update loop, at most about a hundred a second) and the odd
+            // larger packet: 500 a second leaves room for all of it. At the size limit that is
+            // 736 kB/s — to a server the user listed, which the game may tell anything anyway.
+            to_server: Rate { per_second: 500, burst: 500 },
+            // A server pours out chunks when the game joins: 4000 datagrams a second (5.9 MB/s at
+            // the size limit) per flow. More is dropped, and RakNet's own congestion control
+            // resends it: slower, not broken.
+            to_game: Rate { per_second: 4000, burst: 4000 },
         }
     }
 }
@@ -193,10 +239,18 @@ pub enum Refusal {
     Unreachable,
     /// From the server, for a flow that has ended in the meantime. Counted, never logged.
     Stale,
+    /// Bedrock: the first datagram of a flow was not a RakNet ping or open connection request.
+    NotRakNet,
+    /// Bedrock: to the join pass, which no approved join has armed, or whose join was used or
+    /// ran out (the reason is the approval's own).
+    Pass(&'static str),
 }
 
 impl Refusal {
-    fn text(self, limits: &Limits) -> String {
+    fn text(self, limits: &Limits, bedrock: bool) -> String {
+        if bedrock && let Some(text) = self.bedrock_text() {
+            return text.into();
+        }
         match self {
             Refusal::Unassigned => "address was never handed out by the resolver".into(),
             Refusal::NotAServer => "not an allowlisted game server".into(),
@@ -210,6 +264,10 @@ impl Refusal {
                 "the game connection uses a non-public address; set allow_private on the rule that names the UDP port"
                     .into()
             }
+            Refusal::NotRakNet => {
+                "the first datagram of a flow must be a RakNet ping or open connection request".into()
+            }
+            Refusal::Pass(why) => format!("join pass: {why}"),
             Refusal::Oversize => format!("datagram larger than {} bytes", limits.max_datagram),
             Refusal::FlowLimit => format!("{} flows are open already", limits.max_flows),
             Refusal::RateToServer => format!(
@@ -229,7 +287,30 @@ impl Refusal {
             Refusal::Stale => "the flow has ended".into(),
         }
     }
+
+    /// How a Bedrock session says it, where that differs: phrased so that the user knows what to
+    /// add to `[bedrock] servers`, or that nothing can be added.
+    fn bedrock_text(self) -> Option<&'static str> {
+        Some(match self {
+            Refusal::NotAServer => {
+                "not a Bedrock server you listed: if it is one, add { host = \"…\", port = … } to [bedrock] servers"
+            }
+            Refusal::PortNotListed => {
+                "this server is listed with another port: list it with this port as well in [bedrock] servers"
+            }
+            Refusal::NoGameConnection => {
+                "the launcher has not resolved this server's name (yet): see the line about its lookup"
+            }
+            Refusal::PrivateAddress => {
+                "the server is at a non-public address: LAN servers are not supported for Bedrock in this version"
+            }
+            _ => return None,
+        })
+    }
 }
+
+/// The anchor id of a flow to the join pass: no anchor (such a flow ends on its own).
+const PASS_ANCHOR: u64 = u64::MAX;
 
 /// One flow: a socket of the game (address and port inside the sandbox) and where it sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -262,6 +343,8 @@ struct Flow<U> {
     up: u64,
     down: u64,
     refused: u64,
+    /// A flow to the join pass: what its task waits on, dropped when the flow ends.
+    _pass: Option<watch::Sender<()>>,
 }
 
 /// A flow that was just opened.
@@ -341,8 +424,30 @@ impl<U: Clone> Table<U> {
         tied.into_iter().filter_map(|key| self.flows.remove(&key)).map(Flow::ended).collect()
     }
 
+    /// A datagram of `len` bytes on the flow `key`, if that flow exists: within the size and rate
+    /// limits it goes through. A flow that exists was admitted under the policy, and its anchor
+    /// is open: closing that anchor removes the flow under the same lock.
+    fn on_flow(&mut self, now: Instant, limits: &Limits, key: &FlowKey, len: usize) -> Option<Verdict<U>> {
+        let flow = self.flows.get_mut(key)?;
+        let refuse = |flow: &mut Flow<U>, why| {
+            flow.refused += 1;
+            Verdict::Refuse { label: flow.label.clone(), why }
+        };
+        if len > limits.max_datagram {
+            return Some(refuse(flow, Refusal::Oversize));
+        }
+        if !flow.to_server.take(limits.to_server, now) {
+            return Some(refuse(flow, Refusal::RateToServer));
+        }
+        flow.heard = now;
+        flow.up += 1;
+        Some(Verdict::Relay { upstream: flow.upstream.clone(), flow: flow.id, label: flow.label.clone(), opened: None })
+    }
+
     /// A datagram of `len` bytes from the game. `dest_of` says what a destination address
     /// stands for (see `Shared::dest_of`); `open` creates the way to the server for a new flow.
+    /// `opens`: this datagram may start a flow (always for Java; for Bedrock only a RakNet ping
+    /// or open connection request — `raknet::opens_flow`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn game_datagram(
         &mut self,
@@ -351,31 +456,13 @@ impl<U: Clone> Table<U> {
         policy: &Policy,
         key: FlowKey,
         len: usize,
+        opens: bool,
         dest_of: impl FnOnce(Ipv4Addr) -> Option<Dest>,
         open: impl FnOnce(SocketAddr) -> std::io::Result<U>,
     ) -> Verdict<U> {
         let oversize = len > limits.max_datagram;
-        // A flow that exists was admitted under the policy, and its game connection is open:
-        // closing that connection removes the flow under the same lock.
-        if let Some(flow) = self.flows.get_mut(&key) {
-            let refuse = |flow: &mut Flow<U>, why| {
-                flow.refused += 1;
-                Verdict::Refuse { label: flow.label.clone(), why }
-            };
-            if oversize {
-                return refuse(flow, Refusal::Oversize);
-            }
-            if !flow.to_server.take(limits.to_server, now) {
-                return refuse(flow, Refusal::RateToServer);
-            }
-            flow.heard = now;
-            flow.up += 1;
-            return Verdict::Relay {
-                upstream: flow.upstream.clone(),
-                flow: flow.id,
-                label: flow.label.clone(),
-                opened: None,
-            };
+        if let Some(verdict) = self.on_flow(now, limits, &key, len) {
+            return verdict;
         }
 
         // No flow yet. May there be one?
@@ -415,6 +502,9 @@ impl<U: Clone> Table<U> {
         if oversize {
             return refuse(Refusal::Oversize);
         }
+        if !opens {
+            return refuse(Refusal::NotRakNet);
+        }
         if self.flows.len() >= limits.max_flows {
             return refuse(Refusal::FlowLimit);
         }
@@ -445,6 +535,67 @@ impl<U: Clone> Table<U> {
                 up: 1,
                 down: 0,
                 refused: 0,
+                _pass: None,
+            },
+        );
+        Verdict::Relay { upstream, flow: opened.id, label, opened: Some(opened) }
+    }
+
+    /// A datagram of `len` bytes from the game to the join pass (Bedrock). A flow that exists
+    /// goes on as any flow does. A new one needs a datagram that may open a flow, room for it,
+    /// and then `take` — which spends the approval and says where the approved server is —
+    /// succeeding; nothing is spent on a datagram that would be refused anyway. The flow has no
+    /// anchor: it ends when the game falls silent, and the approval is not given back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pass_datagram(
+        &mut self,
+        now: Instant,
+        limits: &Limits,
+        key: FlowKey,
+        len: usize,
+        opens: bool,
+        take: impl FnOnce() -> std::result::Result<(SocketAddr, String), Refusal>,
+        open: impl FnOnce(SocketAddr) -> std::io::Result<U>,
+    ) -> Verdict<U> {
+        if let Some(verdict) = self.on_flow(now, limits, &key, len) {
+            return verdict;
+        }
+        let label: Arc<str> = format!("{} (join pass)", key.dest).into();
+        let refuse = |why| Verdict::Refuse { label: label.clone(), why };
+        if len > limits.max_datagram {
+            return refuse(Refusal::Oversize);
+        }
+        if !opens {
+            return refuse(Refusal::NotRakNet);
+        }
+        if self.flows.len() >= limits.max_flows {
+            return refuse(Refusal::FlowLimit);
+        }
+        let (target, tied_to) = match take() {
+            Ok(found) => found,
+            Err(why) => return refuse(why),
+        };
+        let Ok(upstream) = open(target) else { return refuse(Refusal::Io) };
+        let (keep, closed) = watch::channel(());
+        self.flows_opened += 1;
+        let opened = Opened { id: self.flows_opened, label: label.clone(), tied_to, target, closed };
+        let mut to_server = Bucket::full(limits.to_server, now);
+        to_server.take(limits.to_server, now); // this datagram
+        self.flows.insert(
+            key,
+            Flow {
+                id: opened.id,
+                anchor: PASS_ANCHOR,
+                label: label.clone(),
+                target,
+                upstream: upstream.clone(),
+                heard: now,
+                to_server,
+                to_game: Bucket::full(limits.to_game, now),
+                up: 1,
+                down: 0,
+                refused: 0,
+                _pass: Some(keep),
             },
         );
         Verdict::Relay { upstream, flow: opened.id, label, opened: Some(opened) }
@@ -611,11 +762,22 @@ pub(super) struct Relay {
     table: Mutex<Table<Arc<UdpSocket>>>,
     /// Refusals already written to the log: for each kind, the destinations.
     noted: Mutex<HashMap<Refusal, HashSet<Arc<str>>>>,
+    /// A Bedrock session: flows open only with RakNet, and refusals are phrased for
+    /// `[bedrock] servers`.
+    bedrock: bool,
+    /// Bedrock: the standing anchors of the server rules, held for the session.
+    standing: Mutex<Vec<watch::Sender<()>>>,
 }
 
 impl Relay {
-    pub(super) fn new(limits: Limits) -> Self {
-        Relay { limits, table: Mutex::new(Table::default()), noted: Mutex::new(HashMap::new()) }
+    pub(super) fn new(limits: Limits, bedrock: bool) -> Self {
+        Relay {
+            limits,
+            table: Mutex::new(Table::default()),
+            noted: Mutex::new(HashMap::new()),
+            bedrock,
+            standing: Mutex::new(Vec::new()),
+        }
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, Table<Arc<UdpSocket>>> {
@@ -645,7 +807,7 @@ fn note(shared: &Shared, relay: &Relay, label: &Arc<str>, why: Refusal) {
         } else {
             ""
         };
-        format!("egress: DENY  udp {label} ({}){last}", why.text(&relay.limits))
+        format!("egress: DENY  udp {label} ({}){last}", why.text(&relay.limits, relay.bedrock))
     };
     (shared.log)(line);
 }
@@ -688,6 +850,103 @@ impl Drop for Anchor<'_> {
             done(self.shared, flow, "its game connection closed");
         }
     }
+}
+
+/// How long one name lookup for a Bedrock server rule may take.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Pauses between lookups of a name that did not resolve; then the relay gives up on it.
+const RESOLVE_RETRIES: [u64; 6] = [5, 15, 30, 60, 120, 240];
+
+/// Bedrock: make each server rule the anchor of the flows to it — a literal address at once, a
+/// name once it has resolved on this machine (a task per name; a lookup that fails is tried
+/// again a few times, then given up, and each outcome is logged). The address found is the
+/// rule's for the session: there is no second lookup for a later datagram that a network
+/// attacker could answer differently. A public address is preferred, IPv4 before IPv6 (the
+/// game speaks IPv4 inside; a Bedrock server's IPv6 port is usually another one). For Java
+/// this does nothing: its flows follow game connections.
+pub(super) fn stand(shared: &Arc<Shared>) -> Vec<JoinHandle<()>> {
+    let Some(relay) = shared.udp.as_ref() else { return Vec::new() };
+    let mut tasks = Vec::new();
+    for rule in shared.policy.raknet() {
+        match &rule.host {
+            HostSpec::Ip(ip) => register(shared, relay, rule, SocketAddr::new((*ip).into(), rule.port)),
+            HostSpec::Name(name) => {
+                let (shared, rule, name) = (shared.clone(), rule.clone(), name.clone());
+                tasks.push(tokio::spawn(async move {
+                    let Some(relay) = shared.udp.as_ref() else { return };
+                    let mut failed = 0;
+                    loop {
+                        match resolve(&name, rule.port).await {
+                            Ok(addr) => {
+                                (shared.log)(format!(
+                                    "egress: udp   Bedrock server {name}:{} resolved to {addr}{}",
+                                    rule.port,
+                                    if failed > 0 {
+                                        format!(" (after {failed} failed lookup(s))")
+                                    } else {
+                                        String::new()
+                                    }
+                                ));
+                                register(&shared, relay, &rule, addr);
+                                return;
+                            }
+                            Err(why) => {
+                                let pause = RESOLVE_RETRIES.get(failed).copied();
+                                failed += 1;
+                                // The first failure and the last one are logged, the retries
+                                // in between are not.
+                                let outcome = match pause {
+                                    Some(seconds) if failed == 1 => {
+                                        Some(format!("trying again in {seconds} s, then a few more times"))
+                                    }
+                                    Some(_) => None,
+                                    None => Some(format!("given up after {failed} attempts")),
+                                };
+                                if let Some(outcome) = outcome {
+                                    (shared.log)(format!(
+                                        "egress: udp   Bedrock server {name}:{}: the name did not resolve ({}); \
+                                         datagrams to it are refused until it does — {outcome}",
+                                        rule.port,
+                                        crate::util::sanitize_line(why.as_bytes(), 200)
+                                    ));
+                                }
+                                match pause {
+                                    Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds)).await,
+                                    None => return,
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+        }
+    }
+    tasks
+}
+
+async fn resolve(name: &str, port: u16) -> std::result::Result<SocketAddr, String> {
+    let mut addrs: Vec<SocketAddr> = timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((name, port)))
+        .await
+        .map_err(|_| "the lookup timed out".to_string())?
+        .map_err(|e| e.to_string())?
+        .collect();
+    addrs.sort_by_key(SocketAddr::is_ipv6); // stable: the resolver's order within each family
+    addrs.iter().find(|a| is_public(a.ip())).or(addrs.first()).copied().ok_or_else(|| "no addresses".to_string())
+}
+
+/// Register the standing anchor of `rule` at `addr`, held until the relay stops.
+fn register(shared: &Shared, relay: &Relay, rule: &ServerRule, addr: SocketAddr) {
+    let label = format!("Bedrock server {}:{}", rule.host, rule.port);
+    if !is_public(addr.ip()) && !rule.allow_private {
+        // Registered all the same: the refusal of each datagram then says why.
+        (shared.log)(format!(
+            "egress: udp   {label} is at a non-public address ({}): LAN servers are not supported for Bedrock in this \
+             version, datagrams to it are refused",
+            addr.ip()
+        ));
+    }
+    let (_, open) = relay.table().open_anchor(rule.host.clone(), rule.port, addr, &label);
+    relay.standing.lock().expect("udp standing lock").push(open);
 }
 
 /// The relay is shutting down: the flows that are still open report what they carried.
@@ -738,15 +997,22 @@ fn from_game(
     };
     let key = FlowKey { game: arrival.from, dest: SocketAddrV4::new(to, socket.port) };
     let len = if arrival.truncated { relay.limits.max_datagram + 1 } else { arrival.len };
-    let verdict = relay.table().game_datagram(
-        Instant::now(),
-        &relay.limits,
-        &shared.policy,
-        key,
-        len,
-        |ip| shared.dest_of(ip),
-        open_upstream,
-    );
+    // Bedrock: only the start of a RakNet exchange opens a flow (Java: any datagram does).
+    let opens = !relay.bedrock || raknet::opens_flow(data);
+    let verdict = if shared.policy.bedrock_pass() == Some(key.dest) {
+        relay.table().pass_datagram(Instant::now(), &relay.limits, key, len, opens, || take_pass(shared), open_upstream)
+    } else {
+        relay.table().game_datagram(
+            Instant::now(),
+            &relay.limits,
+            &shared.policy,
+            key,
+            len,
+            opens,
+            |ip| shared.dest_of(ip),
+            open_upstream,
+        )
+    };
     match verdict {
         Verdict::Refuse { label, why } => {
             refuse(shared, relay, &label, why);
@@ -755,10 +1021,19 @@ fn from_game(
         Verdict::Relay { upstream, flow, label, opened } => {
             if let Some(opened) = &opened {
                 shared.stats.udp_flows.fetch_add(1, Ordering::Relaxed);
-                (shared.log)(format!(
-                    "egress: ALLOW udp {label} → {} (flow {} from {}; follows the game connection {})",
-                    opened.target, opened.id, key.game, opened.tied_to
-                ));
+                let line = if relay.bedrock {
+                    let first = raknet::parse(data).map(|m| m.describe()).unwrap_or_default();
+                    format!(
+                        "egress: ALLOW udp {label} → {} (flow {} from {}; {first}; {})",
+                        opened.target, opened.id, key.game, opened.tied_to
+                    )
+                } else {
+                    format!(
+                        "egress: ALLOW udp {label} → {} (flow {} from {}; follows the game connection {})",
+                        opened.target, opened.id, key.game, opened.tied_to
+                    )
+                };
+                (shared.log)(line);
             }
             // Never waits: see `GameSocket::send`.
             match send(upstream.as_raw_fd(), data, MsgFlags::MSG_DONTWAIT) {
@@ -772,6 +1047,14 @@ fn from_game(
             }
             opened.map(|opened| (key, opened, upstream))
         }
+    }
+}
+
+/// Where the join pass leads, spending the approval (see `services::Services::take_pass`).
+fn take_pass(shared: &Shared) -> std::result::Result<(SocketAddr, String), Refusal> {
+    match shared.services.as_ref() {
+        Some(services) => services.take_pass(),
+        None => Err(Refusal::Pass("joins are not brokered in this session")),
     }
 }
 
@@ -964,6 +1247,7 @@ pub fn fuzz_table(data: &[u8]) -> (u64, u64) {
                     &policy,
                     key,
                     len,
+                    true,
                     |ip| if FakeIps::contains(ip) { names.name_of(ip).map(Dest::Name) } else { Some(Dest::Ip(ip)) },
                     Ok,
                 );
@@ -1001,6 +1285,165 @@ pub fn fuzz_table(data: &[u8]) -> (u64, u64) {
                     sent.insert(flow, (0, now));
                 }
                 // The rate limit, over the whole life of the flow.
+                let (count, since) = sent.get_mut(&flow).expect("a flow that was never opened");
+                *count += 1;
+                let allowed = u64::from(limits.to_server.burst)
+                    + (now - *since).as_millis() as u64 * u64::from(limits.to_server.per_second) / 1000
+                    + 1;
+                assert!(*count <= allowed, "{count} datagrams relayed where the rate limit allows {allowed}");
+            }
+        }
+    }
+    (relayed, refused)
+}
+
+/// For `fuzzing::raknet`: the decision table of a Bedrock session, driven by a script of
+/// arbitrary events — server rules resolving, joins being approved, datagrams from the game
+/// (opening a RakNet exchange or not) to servers, to names that are none, to the pass, datagrams
+/// from servers, time passing — checking what must hold whatever the game, the services and the
+/// clock do: a new flow opens only with a RakNet opening, only to the address the launcher
+/// resolved for a rule that names the port (never a private one) or to the one server an
+/// approval named, and everything stays within the size, rate and flow limits. Each event is
+/// four bytes. Returns how many of the game's datagrams were relayed and how many refused.
+#[doc(hidden)]
+pub fn fuzz_bedrock_table(data: &[u8]) -> (u64, u64) {
+    use crate::bedrock::{BedrockConfig, BedrockServer, net::plan};
+
+    let server = |host: &str, port: u16| BedrockServer { host: host.into(), port };
+    let cfg = BedrockConfig {
+        servers: vec![
+            server("play.example.org", 19132),
+            server("203.0.113.9", 19133),
+            server("lan.example.org", 19132),
+        ],
+        ..BedrockConfig::default()
+    };
+    let policy = Policy::bedrock(&plan(&cfg, &[]), true, false).expect("harness policy");
+    let pass = policy.bedrock_pass().expect("joins are brokered");
+    let limits = Limits {
+        max_flows: 3,
+        idle: Duration::from_secs(5),
+        max_datagram: 200,
+        to_server: Rate { per_second: 4, burst: 4 },
+        to_game: Rate { per_second: 8, burst: 8 },
+    };
+    let mut names = FakeIps::new();
+    let fake: Vec<Ipv4Addr> = ["play.example.org", "lan.example.org", "login.live.com"]
+        .iter()
+        .map(|h| names.assign(h).expect("room"))
+        .collect();
+    let dests = [fake[0], fake[1], fake[2], Ipv4Addr::new(203, 0, 113, 9), *pass.ip(), Ipv4Addr::new(127, 99, 0, 9)];
+    // Where each rule resolves (the last one to a private address), and the approved servers.
+    let resolved: [(HostSpec, u16, SocketAddr); 3] = [
+        (HostSpec::Name("play.example.org".into()), 19132, "198.51.100.10:19132".parse().expect("literal")),
+        (HostSpec::Ip(Ipv4Addr::new(203, 0, 113, 9)), 19133, "203.0.113.9:19133".parse().expect("literal")),
+        (HostSpec::Name("lan.example.org".into()), 19132, "192.168.1.5:19132".parse().expect("literal")),
+    ];
+    let approved: [SocketAddr; 2] =
+        ["198.51.100.77:30000".parse().expect("literal"), "203.0.113.200:19132".parse().expect("literal")];
+    let opening = raknet::Offline::UnconnectedPing { open_connections: false, time: 1, client_guid: 2 }.encode();
+    let connected = [0x84u8, 0, 0, 0, 0x40, 0, 8];
+
+    let mut table: Table<SocketAddr> = Table::default();
+    let mut standing: Vec<(usize, watch::Sender<()>)> = Vec::new();
+    let mut armed: Option<SocketAddr> = None;
+    let mut now = Instant::now();
+    let mut sent: HashMap<u64, (u64, Instant)> = HashMap::new();
+    let (mut relayed, mut refused) = (0u64, 0u64);
+    for step in data.as_chunks::<4>().0.iter().take(4096) {
+        let (op, a, b, c) = (step[0] % 7, step[1], step[2], step[3]);
+        match op {
+            0 => now += Duration::from_millis(u64::from(a) * 10),
+            // A rule's name resolves (once).
+            1 => {
+                let rule = usize::from(a) % resolved.len();
+                if !standing.iter().any(|(r, _)| *r == rule) {
+                    let (host, port, peer) = resolved[rule].clone();
+                    standing.push((rule, table.open_anchor(host, port, peer, "Bedrock server").1));
+                }
+            }
+            // The user approves a join.
+            2 => armed = Some(approved[usize::from(a) % approved.len()]),
+            // A datagram from the server on an existing flow.
+            3 => {
+                let Some((key, id)) =
+                    table.flows.iter().nth(usize::from(a) % table.flows.len().max(1)).map(|(k, f)| (*k, f.id))
+                else {
+                    continue;
+                };
+                let len = usize::from(b) * 2;
+                let verdict = table.server_datagram(now, &limits, &key, id, len);
+                assert!(verdict.is_err() || len <= limits.max_datagram, "an oversize datagram reached the game");
+            }
+            // A flow is checked for idleness, as its task would.
+            4 => {
+                let idle: Vec<(FlowKey, u64)> =
+                    table.flows.iter().filter(|(_, f)| f.heard + limits.idle <= now).map(|(k, f)| (*k, f.id)).collect();
+                for (key, id) in idle {
+                    assert!(table.end(&key, id).is_some());
+                }
+            }
+            // A datagram from the game.
+            _ => {
+                let dest_ip = dests[usize::from(b) % dests.len()];
+                let port = [19132, 19133, 19134][usize::from(c) % 3];
+                let key = FlowKey {
+                    game: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40000 + u16::from(a % 6)),
+                    dest: SocketAddrV4::new(dest_ip, port),
+                };
+                let opens = c & 0x80 != 0;
+                let len = if opens { opening.len() } else { connected.len() } + usize::from(c & 0x7f) * 2;
+                let existed = table.flows.contains_key(&key);
+                let verdict = if key.dest == pass {
+                    table.pass_datagram(
+                        now,
+                        &limits,
+                        key,
+                        len,
+                        opens,
+                        || armed.take().map(|t| (t, "approved".to_string())).ok_or(Refusal::Pass("none armed")),
+                        Ok,
+                    )
+                } else {
+                    table.game_datagram(
+                        now,
+                        &limits,
+                        &policy,
+                        key,
+                        len,
+                        opens,
+                        |ip| if FakeIps::contains(ip) { names.name_of(ip).map(Dest::Name) } else { Some(Dest::Ip(ip)) },
+                        Ok,
+                    )
+                };
+                let Verdict::Relay { upstream, flow, opened, .. } = verdict else {
+                    refused += 1;
+                    continue;
+                };
+                relayed += 1;
+                assert!(len <= limits.max_datagram, "an oversize datagram was relayed");
+                assert!(table.flow_count() <= limits.max_flows, "more flows than the limit");
+                let (target, anchor) = table.flow_target(&key).expect("relayed without a flow");
+                assert_eq!(upstream, target);
+                if opened.is_some() {
+                    assert!(!existed && opens, "a flow opened without a RakNet opening");
+                    if key.dest == pass {
+                        assert_eq!(anchor, PASS_ANCHOR);
+                        assert!(approved.contains(&target), "the pass led somewhere no approval named");
+                    } else {
+                        let tied = table.anchors.get(&anchor).expect("a flow without its standing anchor");
+                        assert!(is_public(tied.peer.ip()), "a flow to a private address");
+                        assert_eq!(target, SocketAddr::new(tied.peer.ip(), key.dest.port()));
+                        let dest = if FakeIps::contains(*key.dest.ip()) {
+                            Dest::Name(names.name_of(*key.dest.ip()).expect("an address somebody was given"))
+                        } else {
+                            Dest::Ip(*key.dest.ip())
+                        };
+                        let rules = policy.udp_rules(&dest, key.dest.port()).expect("a rule naming the port");
+                        assert!(rules.iter().any(|r| r.host == tied.host && r.port == tied.tcp_port));
+                    }
+                    sent.insert(flow, (0, now));
+                }
                 let (count, since) = sent.get_mut(&flow).expect("a flow that was never opened");
                 *count += 1;
                 let allowed = u64::from(limits.to_server.burst)
@@ -1063,6 +1506,7 @@ mod tests {
                 &self.policy,
                 key,
                 len,
+                true,
                 |ip| if FakeIps::contains(ip) { names.name_of(ip).map(Dest::Name) } else { Some(Dest::Ip(ip)) },
                 Ok,
             ) {
@@ -1311,8 +1755,8 @@ mod tests {
         }
         // The two are worded so that the log tells them apart.
         let limits = Limits::default();
-        assert!(Refusal::Unreachable.text(&limits).contains("nothing listens there"));
-        assert!(Refusal::Io.text(&limits).contains("operating system"));
+        assert!(Refusal::Unreachable.text(&limits, false).contains("nothing listens there"));
+        assert!(Refusal::Io.text(&limits, false).contains("operating system"));
     }
 
     #[test]
@@ -1333,5 +1777,188 @@ mod tests {
         assert_eq!(fuzz_table(script.as_flattened()), (1, 2));
         assert_eq!(fuzz_table(&[]), (0, 0));
         assert_eq!(fuzz_table(&[5, 0, 0]), (0, 0), "an incomplete event is no event");
+    }
+
+    // ------------------------------------------------------------ Bedrock
+
+    /// A Bedrock session's table, with the plan's servers and the join pass.
+    struct BedrockBench {
+        policy: Policy,
+        limits: Limits,
+        names: FakeIps,
+        table: Table<SocketAddr>,
+        now: Instant,
+    }
+
+    impl BedrockBench {
+        fn new(servers: &[(&str, u16)]) -> Self {
+            let cfg = crate::bedrock::BedrockConfig {
+                servers: servers
+                    .iter()
+                    .map(|(host, port)| crate::bedrock::BedrockServer { host: host.to_string(), port: *port })
+                    .collect(),
+                ..Default::default()
+            };
+            BedrockBench {
+                policy: Policy::bedrock(&crate::bedrock::net::plan(&cfg, &[]), true, false).unwrap(),
+                limits: Limits::raknet(),
+                names: FakeIps::new(),
+                table: Table::default(),
+                now: Instant::now(),
+            }
+        }
+
+        fn key(&mut self, source_port: u16, host: &str, port: u16) -> FlowKey {
+            let ip = host.parse().unwrap_or_else(|_| self.names.assign(host).unwrap());
+            FlowKey { game: SocketAddrV4::new(Ipv4Addr::LOCALHOST, source_port), dest: SocketAddrV4::new(ip, port) }
+        }
+
+        fn send(&mut self, key: FlowKey, len: usize, opens: bool) -> std::result::Result<SocketAddr, Refusal> {
+            let names = &self.names;
+            match self.table.game_datagram(
+                self.now,
+                &self.limits,
+                &self.policy,
+                key,
+                len,
+                opens,
+                |ip| if FakeIps::contains(ip) { names.name_of(ip).map(Dest::Name) } else { Some(Dest::Ip(ip)) },
+                Ok,
+            ) {
+                Verdict::Relay { upstream, .. } => Ok(upstream),
+                Verdict::Refuse { why, .. } => Err(why),
+            }
+        }
+    }
+
+    #[test]
+    fn a_bedrock_flow_goes_to_the_address_resolved_for_its_rule_and_opens_only_with_raknet() {
+        let mut b = BedrockBench::new(&[("play.example.org", 19132), ("203.0.113.9", 19133)]);
+        let key = b.key(40000, "play.example.org", 19132);
+        assert_eq!(b.send(key, 33, true), Err(Refusal::NoGameConnection), "before the name has resolved");
+        let resolved: SocketAddr = "198.51.100.10:19132".parse().unwrap();
+        let _standing = b.table.open_anchor(name("play.example.org"), 19132, resolved, "Bedrock server");
+        assert_eq!(b.send(key, 7, false), Err(Refusal::NotRakNet), "a connected datagram opens nothing");
+        assert_eq!(b.table.flow_count(), 0);
+        assert_eq!(b.send(key, 33, true), Ok(resolved));
+        assert_eq!(b.send(key, 1200, false), Ok(resolved), "once open, a flow carries what the game sends");
+        // A literal address is its own anchor; the address next door, another port, a name that
+        // is no server, an address never handed out: refused, each for its reason.
+        let literal: SocketAddr = "203.0.113.9:19133".parse().unwrap();
+        let _literal =
+            b.table.open_anchor(HostSpec::Ip(Ipv4Addr::new(203, 0, 113, 9)), 19133, literal, "Bedrock server");
+        let k = b.key(40001, "203.0.113.9", 19133);
+        assert_eq!(b.send(k, 33, true), Ok(literal));
+        for (source, host, port, why) in [
+            (40002, "play.example.org", 19133, Refusal::PortNotListed),
+            (40003, "203.0.113.10", 19133, Refusal::NotAServer),
+            (40004, "login.live.com", 19132, Refusal::NotAServer),
+            (40005, "127.99.0.1", 19132, Refusal::Unassigned),
+        ] {
+            let k = b.key(source, host, port);
+            assert_eq!(b.send(k, 33, true), Err(why), "{host}:{port}");
+        }
+        // The largest datagram of an MTU discovery and of a server that negotiated MTU 1500 pass;
+        // one byte more does not.
+        let k = b.key(40006, "play.example.org", 19132);
+        assert_eq!(b.send(k, raknet::MAX_DATAGRAM + 1, true), Err(Refusal::Oversize));
+        assert_eq!(b.send(k, raknet::MAX_PROBE, true), Ok(resolved));
+        assert_eq!(b.send(k, raknet::MAX_DATAGRAM, false), Ok(resolved));
+    }
+
+    #[test]
+    fn a_bedrock_server_at_a_private_address_is_refused_as_a_lan_server() {
+        let mut b = BedrockBench::new(&[("lan.example.org", 19132)]);
+        let _standing = b.table.open_anchor(name("lan.example.org"), 19132, "192.168.1.5:19132".parse().unwrap(), "x");
+        let key = b.key(40000, "lan.example.org", 19132);
+        assert_eq!(b.send(key, 33, true), Err(Refusal::PrivateAddress));
+        assert!(Refusal::PrivateAddress.text(&b.limits, true).contains("LAN servers are not supported"));
+    }
+
+    #[test]
+    fn the_pass_opens_a_flow_to_the_approved_server_and_spends_nothing_on_a_refused_datagram() {
+        let mut b = BedrockBench::new(&[]);
+        let pass = b.policy.bedrock_pass().unwrap();
+        let key = FlowKey { game: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40000), dest: pass };
+        let target: SocketAddr = "198.51.100.77:30000".parse().unwrap();
+        let taken = std::cell::Cell::new(0);
+        let take = || {
+            taken.set(taken.get() + 1);
+            if taken.get() == 1 { Ok((target, "the approved join".to_string())) } else { Err(Refusal::Pass("used")) }
+        };
+        let pass_send = |table: &mut Table<SocketAddr>, key, len, opens| match table
+            .pass_datagram(b.now, &b.limits, key, len, opens, take, Ok)
+        {
+            Verdict::Relay { upstream, opened, .. } => Ok((upstream, opened.map(|o| o.closed))),
+            Verdict::Refuse { why, .. } => Err(why),
+        };
+        assert_eq!(pass_send(&mut b.table, key, 7, false).err(), Some(Refusal::NotRakNet));
+        assert_eq!(pass_send(&mut b.table, key, raknet::MAX_DATAGRAM + 1, true).err(), Some(Refusal::Oversize));
+        assert_eq!(taken.get(), 0, "nothing was spent on refused datagrams");
+        let (upstream, closed) = pass_send(&mut b.table, key, 33, true).unwrap();
+        assert_eq!(upstream, target);
+        let closed = closed.expect("a new flow");
+        assert_eq!(taken.get(), 1);
+        assert_eq!(b.table.flow_target(&key), Some((target, PASS_ANCHOR)));
+        // The same flow goes on without asking again; another flow asks, and is refused.
+        assert_eq!(pass_send(&mut b.table, key, 900, false).map(|(u, _)| u), Ok(target));
+        assert_eq!(taken.get(), 1);
+        let other = FlowKey { game: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40001), dest: pass };
+        assert_eq!(pass_send(&mut b.table, other, 33, true).err(), Some(Refusal::Pass("used")));
+        // When the flow ends (the game fell silent), its task hears of it.
+        let id = b.table.flows[&key].id;
+        assert!(b.table.end(&key, id).is_some());
+        assert!(closed.has_changed().is_err(), "the flow's watch is closed with it");
+        assert!(Refusal::Pass("used").text(&b.limits, true).contains("join pass"));
+    }
+
+    #[test]
+    fn the_raknet_limits_are_the_documented_ones() {
+        // docs/notes/bedrock-net.md quotes these numbers.
+        let limits = Limits::raknet();
+        assert_eq!(limits.max_flows, 32);
+        assert_eq!(limits.idle, Duration::from_secs(30));
+        assert_eq!(limits.max_datagram, 1472);
+        assert_eq!(limits.to_server, Rate { per_second: 500, burst: 500 });
+        assert_eq!(limits.to_game, Rate { per_second: 4000, burst: 4000 });
+        // Voice keeps its own.
+        assert_eq!(Limits::default().max_datagram, 1400);
+    }
+
+    #[test]
+    fn bedrock_refusals_say_what_to_add_and_java_refusals_are_unchanged() {
+        let limits = Limits::raknet();
+        assert!(Refusal::NotAServer.text(&limits, true).contains("[bedrock] servers"));
+        assert!(Refusal::PortNotListed.text(&limits, true).contains("[bedrock] servers"));
+        assert!(Refusal::NoGameConnection.text(&limits, true).contains("resolved"));
+        assert!(Refusal::NotRakNet.text(&limits, true).contains("RakNet"));
+        assert_eq!(Refusal::NotAServer.text(&limits, false), "not an allowlisted game server");
+        assert!(Refusal::NoGameConnection.text(&limits, false).contains("game connection"));
+        assert!(Refusal::PrivateAddress.text(&limits, false).contains("allow_private"));
+    }
+
+    #[test]
+    fn the_bedrock_harness_accepts_a_script_that_exercises_every_step() {
+        // A rule resolves; a RakNet opening; a connected datagram on the flow; a join is approved;
+        // a flow to the pass; a second one; a name that is no server; a rule not yet resolved; it
+        // resolves to a private address; the server answers; time passes; an idle check.
+        let script = [
+            [1, 0, 0, 0],
+            [5, 0, 0, 0x81],
+            [5, 0, 0, 0x03],
+            [2, 0, 0, 0],
+            [5, 1, 4, 0x81],
+            [5, 2, 4, 0x81],
+            [5, 3, 2, 0x81],
+            [5, 4, 1, 0x81],
+            [1, 2, 0, 0],
+            [5, 4, 1, 0x81],
+            [3, 0, 10, 0],
+            [0, 255, 0, 0],
+            [0, 255, 0, 0],
+            [4, 0, 0, 0],
+        ];
+        assert_eq!(fuzz_bedrock_table(script.as_flattened()), (3, 4));
+        assert_eq!(fuzz_bedrock_table(&[]), (0, 0));
     }
 }
