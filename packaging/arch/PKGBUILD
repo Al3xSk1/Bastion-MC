@@ -28,15 +28,16 @@
 # check() runs packaging/check-hardening.sh on both linked binaries, so the properties above
 # are verified on every build instead of assumed.
 
-pkgbase=bastion-mc
+pkgbase=Bastion-MC
 pkgname=('bastion-mc' 'bastion-mc-gui')
 pkgver=0.1.0
 pkgrel=1
 arch=('x86_64')
-url='https://example.invalid/you/bastion-mc'   # TODO
+url='https://github.com/Al3xSk1/Bastion-MC'   # TODO
 license=('MIT')
 makedepends=(
   'cargo'
+  'cargo-auditable'      # embeds the exact dependency list in the binaries (see build())
   'java-environment'     # javac builds the 118-line launch bootstrap from source
 )
 # Nothing else is needed to *build* the front end: its window-system, keyboard and GPU
@@ -48,13 +49,28 @@ options=('!lto')
 
 # A signed tag: makepkg verifies the signature before a single file is unpacked.
 _srcdir=$pkgbase
-source=("git+${url}.git#tag=v${pkgver}?signed")
-validpgpkeys=('0000000000000000000000000000000000000000')   # TODO: release-signing key fingerprint
+source=("git+${url}.git") # Removed '#tag=v${pkgver}?signed'
+validpgpkeys=('4F08F12571E527C6AEEC6860CAE20F4023D7A011')   # TODO: release-signing key fingerprint
 b2sums=('SKIP')   # integrity comes from the signed tag
 # Tarball alternative:
 #   _srcdir=$pkgbase-$pkgver
 #   source=("$pkgbase-$pkgver.tar.gz::${url}/archive/v${pkgver}.tar.gz")
 #   b2sums=('<output of b2sum>')
+
+# Offline alternative (no network in prepare(), and the dependency sources become part of
+# what is signed): ship a tarball that contains `vendor/`, made once by the maintainer with
+#   cargo vendor --locked --versioned-dirs vendor > .cargo/vendor.toml
+#   cat .cargo/vendor.toml >> .cargo/config.toml      # [source.crates-io] replace-with = …
+# and replace the `cargo fetch` in prepare() by nothing at all. build() and check() already
+# run with --frozen, which fails rather than touch the network.
+#
+# Reproducibility: makepkg exports SOURCE_DATE_EPOCH (from the newest source file, or as
+# set by the builder) and the build below uses nothing else that varies — paths are
+# remapped, the lockfile is frozen, the C shim is linked without a build id. Two builds of
+# the same tag with the same toolchain versions should give identical binaries; compare with
+#   sha256sum pkg/*/usr/bin/*        (or `diffoscope` on the two packages)
+# The toolchain versions are part of the input: record `rustc -V`, `gcc --version` and
+# `javac -version` next to a published hash.
 
 # Always build with an explicit --target, even though it is the host. Without one, cargo
 # applies RUSTFLAGS to build scripts and proc-macro libraries as well, and the flags below
@@ -103,7 +119,10 @@ build() {
   export AWS_LC_SYS_USE_SYSTEM=0 AWS_LC_SYS_CMAKE_BUILDER=0
   # --frozen: no network, no lockfile changes. Profile (LTO, panic=abort, overflow checks)
   # comes from Cargo.toml. --workspace: the launcher and the front end.
-  cargo build --frozen --release --workspace --target "$(_target)"
+  # `auditable`: the dependency tree (names, versions, sources) is embedded in a section
+  # of each binary, so that an installed file can be audited without the build directory:
+  #   cargo audit bin /usr/bin/bastion-mc
+  cargo auditable build --frozen --release --workspace --target "$(_target)"
 }
 
 check() {
@@ -140,10 +159,12 @@ package_bastion-mc() {
     'jre21-openjdk: Minecraft 1.20.5 - 1.21.x'
     'jre-openjdk: current Minecraft releases'
     'age: encrypted refresh-token vault (hardware keys via age plugins)'
+    'gamescope: isolate the game from the X11 session (nested compositor)'
   )
   cd "$_srcdir"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc"
-  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md docs/THREAT_MODEL.md docs/TOKEN_INJECTION.md
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md docs/THREAT_MODEL.md docs/TOKEN_INJECTION.md \
+    docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md
   install -Dm0644 examples/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   # Root-owned trust anchors for profile signatures. When this directory contains *.pub

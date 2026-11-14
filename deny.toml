@@ -1,0 +1,52 @@
+# cargo-deny configuration: advisories, licences, duplicate versions and crate sources.
+#   cargo deny check
+# The launcher's dependency policy (Cargo.toml) is stricter than anything checked here; this
+# file makes the mechanical part of it repeatable.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+# Every advisory is an error; an exception needs an entry here with the reason.
+ignore = []
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Permissive licences only. Nothing copyleft is linked into the binaries.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "OFL-1.1",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true   # the workspace's own crates, by path
+# The stack is rustls + aws-lc-rs. None of these may ever be pulled in, by any path.
+deny = [
+    { crate = "openssl", reason = "TLS is rustls; no system OpenSSL" },
+    { crate = "openssl-sys", reason = "TLS is rustls; no system OpenSSL" },
+    { crate = "native-tls", reason = "TLS is rustls" },
+    { crate = "reqwest", reason = "the HTTP client is the launcher's own, on hyper" },
+    { crate = "ring", reason = "one crypto provider: aws-lc-rs" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
