@@ -217,16 +217,6 @@ libFuzzer targets themselves.
       like any other window; running it in the nested compositor, as the game, would
       isolate it, at the cost of a second compositor for a short task.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
-- [ ] **A flaky unit test of the Bedrock store** (found in the documents pass of the fifth
-      round): `bedrock::store::tests::remove_refuses_while_a_launch_holds_the_version_and_removes_it_after`
-      failed once in six runs of the launcher's unit tests — `remove` still found the version
-      locked after the test had dropped both of its descriptors ("in use by a running launch
-      (it holds the version open)") — and passed in the five others and in eight runs on its
-      own. Not investigated further. One explanation that fits: the lock is shared by every
-      copy of the descriptor, and a process that another test starts at that moment holds
-      copies of the test process's descriptors until it executes its program (they are
-      close-on-exec). If that is it, the store is right and the test needs a retry or the
-      descriptor opened where no other test forks.
 - [ ] **The integration suites on a GitHub runner** (`.github/workflows/integration.yml`,
       started by hand): never run. The runner's kernel (7.0) lacks Landlock ABI 10, so the
       UDP-rule tests will skip; what else differs from the development machine (AppArmor's
@@ -711,6 +701,13 @@ purchase or a Microsoft account.
   corrected against the code; its maintainer comment taken out for the website), this file.
 - The website: `bedrock.html`, and Bedrock on the overview, getting started and the security
   overview (`docs/notes/website.md`, section 12).
+- **A flaky unit test of the Bedrock store, fixed before the round was committed**: the
+  documents pass saw `bedrock::store::tests::remove_refuses_while_a_launch_holds_the_version_and_removes_it_after`
+  fail once in six runs. The cause: the version's lock belongs to the open file, and a child
+  process that another test forks at that moment holds a copy of every descriptor until it
+  executes its program; `remove` then finds the version in use for that instant. The store
+  is right to refuse; the test now retries the removal for up to two seconds while it says
+  "in use". Five further runs of the launcher's unit tests: 617 passed each.
 
 ## Done in the fourth round
 

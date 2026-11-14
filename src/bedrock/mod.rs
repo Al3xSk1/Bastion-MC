@@ -1,9 +1,9 @@
 //! Minecraft: Bedrock Edition — the Android build, run by an installed `mcpelauncher-client`
 //! inside bastion's sandbox.
 //!
-//! **Status: interfaces only.** This module was written by the integrator as the contract of
-//! the fifth round (`docs/notes/round5-contract.md`); five packages fill it in. Until then a
-//! Bedrock launch is refused.
+//! The interfaces here were the contract of the fifth round
+//! (`docs/notes/round5-contract.md`); five packages filled them in and the integration wired
+//! them together (`docs/notes/bedrock-integration.md`). The user guide is `docs/BEDROCK.md`.
 //!
 //! What this is, and what it is not:
 //!

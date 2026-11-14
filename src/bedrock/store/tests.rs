@@ -494,12 +494,15 @@ fn remove_refuses_while_a_launch_holds_the_version_and_removes_it_after() {
     drop(opened);
     assert!(remove(&paths, "held").is_err(), "the duplicate still holds it");
     drop(duplicate);
+    // From here on the lock is free — for this process. A child that another test forks at
+    // this moment holds a copy of every descriptor (and with it the lock) until it executes
+    // its program, so the removal below may be refused for that instant: retried briefly.
 
     // An instance that names the version is reported, not consulted.
     let instance = paths.instances().join("bedrock-main");
     fs::create_dir_all(&instance).unwrap();
     fs::write(instance.join("instance.toml"), "kind = \"bedrock\"\n[bedrock]\nversion = \"held\"\n").unwrap();
-    let notes = remove(&paths, "held").unwrap();
+    let notes = remove_once_free(&paths, "held").unwrap();
     assert!(!versions_dir(&paths).join("held").exists());
     assert_eq!(notes.len(), 1);
     assert!(notes[0].contains("instance bedrock-main names Bedrock version held"), "{notes:?}");
@@ -507,6 +510,22 @@ fn remove_refuses_while_a_launch_holds_the_version_and_removes_it_after() {
     assert!(matches!(remove(&paths, "held"), Err(Error::Usage(_))));
     assert!(matches!(open(&paths, "held"), Err(Error::Usage(_))));
     cleanup(&root);
+}
+
+/// `remove`, retried while it says the version is in use: for up to two seconds, which is far
+/// longer than any fork-to-exec window of a concurrently running test. Any other answer is
+/// returned at once.
+fn remove_once_free(paths: &Paths, id: &str) -> Result<Vec<String>> {
+    let mut tries = 0;
+    loop {
+        match remove(paths, id) {
+            Err(Error::Policy(message)) if message.contains("in use by a running launch") && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Start time (field 22 of /proc/<pid>/stat) and command name of a process.
