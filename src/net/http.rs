@@ -24,8 +24,9 @@ use crate::{
     secret::Secret,
 };
 
-/// Every host the launcher itself will ever contact. Nothing else — no update checks, no
-/// telemetry, no analytics endpoints exist in this binary.
+/// Every host the launcher itself will ever contact for the game. Nothing else — no update
+/// checks, no telemetry, no analytics endpoints exist in this binary. (The Spotify feature,
+/// when it is configured, has a client of its own for its three hosts: `spotify::web::HOSTS`.)
 pub const BUILTIN_HOSTS: &[&str] = &[
     // Microsoft identity platform (consumer tenant) and Xbox Live token services
     "login.microsoftonline.com",
@@ -219,6 +220,14 @@ impl HttpClient {
     /// other user of this client keeps the exact-host allowlist.
     pub fn with_domains(mut self, domains: &[&str]) -> Self {
         self.suffixes = Arc::new(domains.iter().map(|d| d.to_ascii_lowercase()).collect());
+        self
+    }
+
+    /// Accept exactly `hosts` and nothing else — not even [`BUILTIN_HOSTS`]: a client for
+    /// one feature that cannot be used to reach any other host (the Spotify feature's three).
+    pub fn only(mut self, hosts: &[&str]) -> Self {
+        self.hosts = Arc::new(hosts.iter().map(|h| h.to_ascii_lowercase()).collect());
+        self.suffixes = Arc::new(Vec::new());
         self
     }
 

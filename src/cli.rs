@@ -63,6 +63,12 @@ USAGE: bastion-mc [--events] <command> [options]
   canary show   [--account NAME]      the pinned profile state and its history (no network)
   canary accept [--account NAME]      pin the account's current profile after a change made elsewhere
 
+  spotify login [--open]              sign in to the Spotify Web API with your own [spotify] client_id
+                                      (the refresh token goes to the token store; --open starts your browser)
+  spotify logout                      forget the stored Spotify refresh token
+  spotify status [--offline]          the desktop app over MPRIS, album art and the Web API: set up, reachable,
+                                      signed in (--offline: from the configuration and the store only)
+
   scram [--yes]                       EMERGENCY: stop running games, remove every stored token (no network)
   wiki scram [--links]                the built-in recovery runbook for a compromised account
   export-proofs <file> [--account NAME]   what this launcher recorded that proves the account is yours
@@ -407,6 +413,35 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             reporter.status(format!("signed out ({account})"));
             reporter.emit(Event::Account(account_summary(&paths, &cfg, &account)));
             reporter.emit(account_summaries(&paths, &cfg));
+        }
+        "spotify" => {
+            let cfg = Config::load(&paths)?;
+            match args.positional("`login`, `logout` or `status`")?.as_str() {
+                "login" => {
+                    let mut open = false;
+                    args.flags(|name, _| {
+                        open |= name == "open";
+                        Ok(name == "open")
+                    })?;
+                    // A sign-in ends by storing a token: `scram` must be able to stop it.
+                    let _marker = crate::running::Marker::for_command(&paths, "spotify-login")?;
+                    block_on(reporter, &stop, crate::spotify::login::login(&paths, &cfg, open, reporter))?;
+                }
+                "logout" => {
+                    args.flags(|_, _| Ok(false))?;
+                    crate::spotify::login::logout(&paths, &cfg, reporter)?;
+                }
+                "status" => {
+                    let mut offline = false;
+                    args.flags(|name, _| {
+                        offline |= name == "offline";
+                        Ok(name == "offline")
+                    })?;
+                    let program = Path::new("/proc/self/exe");
+                    block_on(reporter, &stop, crate::spotify::login::status(&paths, &cfg, program, offline, reporter))?;
+                }
+                other => return Err(usage(format!("unknown spotify subcommand {other:?}"))),
+            }
         }
         "versions" => {
             let cfg = Config::load(&paths)?;

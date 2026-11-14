@@ -42,6 +42,10 @@ pub struct Config {
     pub sync: crate::sync::SyncConfig,
     /// Realms joins and how they are approved (see `realms`).
     pub realms: crate::realms::RealmsConfig,
+    /// Spotify on the in-game phone: the desktop app over MPRIS, the Web API (see `spotify`).
+    pub spotify: crate::spotify::SpotifyConfig,
+    /// Clips of the game, saved from the in-game phone (see `clips`).
+    pub clips: crate::clips::ClipsConfig,
 }
 
 impl Config {
@@ -178,6 +182,8 @@ impl Config {
             parse_socks5(proxy)?;
         }
         self.companion.validate()?;
+        self.spotify.validate()?;
+        self.clips.validate()?;
         if self.auth.token_store == TokenStore::Age {
             let age = &self.auth.age;
             if age.recipients_file.is_none() || age.identity_file.is_none() {
@@ -961,6 +967,16 @@ mod tests {
             "approve",
             "[sync]",
             "options",
+            "[spotify]",
+            "album_art",
+            "client_id = ",
+            "redirect_port",
+            "[clips]",
+            "buffer_seconds",
+            "saves_per_minute",
+            "max_clips",
+            "max_total_mb",
+            "folder = ",
         ] {
             assert!(text.contains(key), "examples/config.toml does not mention {key}");
         }

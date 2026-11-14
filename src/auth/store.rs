@@ -291,6 +291,78 @@ impl TokenStore {
     }
 }
 
+/// The Spotify refresh token's place: one per machine, beside the Microsoft accounts' but
+/// never mistakable for one. In the keyring under a description of its own; in the age
+/// vault as `spotify@default.age` — `@` cannot occur in an account label, so no account's
+/// vault file can be called that. (`scram` removes it with everything else.)
+pub const SPOTIFY_KEY_DESCRIPTION: &str = "bastion-mc:spotify-refresh:default";
+const SPOTIFY_VAULT_NAME: &str = "spotify@default";
+
+impl TokenStore {
+    /// Is a Spotify refresh token stored? (For the vault: is the file there.)
+    pub fn has_spotify(&self) -> Result<bool> {
+        match self {
+            TokenStore::None => Ok(false),
+            TokenStore::Keyutils => Ok(spotify_entry()?.get_secret().is_ok()),
+            TokenStore::Age(v) => Ok(v.file(SPOTIFY_VAULT_NAME).is_file()),
+        }
+    }
+
+    pub fn load_spotify(&self) -> Result<Option<Secret>> {
+        match self {
+            TokenStore::None => Ok(None),
+            TokenStore::Keyutils => match spotify_entry()?.get_secret() {
+                Ok(mut bytes) => {
+                    let secret = Secret::from_slice(&bytes);
+                    bytes.zeroize();
+                    Ok(Some(secret?))
+                }
+                Err(keyring_core::Error::NoEntry) => Ok(None),
+                Err(e) => Err(keyring_err(e)),
+            },
+            TokenStore::Age(v) => v.load(SPOTIFY_VAULT_NAME),
+        }
+    }
+
+    pub fn save_spotify(&self, token: &Secret) -> Result<()> {
+        if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
+            return Err(Error::Auth("refusing to store an empty or oversized token".into()));
+        }
+        match self {
+            TokenStore::None => Ok(()),
+            TokenStore::Keyutils => spotify_entry()?.set_secret(token.expose()).map_err(keyring_err),
+            TokenStore::Age(v) => v.save(SPOTIFY_VAULT_NAME, token),
+        }
+    }
+
+    pub fn delete_spotify(&self) -> Result<()> {
+        match self {
+            TokenStore::None => Ok(()),
+            TokenStore::Keyutils => match spotify_entry()?.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+                Err(e) => Err(keyring_err(e)),
+            },
+            TokenStore::Age(v) => v.delete(SPOTIFY_VAULT_NAME),
+        }
+    }
+}
+
+fn spotify_entry() -> Result<keyring_core::Entry> {
+    let store = linux_keyutils_keyring_store::Store::new().map_err(keyring_err)?;
+    let modifiers = HashMap::from([("description", SPOTIFY_KEY_DESCRIPTION)]);
+    store.build("bastion-mc-spotify", "default", Some(&modifiers)).map_err(keyring_err)
+}
+
+/// Invalidate the Spotify key this login session's keyrings lead to (`scram`). `Ok(false)`:
+/// there is none (any more).
+pub fn spotify_keyutils_remove() -> Result<bool> {
+    match spotify_entry()?.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
 // ---------------------------------------------------------------- kernel keyring
 
 fn keyring_err(e: keyring_core::Error) -> Error {

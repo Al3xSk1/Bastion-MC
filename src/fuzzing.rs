@@ -195,4 +195,14 @@ pub const ALL: &[(&str, Harness)] = &[
     ("jar", crate::profile::capabilities::fuzz),
     ("realms", realms),
     ("sync", sync),
+    // The phone's media apps: messages from the session bus (through the proxy), the Spotify
+    // Web API's replies, the token keeper's answers, pictures (album art, thumbnails), what
+    // the clip recorder's sandbox writes and the clips index, and the X server's replies to
+    // the recorder's helper.
+    ("dbus", crate::spotify::dbus::fuzz),
+    ("spotify", crate::spotify::web::fuzz),
+    ("keeper", crate::spotify::keeper::fuzz),
+    ("picture", crate::spotify::picture::fuzz),
+    ("clips", crate::clips::fuzz),
+    ("x11", crate::clips::x11::fuzz),
 ];

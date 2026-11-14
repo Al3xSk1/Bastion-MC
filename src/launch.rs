@@ -1006,15 +1006,35 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 
     // The phone's services (round 4; docs/notes/round4-contract.md), prepared now — before
     // step 9 — because the confined launcher can start no helper and connect no new socket.
-    // Only when the phone can be served: the companion is added and has its channel. One
-    // block per service; each says in the log what it prepared, or why it is off.
+    // Spotify, clips and the browser only when the phone can be served (the companion is added
+    // and has its channel) or a test drives the apps (`ClipsConfig::script`); settings sync and
+    // Realms join below in any case. Each service says in the log what it prepared, or why not.
     let mut services: Vec<Box<dyn phone::Service>> = Vec::new();
+    let phone_wanted = companion.has_channel() || cfg.clips.script.is_some();
     if companion.has_channel() {
         // The demo (fake state for every app) is a test switch, never a configuration key.
         if cfg.companion.demo_phone || std::env::var_os("BASTION_PHONE_DEMO").is_some_and(|v| v == "1") {
             let sink = log.clone();
             services.extend(phone::demo::services(Arc::new(move |line: String| sink.line(Source::Launcher, &line))));
         }
+    }
+    let launch_log: crate::spotify::Sink = {
+        let sink = log.clone();
+        Arc::new(move |line: String| sink.line(Source::Launcher, &line))
+    };
+    // Spotify needs nothing of the game, so it is prepared now.
+    if phone_wanted
+        && let Some(service) = crate::spotify::prepare(crate::spotify::Setup {
+            cfg,
+            paths,
+            program: &opts.program,
+            bus_address: std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+            offline: opts.burner,
+            log: launch_log.clone(),
+        })
+        .await
+    {
+        services.push(service);
     }
     for service in &services {
         log.line(Source::Launcher, &service.describe());
@@ -1234,6 +1254,30 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         reporter.warn(warning);
     }
 
+    // The clip recorder: started now that the game exists (on the session's X display it
+    // finds the game's window by the game's process), before step 9 like every helper.
+    {
+        let display = match (&nested, desktop.uses_x11, display::x11_socket()) {
+            (Some(session), _, _) => crate::clips::GameDisplay::Nested(session.socket().to_path_buf()),
+            (None, true, Some((number, socket))) => crate::clips::GameDisplay::X11 { socket, number },
+            _ => crate::clips::GameDisplay::Wayland,
+        };
+        if phone_wanted
+            && let Some(service) = crate::clips::prepare(crate::clips::Setup {
+            cfg,
+            paths,
+            program: &opts.program,
+            instance: &inst.id,
+            display,
+            game_pid: payload.and_then(|pid| u32::try_from(pid).ok()),
+            scopes: game_limits.is_some(),
+            log: launch_log.clone(),
+        }) {
+            log.line(Source::Launcher, &service.describe());
+            services.push(service);
+        }
+    }
+
     // 9. Not assumed: looked at. First the resource limits, read back from the kernel for the
     // program in the sandbox (and for its display server); a scope that was created is not
     // yet a limit that is in force.
@@ -1304,13 +1348,17 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             }
             keep.write.push(paths.cache.clone()); // scratch and unpacked natives, removed at exit
             keep.tcp_connect.extend(outbound_ports);
-            // What the phone's services still need: directories they write, ports they connect
-            // to — nothing else can be added.
+            // What the broker forwards to Mojang goes through the proxy, if one is set.
+            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
+            // The phone's services: directories they write, TCP ports they connect to — nothing
+            // else can be added (no program execution, no new pathname sockets).
+            let before = keep.write.len();
             for service in &services {
                 service.confinement_needs(&mut keep);
             }
-            // What the broker forwards to Mojang goes through the proxy, if one is set.
-            keep.tcp_connect.extend(http.socks5().map(|proxy| proxy.port()));
+            keep.tcp_connect.sort_unstable();
+            keep.tcp_connect.dedup();
+            let service_dirs: Vec<String> = keep.write[before..].iter().map(|d| d.display().to_string()).collect();
             let demand = if mode == ConfineMode::Require { confine::Demand::Whole } else { confine::Demand::Possible };
             let outcome = match confine::apply(&keep, demand) {
                 Err(e) if mode == ConfineMode::Require => {
@@ -1324,23 +1372,17 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                     Source::Launcher,
                     &format!(
                         "launcher: confined itself, on all threads — Landlock: no program execution, files read-only \
-                         under /etc, /usr and /proc and writable only under {}, TCP only to port(s) {}; system-call \
+                         under /etc, /usr and /proc and writable only under {}{}, TCP only to port(s) {}; system-call \
                          filter: no kernel keyring, no new namespaces",
-                        {
-                            // What the phone's services added (settings sync: the synced copy;
-                            // clips: their folder).
-                            let extra: Vec<String> = keep
-                                .write
-                                .iter()
-                                .filter(|dir| **dir != persist_dir && **dir != paths.cache)
-                                .map(|dir| dir.display().to_string())
-                                .collect();
-                            let base = if opts.burner {
-                                "the cache (nothing of the instance)".to_string()
-                            } else {
-                                "the instance's persist/ and the cache".to_string()
-                            };
-                            if extra.is_empty() { base } else { format!("{base} (and {})", extra.join(", ")) }
+                        if opts.burner {
+                            "the cache (nothing of the instance)"
+                        } else {
+                            "the instance's persist/ and the cache"
+                        },
+                        if service_dirs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (and, for the phone's apps, {})", service_dirs.join(", "))
                         },
                         keep.tcp_connect.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
                     ),
@@ -1419,7 +1461,14 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // on it was written by something inside the game and is logged as such. With it, the
     // phone: the services' apps — made only now, in the confined launcher — behind the
     // dispatcher, which enforces each app's vocabulary and limits.
-    let phone = companion.has_channel().then(|| {
+    // A test that set a script (`ClipsConfig::script`, not settable from a file) drives the
+    // apps itself, without a phone.
+    let phone_script = cfg.clips.script.clone().map(|steps| {
+        let apps: Vec<Box<dyn phone::PhoneApp>> =
+            std::mem::take(&mut services).into_iter().map(|s| s.into_app()).collect();
+        tokio::spawn(crate::clips::script::drive(apps, steps, launch_log.clone()))
+    });
+    let phone = (companion.has_channel() && phone_script.is_none()).then(|| {
         let apps: Vec<Box<dyn phone::PhoneApp>> =
             std::mem::take(&mut services).into_iter().map(|s| s.into_app()).collect();
         let (outbox, outbound) = phone::Outbox::new(256);
@@ -1522,6 +1571,12 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
             log.line(Source::Launcher, &summary);
         }
         log.line(Source::Launcher, &channel.finish());
+    }
+    // The phone's apps end with the game (they went down with the channel above, or with the
+    // test script here): the clip recorder, the D-Bus proxy and the token keeper stop with them.
+    if let Some(script) = phone_script {
+        script.abort();
+        let _ = script.await;
     }
 
     // 11. Settings the launcher carries back on the game's behalf, into the one directory of

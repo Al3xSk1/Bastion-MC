@@ -520,9 +520,123 @@ fn seeds(harness: &str) -> Vec<Vec<u8>> {
             modern_both.extend_from_slice(copy.as_bytes());
             vec![both, modern_both, options, text(copy)]
         }
+        "dbus" => {
+            use bastion_mc::spotify::dbus::{Kind, Message, Value};
+            let mut call = Message::call(
+                ":1.7",
+                "/org/mpris/MediaPlayer2",
+                "org.freedesktop.DBus.Properties",
+                "GetAll",
+                vec![Value::Str("org.mpris.MediaPlayer2.Player".into())],
+            );
+            call.serial = 3;
+            let metadata = Value::string_dict(vec![
+                ("mpris:trackid".into(), Value::Path("/com/spotify/track/4uLU6hMCjMI75M1A2tKUQC".into())),
+                ("mpris:length".into(), Value::U64(213_000_000)),
+                (
+                    "xesam:artist".into(),
+                    Value::Array { element: "s".into(), items: vec![Value::Str("Daft Punk".into())] },
+                ),
+                ("xesam:title".into(), Value::Str("Harder, Better".into())),
+            ]);
+            let mut signal = Message {
+                kind: Kind::Signal,
+                flags: 0,
+                serial: 9,
+                path: Some("/org/mpris/MediaPlayer2".into()),
+                interface: Some("org.freedesktop.DBus.Properties".into()),
+                member: Some("PropertiesChanged".into()),
+                error_name: None,
+                reply_serial: None,
+                destination: None,
+                sender: Some(":1.42".into()),
+                body: vec![
+                    Value::Str("org.mpris.MediaPlayer2.Player".into()),
+                    Value::string_dict(vec![("Metadata".into(), metadata), ("Volume".into(), Value::Double(0.5))]),
+                    Value::Array { element: "s".into(), items: vec![] },
+                ],
+            };
+            let mut error = signal.clone();
+            error.kind = Kind::Error;
+            error.error_name = Some("org.freedesktop.DBus.Error.ServiceUnknown".into());
+            error.reply_serial = Some(3);
+            error.body = vec![Value::Str("no such name".into())];
+            signal.serial = 10;
+            vec![call.encode().unwrap(), signal.encode().unwrap(), error.encode().unwrap()]
+        }
+        "spotify" => vec![
+            text(
+                r#"{"device":{"id":"5fbb3ba6aa454b5534c4ba43a8c7e8e45a63ad0e","is_active":true,"name":"Kitchen","volume_percent":59},"shuffle_state":false,"repeat_state":"context","progress_ms":44272,"item":{"album":{"images":[{"url":"https://i.scdn.co/image/ab67616d00001e024ce8b4e42588bf18182a1ad2","width":300}],"name":"Discovery"},"artists":[{"name":"Daft Punk"}],"duration_ms":224693,"name":"Harder","type":"track","uri":"spotify:track:5W3cjX2J3tjhG8zb6u0qHn"},"is_playing":true}"#,
+            ),
+            text(
+                r#"{"devices":[{"id":"abc123","is_active":true,"name":"Phone","type":"Smartphone","volume_percent":50}]}"#,
+            ),
+            text(
+                r#"{"tracks":{"items":[{"uri":"spotify:track:5W3cjX2J3tjhG8zb6u0qHn","name":"Harder","artists":[{"name":"Daft Punk"}],"album":{"name":"Discovery"}}]},"playlists":{"items":[null,{"uri":"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M","name":"Mix","owner":{"display_name":"Spotify"}}]}}"#,
+            ),
+            text(
+                r#"{"access_token":"BQD-access","token_type":"Bearer","scope":"user-read-playback-state","expires_in":3600,"refresh_token":"AQD-refresh"}"#,
+            ),
+            text(
+                r#"{"error":{"status":403,"message":"Player command failed: Premium required","reason":"PREMIUM_REQUIRED"}}"#,
+            ),
+            text(r#"{"error":"invalid_grant","error_description":"Refresh token revoked"}"#),
+            text("GET /callback?code=AQC-code&state=GOOD-STATE HTTP/1.1\r\nHost: 127.0.0.1:43117"),
+            text("GET /callback?error=access_denied&state=GOOD-STATE HTTP/1.1"),
+        ],
+        "keeper" => vec![
+            vec![0, 0, 0, 14, 16, 0, 9, b'B', b'Q', b'D', b'-', b't', b'o', b'k', b'e', b'n'],
+            [vec![1, 3, 0, 0, 1, 247, 0, 4], b"busy".to_vec()].concat(),
+            vec![1, 4, 0, 0, 0, 30, 0, 0],
+        ],
+        "picture" => vec![bastion_mc::util::b64_decode(TINY_JPEG).unwrap()],
+        "clips" => {
+            let mut packets = Vec::new();
+            for (pid, cc) in [(0u16, 0u8), (4096, 0), (256, 0), (256, 1), (0x1fff, 0)] {
+                let mut p = vec![0xffu8; 188];
+                p[0] = 0x47;
+                p[1] = (pid >> 8) as u8;
+                p[2] = pid as u8;
+                p[3] = 0x10 | cc;
+                packets.extend(p);
+            }
+            vec![
+                text("r1_004.ts,4.000000,5.000000\nr1_000.ts,5.000000,6.000000\nr1_001.ts,6.000000,7.000000\n"),
+                packets,
+                text(
+                    r#"{"version":1,"clips":[{"id":"0123456789ab","name":"a b","file":"a_b-0123456789ab.ts","thumb":"a_b-0123456789ab.png","created":1,"seconds":1.5,"bytes":188}]}"#,
+                ),
+                text("waiting\nrecording 480 270\nstopped window-changed\ngave-up\n"),
+            ]
+        }
+        "x11" => {
+            let mut tree = vec![1, 0, 5, 0, 2, 0, 0, 0];
+            tree.extend_from_slice(&[0; 8]);
+            tree.extend_from_slice(&2u16.to_le_bytes());
+            tree.extend_from_slice(&[0; 14]);
+            tree.extend_from_slice(&0x400037u32.to_le_bytes());
+            tree.extend_from_slice(&0x40003du32.to_le_bytes());
+            let mut property = vec![1, 8, 0, 0, 2, 0, 0, 0];
+            property.extend_from_slice(&31u32.to_le_bytes());
+            property.extend_from_slice(&0u32.to_le_bytes());
+            property.extend_from_slice(&7u32.to_le_bytes());
+            property.extend_from_slice(&[0; 12]);
+            property.extend_from_slice(b"bastion\0");
+            let mut ids = vec![1, 0, 0, 0, 4, 0, 0, 0];
+            ids.extend_from_slice(&1u32.to_le_bytes());
+            ids.extend_from_slice(&[0; 20]);
+            for word in [0x400000u32, 2, 4, 4242] {
+                ids.extend_from_slice(&word.to_le_bytes());
+            }
+            vec![tree, property, ids, xauth_record(0xffff, [b"", b"", b"MIT-MAGIC-COOKIE-1", &[9; 16]])]
+        }
         other => panic!("no seeds for {other}"),
     }
 }
+
+/// A 24×16 test pattern as ffmpeg's JPEG encoder writes it (the shape album art and the
+/// recorder's thumbnails have).
+const TINY_JPEG: &str = "/9j/4AAQSkZJRgABAgAAAQABAAD//gAPTGF2YzYzLjEuMTAyAP/bAEMACCgoLygvNzc3Nzc3QTxBQ0NDQUFBQUNDQ0hISFVVVUhISENDSEhQUFVVXF9cV1dVV19fZGRkeHhzc4yMkaysz//EAHMAAQADAQAAAAAAAAAAAAAAAAUDAQQHAQEBAAAAAAAAAAAAAAAAAAAEBhAAAgAFAQYHAQAAAAAAAAAAAREDAgAhMRIi0UFCgVFxkaFTQ1IUExEAAgIBAgcBAQAAAAAAAAAAAQIRIQADMUGRwbFh4RITUf/AABEIABAAGAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AOXbZmIl8eFuppePNGimUTXQJ5QFa7wqkk+QZJ0ld1mmZiP56FfOh3Wpp911ob67NqK0bEx4+hZmq5ZQslkTtPfbAhFiw+KaOJS60foi/b0G6qmsIYGyQSUeVlh0q4nuw/Mbqb+jG+p95JaqKzkkSauAeA/uf//Z";
 
 fn iterations() -> usize {
     std::env::var("BASTION_FUZZ_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000)
@@ -580,6 +694,12 @@ fn every_harness_has_a_test_here() {
         "jar",
         "realms",
         "sync",
+        "dbus",
+        "spotify",
+        "keeper",
+        "picture",
+        "clips",
+        "x11",
     ];
     let mut names: Vec<&str> = fuzzing::ALL.iter().map(|(n, _)| *n).collect();
     names.sort_unstable();
@@ -695,6 +815,67 @@ fn the_registry_starting_points_are_accepted() {
 #[test]
 fn mod_jars_and_class_files() {
     run("jar");
+}
+
+#[test]
+fn dbus_messages() {
+    run("dbus");
+}
+
+#[test]
+fn spotify_web_api_replies() {
+    run("spotify");
+}
+
+#[test]
+fn token_keeper_answers() {
+    run("keeper");
+}
+
+#[test]
+fn pictures_for_the_phone() {
+    run("picture");
+}
+
+#[test]
+fn clip_buffer_and_index() {
+    run("clips");
+}
+
+#[test]
+fn x11_replies_to_the_recorder() {
+    run("x11");
+}
+
+/// The media harnesses' starting points are inputs their parsers accept in full.
+#[test]
+fn the_media_starting_points_are_accepted() {
+    use bastion_mc::{
+        clips::{buffer, library, recorder::Status, x11},
+        spotify::{dbus::Message, picture, web},
+    };
+    for seed in seeds("dbus") {
+        Message::parse(&seed).expect("a D-Bus message");
+    }
+    let replies = seeds("spotify");
+    assert_eq!(web::parse_state(200, &replies[0]).unwrap().unwrap().title, "Harder");
+    assert_eq!(web::parse_devices(&replies[1]).unwrap().len(), 1);
+    assert_eq!(web::parse_search(&replies[2]).unwrap().len(), 2);
+    assert!(web::parse_token_reply(200, &replies[3]).is_ok());
+    assert_eq!(web::parse_error(403, &replies[4]), web::WebError::Premium);
+    assert!(matches!(web::parse_token_reply(400, &replies[5]), Err(web::WebError::SignedOut(_))));
+    let picture = picture::jpeg_to_png(&seeds("picture")[0], 320, 320).expect("a JPEG");
+    assert_eq!((picture.width, picture.height), (24, 16));
+    let clips = seeds("clips");
+    assert_eq!(buffer::parse_list(&clips[0]).unwrap().len(), 3);
+    buffer::Joiner::default().feed(&mut clips[1].clone()).expect("transport-stream packets");
+    assert_eq!(library::parse_index(&clips[2]).unwrap().len(), 1);
+    assert_eq!(clips[3].split(|b| *b == b'\n').filter(|l| Status::parse(l).is_some()).count(), 4);
+    let x = seeds("x11");
+    assert_eq!(x11::parse_query_tree(&x[0]).unwrap().len(), 2);
+    assert_eq!(x11::parse_property(&x[1]).unwrap().unwrap().1, b"bastion");
+    assert_eq!(x11::parse_client_ids(&x[2]).unwrap(), Some(4242));
+    assert_eq!(x11::first_cookie(&x[3]), Some(vec![9; 16]));
 }
 
 /// The starting points of the jar harness are a jar the capability scan reads in full.

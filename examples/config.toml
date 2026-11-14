@@ -168,3 +168,33 @@ approve = "off"            # "off", "code" or "totp"
 # companion's own settings come from this file anyway ([companion] above).
 [sync]
 options = true
+
+# Spotify on the in-game phone. The desktop app on this machine is reached over MPRIS
+# (D-Bus) — through xdg-dbus-proxy in a sandbox of its own, which passes the Spotify app's
+# player interface and nothing else of the session bus. No account; nothing leaves the
+# machine, except album art when the phone asks for it (album_art below).
+[spotify]
+mpris = true
+album_art = true           # covers from Spotify's image server (i.scdn.co), re-encoded before the game sees them
+# The Spotify Web API — search, the queue, other devices, control without the desktop app
+# (Spotify requires Premium for playback control there). Needs your own Spotify application
+# (developer.spotify.com, no secret; register http://127.0.0.1/callback) and
+# `bastion-mc spotify login`. Off while unset.
+# client_id = "0123456789abcdef0123456789abcdef"
+# redirect_port = 43117    # a fixed sign-in port; then register http://127.0.0.1:43117/callback
+
+# Clips: the phone saves the last moments of the game. Off by default: recording costs a CPU
+# core. ffmpeg records the game's window (with the nested compositor, its own display; on X11
+# without it, the game's window on yours; not possible with a Wayland display) in a sandbox
+# of its own, into a buffer in memory; a save joins the newest seconds into a clip in the
+# folder, with a thumbnail. No sound is recorded. Only clips this feature saved are ever
+# removed (to stay within max_clips and max_total_mb, or when the phone deletes one).
+[clips]
+enabled = false
+buffer_seconds = 30        # 5 to 120
+fps = 30                   # 5 to 30
+max_width = 1280           # 320 to 1280; narrower windows keep their size
+saves_per_minute = 4       # 1 to 6
+max_clips = 50             # 1 to 500
+max_total_mb = 2048        # 16 to 65536
+# folder = "/home/you/Videos/minecraft"   # default: ~/.local/share/bastion-mc/clips

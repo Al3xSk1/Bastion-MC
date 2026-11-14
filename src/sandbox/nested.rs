@@ -512,6 +512,11 @@ impl Session {
         set_env(env, "XDG_SESSION_TYPE", "x11");
     }
 
+    /// The inner display's socket on the host (the clip recorder is pointed at it).
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
     /// Host process id of the compositor's sandbox.
     pub fn process_id(&self) -> Option<u32> {
         self.running.child.id()

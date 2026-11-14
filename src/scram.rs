@@ -303,6 +303,13 @@ fn remove_credentials(paths: &Paths, only: Option<&BTreeSet<String>>, key_list: 
         }
     }
 
+    // The Spotify refresh token (`bastion-mc spotify login`), in the keyring under a name of
+    // its own. Only in a full run: a run limited to named accounts (the tests) must not touch
+    // a key that is the same for everyone. (Its vault file goes with the directory below.)
+    if only.is_none() {
+        remove_spotify_key(key_list, report);
+    }
+
     // Every entry in the vault directory, whatever it is called.
     let vault = paths.vault();
     // Entries already reported as left there (a directory, a file that could not be deleted).
@@ -395,9 +402,64 @@ fn remove_credentials(paths: &Paths, only: Option<&BTreeSet<String>>, key_list: 
     }
 }
 
+/// Is a live Spotify refresh-token key in the kernel's list (`/proc/keys` text)?
+fn spotify_key_listed(proc_keys: &str) -> bool {
+    proc_keys.lines().any(|line| {
+        line.contains(store::SPOTIFY_KEY_DESCRIPTION)
+            && line.split_ascii_whitespace().nth(1).is_some_and(|flags| !flags.contains(['R', 'D', 'i']))
+    })
+}
+
+fn remove_spotify_key(key_list: KeyList<'_>, report: &mut Report) {
+    let listed = key_list().ok().map(|text| spotify_key_listed(&text));
+    let mut invalidated = false;
+    for _ in 0..8 {
+        match store::spotify_keyutils_remove() {
+            Ok(true) => invalidated = true,
+            Ok(false) => break,
+            Err(e) => {
+                report.could_not(format!("remove the Spotify refresh token from the keyring: {e}"));
+                return;
+            }
+        }
+    }
+    let deadline = Instant::now() + KEY_SETTLE;
+    let mut left = key_list().ok().map(|text| spotify_key_listed(&text));
+    while left == Some(true) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(40));
+        left = key_list().ok().map(|text| spotify_key_listed(&text));
+    }
+    match left {
+        Some(true) => report.could_not(
+            "remove the Spotify refresh token: the kernel still lists a key for it that this login session cannot \
+             reach (another login session of yours holds it). Run `bastion-mc scram` there too, or log out of it.",
+        ),
+        Some(false) if invalidated || listed == Some(true) => {
+            report.say("removed the Spotify refresh token from the kernel keyring")
+        }
+        None if invalidated => {
+            report.say("invalidated the Spotify refresh token in this login session's keyring (not confirmed against the kernel's list)")
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spotify_key_is_found_in_the_kernels_list_only_while_it_lives() {
+        let live =
+            "1a2b3c4d I--Q---     1 perm 3f010000  1000  1000 user      bastion-mc:spotify-refresh:default: 131\n";
+        assert!(spotify_key_listed(live));
+        assert!(!spotify_key_listed(&live.replace("I--Q---", "I-iQ---")), "invalidated");
+        assert!(!spotify_key_listed(&live.replace("I--Q---", "IR-Q---")), "revoked");
+        assert!(!spotify_key_listed(
+            "1a2b3c4d I--Q--- 1 perm 3f010000 1000 1000 user bastion-mc:msa-refresh:default: 99\n"
+        ));
+        assert!(!spotify_key_listed(""));
+    }
 
     #[test]
     fn keyring_accounts_are_read_from_the_kernels_list() {

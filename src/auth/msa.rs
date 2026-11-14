@@ -169,13 +169,19 @@ fn percent_decode(raw: &str) -> Option<Vec<u8>> {
 
 /// Interpret the head of an HTTP request received on the loopback port.
 pub fn parse_callback(head: &[u8], expected_state: &str) -> Callback {
+    parse_callback_at(head, expected_state, "/")
+}
+
+/// [`parse_callback`] for a redirect URI with the path `expected_path` (Spotify's sign-in
+/// uses `/callback`).
+pub fn parse_callback_at(head: &[u8], expected_state: &str, expected_path: &str) -> Callback {
     let Ok(text) = std::str::from_utf8(head) else { return Callback::Unrelated("not text") };
     let mut parts = text.lines().next().unwrap_or_default().split(' ');
     let (Some("GET"), Some(target), Some(_version)) = (parts.next(), parts.next(), parts.next()) else {
         return Callback::Unrelated("not a GET request");
     };
     let Some((path, query)) = target.split_once('?') else { return Callback::Unrelated("no query") };
-    if path != "/" {
+    if path != expected_path {
         return Callback::Unrelated("unexpected path");
     }
     let (mut state, mut code, mut error, mut description) = (None, None, None, None);
@@ -210,7 +216,7 @@ pub fn parse_callback(head: &[u8], expected_state: &str) -> Callback {
     }
 }
 
-fn page(status: &str, body: &str) -> Vec<u8> {
+pub(crate) fn page(status: &str, body: &str) -> Vec<u8> {
     let html = format!(
         "<!doctype html><meta charset=utf-8><title>bastion-mc</title><body style=\"font-family:sans-serif;margin:3em\"><p>{body}</p>"
     );
@@ -299,7 +305,7 @@ impl Loopback {
     }
 }
 
-async fn read_head(stream: &mut TcpStream) -> Option<Vec<u8>> {
+pub(crate) async fn read_head(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(2048);
     loop {
         if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {

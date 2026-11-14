@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod cli;
+pub mod clips;
 pub mod companion;
 pub mod config;
 pub mod confine;
@@ -29,6 +30,7 @@ pub mod running;
 pub mod sandbox;
 pub mod scram;
 pub mod secret;
+pub mod spotify;
 pub mod sync;
 pub mod tree;
 pub mod util;

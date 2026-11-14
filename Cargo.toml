@@ -67,6 +67,12 @@ bastion-mc-proto = { path = "crates/proto" }
 # The credential broker's per-launch certificate authority (ECDSA P-256, in memory only).
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 time = { version = "0.3.55", default-features = false, features = ["std"] }
+# Album art for the in-game phone arrives as JPEG (Spotify's image server) and clip thumbnails
+# are JPEG (the recorder's ffmpeg): both are decoded to pixels, scaled down and encoded again
+# as PNG (with flate2, above) before they go anywhere (`spotify::picture`). Pure Rust, one
+# dependency (zune-core), no build script; the SIMD features (x86, neon: hand-written
+# intrinsics) are left out, so only the portable decoder is compiled.
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
