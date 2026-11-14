@@ -1377,6 +1377,17 @@ headless GPU context where there is a GPU, and the driver then writes a shader c
 Coverage-guided fuzzing of the same parsers: [`fuzz/README.md`](fuzz/README.md).
 `cargo deny check` (configuration in `deny.toml`) audits the dependency tree.
 
+On GitHub, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request: `cargo fmt` and `cargo clippy` with warnings as errors (on a
+pinned toolchain); the launcher's unit tests, the event protocol, the front end and the
+website's tests, in an Arch Linux container as an ordinary user, with the fonts the front
+end's layout tests measure; a check that every fuzz harness still compiles; `cargo deny`
+(also once a week, for new advisories); and both packages built from the commit with
+`makepkg`, `check()` and the hardening check included. The suites that start the real
+sandbox run on a development machine; on a GitHub runner they can be started by hand
+([`integration.yml`](.github/workflows/integration.yml)), which has not been tried yet.
+[`pages.yml`](.github/workflows/pages.yml) builds the website and publishes it.
+
 ## Documentation
 
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what is defended, how each claim is

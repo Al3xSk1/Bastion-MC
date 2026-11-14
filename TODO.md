@@ -174,6 +174,18 @@ libFuzzer targets themselves.
       like any other window; running it in the nested compositor, as the game, would
       isolate it, at the cost of a second compositor for a short task.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
+- [ ] **CI on GitHub has not run yet** (`.github/workflows/ci.yml`, added 2026-11-14): every
+      step was run on the development machine from an empty build directory as a fresh user
+      (fmt, clippy, the launcher's 452 unit tests, the protocol's 7, the front end's 126,
+      the fuzz check, `cargo deny`, and `makepkg` from a `git archive` of the commit), but
+      not on GitHub's runners or inside the `archlinux` container (nothing can be pushed from
+      a session). After the first push, read the run: the container's `seccomp=unconfined`
+      option, the package names and the toolchain pin are where a difference would show.
+- [ ] **The integration suites on a GitHub runner** (`.github/workflows/integration.yml`,
+      started by hand): never run. The runner's kernel (7.0) lacks Landlock ABI 10, so the
+      UDP-rule tests will skip; what else differs from the development machine (AppArmor's
+      user-namespace restriction is lifted by the workflow, no systemd user manager) the
+      first run will show.
 - [ ] **Voice chat, small** (voice-chat.md §3): the front end says nothing about voice — a
       line such as "voice: relayed to play.example.org:24454 while connected" in its
       protection read-out would be honest, and was not built; `doctor` reports the Landlock

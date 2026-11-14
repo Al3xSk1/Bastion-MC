@@ -1,0 +1,218 @@
+# Continuous integration: formatting and lints, the tests that need no sandbox, the fuzz
+# harnesses, the dependency policy, and the Arch packages built the way makepkg builds them.
+#
+# What GitHub's hosted runners cannot show, this workflow does not pretend to. Most of the
+# launcher's integration suites start the real sandbox (bubblewrap in user namespaces,
+# Landlock, seccomp); some need a newer kernel than the runner's (Landlock ABI 10 for the UDP
+# rules), a display, a GPU or a game. They run on a development machine (README "Tests"),
+# and by hand on a runner in the "Integration suites" workflow (integration.yml).
+#
+# Two jobs run in an Arch Linux container, as an unprivileged user: the tests, because the
+# front end's layout tests measure text set in the fonts Arch installs (adwaita-fonts), and
+# the packages, because makepkg is Arch's. The other jobs need nothing but a compiler, a JDK
+# (build.rs compiles the launch bootstrap and the companion mod with javac) and the network.
+#
+# Every action is pinned to the commit of a release (pages.yml says how to update a pin).
+# The Rust toolchain is pinned as well, in RUST_TOOLCHAIN below: a new stable release brings
+# new lints, and `clippy -D warnings` would then fail on code that did not change. Raise it
+# on purpose, together with whatever the new lints ask for.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, for the dependency policy only: an advisory against a locked dependency can be
+  # published without any push. The other jobs skip scheduled runs.
+  schedule:
+    - cron: "23 5 * * 1"
+
+# The token can read the code and nothing else; no job asks for more.
+permissions:
+  contents: read
+
+# A newer push to a branch or pull request cancels the run before it, except on main,
+# where every push is checked.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug information in test builds: the binaries of the whole workspace are much
+  # smaller without it, and a failing test still names its file and line.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  # AWS-LC (under rustls) built from the sources Cargo.lock pins, with cc, as the PKGBUILD
+  # builds it: never a copy installed on the runner, and no cmake.
+  AWS_LC_SYS_USE_SYSTEM: "0"
+  AWS_LC_SYS_CMAKE_BUILDER: "0"
+
+jobs:
+  lint:
+    name: Format and lints
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: cargo fmt
+        run: |
+          cargo fmt --all --check
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+
+      # Build scripts run here too: javac (the runner's default JDK) and cc.
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: Tests without the sandbox
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    container:
+      image: archlinux:base-devel
+      # Docker's default system-call filter hides some of what the launcher's unit tests
+      # exercise (the kernel keyring, memfd_secret, Landlock on some Docker versions); they
+      # see the runner's kernel as it is instead.
+      options: --security-opt seccomp=unconfined
+    env:
+      # The front end's emulator test picks its renderer at run time; the runner has no GPU.
+      ICED_BACKEND: tiny-skia
+    steps:
+      # git first, so that the checkout is a repository; the fonts for the layout tests;
+      # python for the website's tests; a JDK for build.rs.
+      - name: Install the build and test dependencies
+        run: pacman -Syu --noconfirm --needed git rustup jdk-openjdk python adwaita-fonts
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Tests that check what a file's permissions refuse cannot run as root, which may read
+      # anything; everything from here on runs as an ordinary user.
+      - name: Create the user that runs the tests
+        run: |
+          useradd --create-home ci
+          chown -R ci "$GITHUB_WORKSPACE"
+
+      - name: Install the Rust toolchain
+        run: su ci -c "rustup toolchain install '$RUST_TOOLCHAIN' --profile minimal && rustup default '$RUST_TOOLCHAIN'"
+
+      - name: Build every test binary of the workspace
+        run: su ci -c 'cargo test --locked --workspace --no-run'
+
+      # As the PKGBUILD's check() runs them: unit tests that need the kernel keyring skip
+      # where it cannot be reached.
+      - name: The launcher's unit tests
+        run: su ci -c 'BASTION_ALLOW_NO_KEYRING=1 cargo test --locked --lib'
+
+      - name: The event protocol
+        run: su ci -c 'cargo test --locked -p bastion-mc-proto'
+
+      # The widgets laid out, clicked and drawn in software; the whole application in iced's
+      # emulator against a stand-in launcher. The live test needs variables and skips.
+      - name: The front end
+        run: su ci -c 'cargo test --locked -p bastion-mc-gui'
+
+      # site/build.py --check, both ways the site is built, held to the launcher's own help
+      # text and emergency links.
+      - name: The website
+        run: su ci -c 'cargo test --locked --test site'
+
+  fuzz:
+    name: Fuzz harnesses compile
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      # Running them needs a nightly toolchain and cargo-fuzz (fuzz/README.md); that every
+      # harness still compiles against the launcher is what a push can break.
+      - name: cargo check
+        run: cargo check --locked --bins --manifest-path fuzz/Cargo.toml
+
+  deny:
+    name: Dependency policy (cargo deny)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      # Built from crates.io with its own lock file, at the version the policy (deny.toml) is
+      # written for.
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version 0.20.2
+
+      # Advisories (fetched fresh), banned crates, licences and sources, against Cargo.lock.
+      - name: cargo deny
+        run: cargo deny --locked check
+
+  package:
+    name: Arch packages (makepkg)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    container:
+      image: archlinux:base-devel
+      # check() runs the launcher's unit tests (see the test job).
+      options: --security-opt seccomp=unconfined
+    steps:
+      # The PKGBUILD's makedepends and checkdepends, and git for the checkout.
+      - name: Install the build dependencies
+        run: pacman -Syu --noconfirm --needed git rust cargo-auditable jdk-openjdk adwaita-fonts
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The PKGBUILD's own source is the repository at a signed tag. Here it gets this commit
+      # instead, as the tarball `git archive` makes of it, and makepkg does the rest: prepare
+      # (cargo fetch --locked), build (cargo auditable, the hardening flags), check (unit
+      # tests, then packaging/check-hardening.sh on both binaries) and package. makepkg does
+      # not run as root.
+      - name: Build both packages from a tarball of this commit
+        run: |
+          set -euo pipefail
+          pkgbase=$(sed -n 's/^pkgbase=//p' packaging/arch/PKGBUILD)
+          pkgver=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          useradd --create-home builder
+          dir=/home/builder/package
+          install -d -o builder "$dir"
+          git archive --prefix="$pkgbase/" -o "$dir/$pkgbase-$pkgver.tar.gz" HEAD
+          sed -e "s|^source=.*|source=(\"$pkgbase-$pkgver.tar.gz\")|" \
+              -e "s|^b2sums=.*|b2sums=('SKIP')|" \
+              packaging/arch/PKGBUILD > "$dir/PKGBUILD"
+          chown -R builder "$dir"
+          su builder -c "cd '$dir' && makepkg --nodeps --noprogressbar"
+          ls -l "$dir"/*.pkg.tar.*

@@ -42,6 +42,10 @@ makedepends=(
 )
 # Nothing else is needed to *build* the front end: its window-system, keyboard and GPU
 # libraries are loaded at run time (see package_bastion-mc-gui).
+# check() lays out and measures the front end's text: its layout tests need a sans-serif
+# and a monospace face, and were written against Adwaita Sans and Adwaita Mono (a clean
+# chroot has no fonts at all).
+checkdepends=('adwaita-fonts')
 # Arch's default `lto` option adds -flto=auto to CFLAGS. GCC LTO bitcode inside the static
 # archives that rustc links makes the final link fail or silently drop objects; Rust-side
 # LTO is enabled in Cargo.toml instead.

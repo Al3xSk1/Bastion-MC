@@ -1,0 +1,66 @@
+# The launcher's integration suites on a GitHub-hosted runner, started by hand (Actions ->
+# "Integration suites" -> "Run workflow"). Not run on every push, for two reasons:
+#
+# * They have not been run on GitHub's runners yet. The suites start the real sandbox, and
+#   what they find depends on the machine: the runner's kernel (7.0 on ubuntu-26.04 when this
+#   was written) has Landlock ABI 9, enough for the launcher's own confinement but not for
+#   the UDP rules of ABI 10 (those tests skip and say so); there is no systemd user manager,
+#   so the cgroup test skips; Ubuntu restricts unprivileged user namespaces, which bubblewrap
+#   needs, until the step below lifts that. The first run shows what else differs from the
+#   development machine.
+# * What needs a display, a GPU, a game or an account stays opt-in here as everywhere
+#   (README "Tests"): none of those variables is set, so those tests return at once.
+#
+# The front end is not tested here: its layout tests need the fonts the CI workflow's Arch
+# container installs, and that workflow runs them.
+name: Integration suites
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  AWS_LC_SYS_USE_SYSTEM: "0"
+  AWS_LC_SYS_CMAKE_BUILDER: "0"
+
+jobs:
+  suites:
+    name: Launcher and event protocol, all suites
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      # bubblewrap for every sandbox; xdg-dbus-proxy, dbus-daemon and python3-gi for the
+      # Spotify suite (its stand-in player is written with GDBus); ffmpeg for the clips suite.
+      - name: Install what the suites start
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bubblewrap xdg-dbus-proxy dbus-daemon python3-gi gir1.2-glib-2.0 ffmpeg
+
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          uname -r
+          cat /sys/kernel/security/lsm; echo
+          bwrap --version
+
+      - name: cargo test
+        run: cargo test --locked --no-fail-fast -p bastion-mc -p bastion-mc-proto
