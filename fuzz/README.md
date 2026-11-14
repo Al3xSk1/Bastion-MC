@@ -24,6 +24,13 @@ address pasted back; what passes is bounded, under the right prefix, and a fixed
 `answers` (`events::input::fuzz`: answer lines on the front end's control pipe, the same
 answers however the bytes are cut, and lines typed on a terminal).
 
+The rest of Bedrock has four: `bedrock_store` (`bedrock::store::fuzz`: an imported version's
+compiled `AndroidManifest.xml`, the libraries' ELF headers, the store's own per-file
+manifest, and pacman's records about the client), `raknet` (RakNet's offline messages as the
+relay reads a flow's first datagram, and the relay's decisions in a Bedrock session),
+`bedrock_realms` and `bedrock_gatherings` (the join answers and requests the launcher reads
+to broker a Realms or event-server join).
+
 Two ways to run them:
 
 **Every test run, stable toolchain** — `tests/robustness.rs` feeds each harness its valid

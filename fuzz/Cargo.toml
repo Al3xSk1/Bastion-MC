@@ -187,6 +187,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bedrock_store"
+path = "fuzz_targets/bedrock_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raknet"
 path = "fuzz_targets/raknet.rs"
 test = false
