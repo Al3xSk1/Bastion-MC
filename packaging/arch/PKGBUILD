@@ -38,7 +38,7 @@ license=('MIT')
 makedepends=(
   'cargo'
   'cargo-auditable'      # embeds the exact dependency list in the binaries (see build())
-  'java-environment'     # javac builds the 118-line launch bootstrap from source
+  'java-environment>=17' # javac builds the launch bootstrap and the companion mod from source (--release 17)
 )
 # Nothing else is needed to *build* the front end: its window-system, keyboard and GPU
 # libraries are loaded at run time (see package_bastion-mc-gui).

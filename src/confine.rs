@@ -3,8 +3,9 @@
 //! Until the sandbox is up the launcher needs most of what a user can do: read the whole
 //! store, run `bwrap`, `systemd-run` and `age`, write tokens, bind sockets. Afterwards it is
 //! a supervisor and a relay, and the only untrusted input it still handles comes from the
-//! game: DNS questions, TLS hellos, HTTP requests, log lines. If a bug in that handling were
-//! ever exploited, the attacker would be running as you, outside the sandbox.
+//! game: DNS questions, TLS hellos, HTTP requests, log lines, the companion mod's channel —
+//! and datagrams for voice chat, which it relays without parsing them. If a bug in that
+//! handling were ever exploited, the attacker would be running as you, outside the sandbox.
 //!
 //! So at that point the launcher drops what it no longer needs, for **every thread** of the
 //! process (the async runtime's workers already exist by then), with two mechanisms:
@@ -17,7 +18,9 @@
 //!   launcher's cache (scratch directory removed). No `$HOME`, no SSH keys, no browser
 //!   profile, no other instance, and not the instance's own configuration or manifest;
 //! * no `execve` of anything;
-//! * TCP: `connect()` only to the ports the relay serves, `bind()` not at all;
+//! * TCP: `connect()` only to the ports the relay serves, `bind()` not at all (UDP is not
+//!   restricted: the voice relay opens a socket per flow after this point, and where
+//!   datagrams may go is decided by its own table, `egress::udp`, not by the kernel);
 //! * no connections to abstract UNIX sockets of other processes (the X server's, D-Bus's),
 //!   and — where the kernel can express it (Landlock ABI 9) — to no pathname socket other
 //!   than the name resolver's.
@@ -30,8 +33,8 @@
 //!
 //! Signals are deliberately *not* scoped: the launcher must still be able to stop the game,
 //! which lives outside this Landlock domain. Descriptors that are already open (the log
-//! file, the relay's sockets, the control pipe, the terminal the launcher was started from)
-//! keep working; Landlock governs new opens.
+//! file, the relay's sockets, the companion channel's socket, the control pipe, the terminal
+//! the launcher was started from) keep working; Landlock governs new opens.
 //!
 //! **What "confined" means, and when it is only partly true.** The whole of the above needs
 //! Landlock ABI 9. On an older kernel some of it cannot be enforced ([`support_for`] says

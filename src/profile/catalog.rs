@@ -1326,8 +1326,20 @@ pub async fn add<T: Transport>(
         draft.dir.join(MANIFEST_FILE).display()
     ));
     out.say(format!("  bastion-mc profile sign {id} --key <your key>"));
+    let voice_chat = alias("simple-voice-chat").map(|a| a.id);
+    if staged.iter().any(|item| Some(plan.steps[item.step].project.id.as_str()) == voice_chat) {
+        out.say("");
+        out.say(VOICE_CHAT_HINT);
+    }
     Ok(true)
 }
+
+/// Said when `profile add` has added Simple Voice Chat: the mod is useless until a server
+/// rule names its UDP port, and installing it opens nothing by itself.
+pub const VOICE_CHAT_HINT: &str = "Simple Voice Chat sends voice over UDP, which the sandbox allows only to a port that a \
+     server rule names. Installing the mod opens nothing. Name the port in that server's rule ([network] servers in \
+     config.toml, or in the instance's instance.toml), e.g.\n  servers = [{ host = \"play.example.org\", voice = \
+     24454 }]\n24454 is the mod's default; the server's operator knows the port it uses.";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -1747,6 +1759,7 @@ mod tests {
         offer(&f.registry, &project(A, "alpha", "Alpha Mod"), &all);
 
         let text = f.added(&["alpha"]).await;
+        assert!(!text.contains(VOICE_CHAT_HINT), "only the voice chat mod gets the UDP hint");
         assert!(text.contains("add   Alpha Mod (alpha · project AAAAAAAA · licence MIT) - asked for"), "{text}");
         assert!(text.contains("version   2.0 [release], published 2026-11-09 00:00 UTC, 5 days ago"), "{text}");
         assert!(text.contains(&format!("sha512    {}", sha512_hex(&wanted.content))), "{text}");
@@ -2845,6 +2858,7 @@ mod tests {
         offer(&f.registry, &project("SQUATTER", "simple-voice-chat", "Simple Voice Chat"), &[&squatter]);
         let text = f.added(&["voicechat"]).await;
         assert_eq!(f.mods(), ["voicechat-2.6.jar"]);
+        assert!(text.contains(VOICE_CHAT_HINT), "adding the voice chat mod says how to allow its UDP:\n{text}");
         let seen = f.registry.seen();
         assert!(seen.contains(&"GET api.modrinth.com/v2/project/9eGKb6K1".to_string()), "{seen:?}");
         assert_eq!(f.registry.count("/v2/project/simple-voice-chat"), 0);

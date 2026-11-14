@@ -405,7 +405,10 @@ async fn tripwire_can_be_disabled_and_log_mode_is_permissive() {
 async fn kernel_keyring_is_unreachable_from_the_sandbox() {
     use std::process::Command;
     let secret = format!("bastion-test-secret-{}", std::process::id());
-    let add = Command::new("keyctl").args(["add", "user", "bastion-test-key", &secret, "@s"]).output().expect("keyctl");
+    // A name of its own: adding a key whose name exists updates that key, so two runs at once
+    // would read each other's secret and remove each other's key.
+    let name = format!("bastion-test-key-{}", std::process::id());
+    let add = Command::new("keyctl").args(["add", "user", &name, &secret, "@s"]).output().expect("keyctl");
     assert!(add.status.success(), "keyctl add failed: {}", String::from_utf8_lossy(&add.stderr));
     let key_id = String::from_utf8(add.stdout).unwrap().trim().to_string();
     let read_key = format!(
