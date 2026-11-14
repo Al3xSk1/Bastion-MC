@@ -1010,7 +1010,9 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // and has its channel) or a test drives the apps (`ClipsConfig::script`); settings sync and
     // Realms join below in any case. Each service says in the log what it prepared, or why not.
     let mut services: Vec<Box<dyn phone::Service>> = Vec::new();
-    let phone_wanted = companion.has_channel() || cfg.clips.script.is_some();
+    // (Or a test drives the apps without a phone: the clips' script, the browser's self-test;
+    // neither can be set from a configuration file.)
+    let phone_wanted = companion.has_channel() || cfg.clips.script.is_some() || cfg.browser.self_test;
     if companion.has_channel() {
         // The demo (fake state for every app) is a test switch, never a configuration key.
         if cfg.companion.demo_phone || std::env::var_os("BASTION_PHONE_DEMO").is_some_and(|v| v == "1") {
@@ -1513,6 +1515,13 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         );
         companion::channel::Phone { dispatcher, outbound }
     });
+    // Without a phone, the browser's self-test (a test hook, not settable from a file) still
+    // runs its app — remote control, the first site, frames — for the session.
+    let held_apps: Vec<Box<dyn phone::PhoneApp>> = if phone.is_none() && cfg.browser.self_test {
+        std::mem::take(&mut services).into_iter().map(|s| s.into_app()).collect()
+    } else {
+        Vec::new()
+    };
     drop(services);
     let companion_channel = companion.serve(
         {
@@ -1615,6 +1624,7 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         script.abort();
         let _ = script.await;
     }
+    drop(held_apps);
 
     // 11. Settings the launcher carries back on the game's behalf, into the one directory of
     // the instance it can still write. (Not from a burner session: nothing it wrote is kept.)
