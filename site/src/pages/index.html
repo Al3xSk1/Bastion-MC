@@ -1,0 +1,355 @@
+title: bastion-mc: a Minecraft launcher for Arch Linux that treats the game as hostile code
+description: bastion-mc is a pre-release, unofficial Minecraft launcher for Arch Linux. It runs the game in a stacked sandbox, by default keeps your access token out of it, and says plainly what it does not defend.
+---
+<section class="hero">
+<p class="label">Pre-release · unofficial · Arch Linux · built from source</p>
+<h1>A Minecraft launcher for Arch Linux that treats the game as hostile code</h1>
+<p class="lede">bastion-mc runs the game in a stacked sandbox. By default the game reaches the network only through the launcher's allowlisting relay, and it holds a placeholder instead of your access token. It is for people who play on Arch Linux, assume that a mod, a server or a downloaded world may be malicious, and are prepared to build the launcher themselves and to sign in through an Azure application of their own.</p>
+<p class="lede">Fabric instances also get the launcher's own companion mod, with an in-game phone: Spotify, Discord and other sites you list in a browser that runs in a sandbox of its own, clips, approvals of Realms joins and settings sync. The mod is interface only: the launcher decides what each command from the phone may do, and no secret of these services enters the game.</p>
+{{REQUIRE README.md "an in-game phone (Spotify, Discord and other sites you list in a browser that runs in a sandbox of its own, clips, approvals of Realms joins, settings sync)"}}
+{{REQUIRE README.md "The mod is interface only: the launcher decides what each command from the phone may do, and no token, cookie or other secret of these services enters the game."}}
+<p class="actions">
+<a class="button primary" href="getting-started.html">Get started</a>
+<a class="button" href="#not-defended">What it does not defend</a>
+<a class="button" href="#status">What has been tested</a>
+</p>
+</section>
+
+<div class="callout warning">
+<p class="label">Pre-release</p>
+<p><strong>Sign-in has not yet been run against the live Microsoft, Xbox and Mojang services</strong>, and neither has anything that needs a signed-in account, such as joining a real multiplayer server, nor anything of the phone's services that needs an account of yours: the Spotify Web API, a signed-in Discord, Realms. The sign-in chain is implemented and tested against scripted replies and a stand-in Mojang. What has run with the real game is Mojang's demo mode, without an account, vanilla and as a signed Fabric profile, and the companion mod with its phone on one version of each of its ten families of Minecraft versions, with stand-in apps behind the phone. There are no releases and no binary downloads. The section <a href="#status">What has been tested, and what has not</a> has the whole list.</p>
+{{REQUIRE README.md "not yet run against the live services"}}
+{{REQUIRE docs/THREAT_MODEL.md "joining a real multiplayer server (needs a signed-in session"}}
+{{REQUIRE README.md "Neither has anything of the fourth round that needs an account of yours: the Spotify Web API, a signed-in Discord in the phone's browser, Realms."}}
+{{REQUIRE README.md "(demo mode, no account), vanilla and as a signed Fabric profile"}}
+{{REQUIRE README.md "in the real game (demo mode, Fabric Loader 0.20.1, the nested compositor on a private X display), on the representative of each family"}}
+{{REQUIRE README.md "all of it against the demo service (fake apps, a test switch)"}}
+</div>
+
+<section class="section" id="layers">
+<h2>What it does, layer by layer</h2>
+<p>The game's Java process is treated as hostile from its first instruction. A malicious or compromised mod is arbitrary Java and native code inside that process, and a server or a piece of content that triggers a bug in the game ends up with the same capability.</p>
+<figure class="diagram">
+<img src="{{ROOT}}assets/layers-stacked.svg" width="328" height="1453" alt="Diagram of the trust boundaries on the host, under your user account. On one side the launcher, the trusted computing base: sign-in, the verified store, the egress relay and DNS responder, the credential broker, the log relay and the launch frame; before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. On the other side the game's Java process, treated as hostile from its first instruction and by default holding a placeholder, not the access token. It sits inside four nested frames: systemd scope, namespaces, Landlock and seccomp. Inside them: an empty root, a scratch directory and the saves, logs and config of one instance writable, mods and packs read-only, a network with no route. Three deliberate holes lead out of the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device. The network is outside the host; the game has no route to it. An optional front end is a separate process that holds no token.">
+<img src="{{ROOT}}assets/layers.svg" width="960" height="606" alt="Diagram of the trust boundaries on the host, under your user account. On one side the launcher, the trusted computing base: sign-in, the verified store, the egress relay and DNS responder, the credential broker, the log relay and the launch frame; before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. On the other side the game's Java process, treated as hostile from its first instruction and by default holding a placeholder, not the access token. It sits inside four nested frames: systemd scope, namespaces, Landlock and seccomp. Inside them: an empty root, a scratch directory and the saves, logs and config of one instance writable, mods and packs read-only, a network with no route. Three deliberate holes lead out of the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device. The network is outside the host; the game has no route to it. An optional front end is a separate process that holds no token." hidden>
+<figcaption>The trust boundaries on your machine, drawn after section 3 of the <a href="threat-model.html#3-trust-boundaries">threat model</a>. The launcher is the trusted part; the game is not, and runs inside a systemd scope, namespaces, Landlock and a seccomp filter, with three deliberate holes. The audio socket among them is what the default setting <code>audio = "pulse"</code> hands over; <code>audio = "none"</code> removes it, and <code>audio = "alsa"</code> hands over the raw sound devices instead. The drawing shows a launch without the companion mod: in a Fabric profile the sandbox also gets the mod, read-only, and one socket to the launcher (block 07). It shows the mechanisms, not their limits: blocks 01 to 05 below go through it and say what stays open at each. Blocks 06 and 07 are about the account itself and about the phone, which the drawing does not show.</figcaption>
+</figure>
+<p>Each block below says what is in force at one layer and names what stays open there. The blocks are a summary: the <a href="security.html">security overview</a> goes through the mechanisms one by one, and the <a href="threat-model.html#4-attack-surface-matrix">attack surface matrix</a> of the threat model has every row, with the attack, the defence, what remains and, where there is one, the test or the experiment behind the claim.</p>
+<div class="grid two">
+<article class="panel">
+<p class="label">01 · What may run</p>
+<h3>Verified downloads and signed mod profiles</h3>
+<p>What the game is started from is fixed before it starts: Mojang's files by the hashes Mojang publishes, mods by a manifest that you signed.</p>
+<p class="label">In force</p>
+<ul class="defended">
+<li>Every Mojang file is checked against the published hash chain when it is downloaded and again at every launch. A mismatch aborts the launch, and nothing is fetched again unless you ask for it with <code>--repair</code>.</li>
+<li>A modded instance exists only by virtue of a manifest you signed (Ed25519). At launch the signature, the manifest's serial, every loader library and every jar in <code>mods/</code> are verified; one extra, missing or modified file aborts the launch.</li>
+<li>An older signed manifest is not accepted again, and a manifest is bound to its instance.</li>
+<li>Mods fetched from Modrinth with <code>bastion-mc profile add</code> are checked for size and SHA-512 before they reach <code>mods/</code>, and they count for nothing until you sign the manifest.</li>
+<li>Java comes only from root-owned runtimes under <code>/usr/lib/jvm</code>; the launcher never downloads one.</li>
+<li>The game is given only the resource and shader packs you recorded: <code>bastion-mc pack import</code> checks, hashes and records a pack, and <code>bastion-mc pack adopt</code> records packs you copied in by hand. The game can read packs but cannot put one on disk.</li>
+</ul>
+{{REQUIRE README.md "Mods fetched from Modrinth with profile add are checked for size and SHA-512 (and SHA-1, where the registry lists one) before they reach mods/, and they are nothing until you sign the manifest."}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>Mojang publishes SHA-1 hashes only, so the check relies on SHA-1's second-preimage resistance.</li>
+<li>A loader library that has no published hash is trusted on first use when you create the profile; your signature then freezes it.</li>
+<li>A signature fixes which jars run, by name, size and SHA-256. It says nothing about what they do: a mod you signed can still be malicious, and a server or a piece of content can still trigger a bug that runs an attacker's code inside the game. The other layers are for those cases.</li>
+<li>Modrinth's hash and file come from the same party: a compromised project account, or the registry, serves a bad jar with a matching hash. A build younger than 48 hours is passed over, which is a delay, not detection.</li>
+<li>The one mod that runs without being in your manifest is the launcher's own companion mod, part of the launcher binary (block 07).</li>
+<li>Other software running as you can add a signing key of its own unless root-owned keys exist in <code>/etc/bastion-mc/trusted-keys.d/</code>, and the file that remembers a manifest's serial is writable by you.</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "The hash and the file come from the same party. A compromised project account, or the registry, serves a bad jar with a matching hash"}}
+{{REQUIRE docs/THREAT_MODEL.md "A delay, not detection"}}
+{{REQUIRE README.md "The one mod that runs without being in your manifest is the launcher's own companion mod"}}
+<p><a href="threat-model.html#44-network-and-supply-chain-adversaries-n-c">Threat model 4.4, rows C1 to C12</a> · <a href="mods.html">Mods</a></p>
+</article>
+<article class="panel">
+<p class="label">02 · Where the game runs</p>
+<h3>The sandbox</h3>
+<p>bubblewrap namespaces, then Landlock, then a seccomp allowlist, inside a systemd scope with memory and task limits. With the default <code>audio = "pulse"</code>, the deliberate holes are one audio socket, the GPU and one display socket; <a href="#display">block 05</a> is about them. Setting <code>audio = "none"</code> removes the audio socket, and <code>audio = "alsa"</code> hands the game the raw sound devices instead. In a Fabric profile the sandbox also gets one socket to the launcher, for the companion mod.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Recording is possible with audio = \"pulse\""}}
+{{REQUIRE docs/THREAT_MODEL.md "audio = \"none\" removes the socket"}}
+{{REQUIRE README.md "audio = \"alsa\" hands the game the raw sound devices (/dev/snd) instead of a server's socket"}}
+{{REQUIRE README.md "When the launcher adds its companion mod to a Fabric profile, the sandbox also gets one socket to the launcher."}}
+<p class="label">In force</p>
+<ul class="defended">
+<li>The root file system is empty and <code>/etc</code> is synthetic: your home directory, <code>/run</code>, <code>/var</code>, <code>/opt</code> and the real <code>/etc</code> do not exist inside.</li>
+<li>Of one instance, only <code>saves/</code>, <code>logs/</code> and <code>config/</code> are writable. <code>mods/</code>, <code>resourcepacks/</code> and <code>shaderpacks/</code> are sealed read-only mounts of verified files, and the game's own directory is a scratch directory that is deleted on exit.</li>
+<li>System calls are allowlisted and everything else is refused. Calls that only an exploit would make kill the process, and the launcher reports that as a sign of compromise.</li>
+<li>The game cannot run a shell or a downloaded program: only the Java runtime's own files and the dynamic loader may be executed. It has no terminal, no D-Bus, no portal and no agent sockets, and it cannot reach the kernel keyring, where the refresh token rests by default.</li>
+<li>Once the game runs, the resource limits are read back from the kernel: if they are not in force, the launch says so.</li>
+</ul>
+{{REQUIRE README.md "Once the game runs the limits are read back from the kernel: if they are not in force, the launch says so and does not show them as on"}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>Vulnerabilities in the kernel and in the GPU driver that are reachable through the allowed system calls and ioctls.</li>
+<li>A mod that executes scripts from <code>config/</code> can persist inside the sandbox, and a hostile world in <code>saves/</code> is data the game parses at the next start. <code>bastion-mc launch &lt;id&gt; --burner</code> runs untrusted content on copies that are deleted afterwards.</li>
+<li>The limits cover memory, swap and the number of tasks. A hostile mod can still fill <code>saves/</code> and the scratch directory up to the free space of those file systems, and use all CPUs unless you set a quota (<code>cpu_quota_percent</code>).</li>
+<li>Code in the sandbox can learn the names of host directories, including your user name, from <code>/proc/self/mountinfo</code>. It cannot open them.</li>
+</ul>
+<p><a href="threat-model.html#42-malicious-mod--in-jvm-code-execution-adversaries-m-s">Threat model 4.2, rows J1 to J17</a></p>
+</article>
+<article class="panel">
+<p class="label">03 · What gets out</p>
+<h3>A filtered network and a credential broker</h3>
+<p>In the default, filtered network mode the sandbox's network namespace has no route out. The only exits are sockets held by the launcher.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Credential broker (filtered mode, on by default)"}}
+<p class="label">In force</p>
+<ul class="defended">
+<li>The launcher's DNS responder answers only for allowlisted names and never forwards a query. Its relay passes TCP only to Mojang's service domains on port 443, with a matching SNI, and to the game servers you allowlisted.</li>
+<li>Multiplayer servers must be allowlisted, in the configuration or for one session with <code>--join</code>. Everything else is unreachable.</li>
+<li>Voice chat is the only UDP the launcher relays out of the sandbox, and only to a port that a server's rule names, only while a game connection to that server is open and only to the address that connection uses.</li>
+<li>By default the game does not get your access token. It is given a per-launch placeholder; the launcher's credential broker keeps the real token and attaches it only to an explicit list of Mojang API requests that playing needs.</li>
+<li>The broker refuses requests from the game to change your skin, cape or name under every configuration.</li>
+<li>Realms is refused unless you choose how its joins are approved. Then the broker also answers for Realms, and every join waits for an approval you give outside the game, typed into the phone, before the game gets one connection to that Realm's server.</li>
+<li>Where the token does have to be in the game, it still never touches a command line or the environment.</li>
+</ul>
+{{REQUIRE README.md "Voice chat is the only UDP the launcher relays out of the sandbox, and only to a port that a server's rule names"}}
+{{REQUIRE README.md "Datagrams are relayed to that port only while a game connection to that server is open, and only to the address that game connection is using"}}
+{{REQUIRE README.md "Realms is refused unless you choose how its joins are approved ([realms] approve). Then the broker also answers for the Realms hosts, and every join waits for an approval you give outside the game before the game gets one connection to that Realm's server"}}
+{{REQUIRE docs/THREAT_MODEL.md "every join needs an approval given outside the game — a code shown by the launcher, or your authenticator's, typed into the phone"}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>Code in the game can still ask for what is switched on: the account reads, and one join per game connection it opens to an allowlisted server. That join is not tied to that server: a mod that learns the hash another server is waiting for can authorise a login as you on that other server, once for every game connection it opens.</li>
+<li>In <code>open</code> network mode, or with <code>network.broker.enabled = false</code>, the token itself is inside the game, and code there can use it or carry it away. The launch log and the front end say so.</li>
+<li>A server you allowlisted sees whatever the game sends it, and with a voice rule whatever datagrams it sends to that server's voice port. Data can be carried out that way, and the relay cannot tell it from play.</li>
+<li>With Realms on, code in the game can accept an invitation someone sent you, redeem an invite code it knows, agree to the Realms terms in your name and read your Realms list.</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "A join is spent on a game connection the relay has just opened to an allowlisted server — one join per connection — but it is not tied to that server"}}
+{{REQUIRE docs/THREAT_MODEL.md "can authorise a login as you on that third server; it can do that once for every game connection it opens"}}
+{{REQUIRE docs/THREAT_MODEL.md "With a voice rule the same holds for datagrams to that server's voice port"}}
+{{REQUIRE docs/THREAT_MODEL.md "code in the game can accept a pending invitation (from someone who invited you), redeem an invite code it knows, agree to the Realms terms in your name and read your Realms list"}}
+<p><a href="threat-model.html#row-j10">Threat model, rows J10 to J13 and J20 to J23</a> · <a href="token-injection.html">The token path</a></p>
+</article>
+<article class="panel">
+<p class="label">04 · The launcher</p>
+<h3>The launcher confines itself</h3>
+<p>The launcher is the part that holds the tokens. It gives up what it no longer needs, and it keeps the window out of its own process.</p>
+<p class="label">In force</p>
+<ul class="defended">
+<li>Before it reads anything the game sends, the launcher gives up, on all its threads, writing anywhere but the instance's settings directory, its cache and the directories of the phone's services that are on; program execution; most of the network; and the kernel keyring where the refresh token rests.</li>
+<li>It makes itself non-dumpable and keeps tokens in locked, self-wiping memory. Where the kernel offers <code>memfd_secret</code>, those pages cannot be read through <code>/proc/&lt;pid&gt;/mem</code>, <code>process_vm_readv</code> or ptrace.</li>
+<li>The graphical front end is a separate program that holds no token. It starts the launcher and reads its progress events; the protocol between them has no field that could carry a credential, and the launcher binary links none of the front end's dependencies. The one secret it is given is the code of a Realms join that waits for your approval, which is there to be shown to you.</li>
+{{REQUIRE docs/THREAT_MODEL.md "The launcher binary links no GUI, font or GPU code, and the event protocol has no field that could carry a credential. The one secret it does carry is the code of a waiting Realms approval, which exists to be shown to you"}}
+<li>If the window is closed or the front end dies, the launcher notices and shuts the game down.</li>
+</ul>
+{{REQUIRE README.md "Before it reads anything the game sends, the launcher gives up — on all its threads — writing anywhere but one settings directory of the instance (persist/), its cache and, for the phone's services that are on, the settings-sync directory, the clips folder and the clip buffer"}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>All of the self-confinement needs Landlock ABI 9, and its file and network part ABI 8. On an older kernel it is partial, and the launcher says what is missing; <code>bastion-mc doctor</code> says what this machine can and cannot enforce.</li>
+{{REQUIRE README.md "the launcher's own confinement needs Landlock ABI 8 for its file and network part and ABI 9 for all of it (on older kernels it is partial, and said to be)"}}
+<li>With the broker, the launcher holds the access token for the whole session, and with the phone's services also a Spotify access token and, in <code>totp</code> mode, the Realms TOTP secret. The alternative is the token inside the game, readable by every mod.</li>
+{{REQUIRE docs/THREAT_MODEL.md "with the phone's services also a Spotify access token and, in totp mode, the Realms TOTP secret — never a refresh token"}}
+<li>Other software running as you can read the game's memory, read the refresh token from the kernel keyring of the same login session, replace the launcher binary in <code>$PATH</code> or edit <code>config.toml</code>. Root, the kernel, firmware and physical access are out of scope.</li>
+<li>Whatever can click in the front end's window can start a launch, sign out or trigger scram. That is a problem of integrity, not of confidentiality.</li>
+</ul>
+<p><a href="threat-model.html#row-p6">Threat model, row P6</a> · <a href="threat-model.html#row-j18">J18</a> · <a href="threat-model.html#45-graphical-front-end">4.5, the front end</a></p>
+</article>
+<article class="panel" id="display">
+<p class="label">05 · Display and sound</p>
+<h3>A display of the game's own</h3>
+<p>X11 lets any client log keys, inject input into other windows and read the clipboard, so handing the game the session's X display would be a way out of the sandbox. The launcher does not do that.</p>
+<p class="label">In force</p>
+<ul class="defended">
+<li>On an X11 session the game runs inside gamescope, a nested compositor that itself runs in a sandbox. The game gets a display server of its own and nothing of your session's: no other windows, no keystrokes, and no clipboard in either direction. gamescope would bridge the clipboard, so the launcher loads a cut-off into it, which reports from inside the compositor; without that report the launcher says that the clipboard is not known to be cut. Without gamescope the launch is refused, unless you set <code>allow_x11 = true</code> and accept the risk.</li>
+{{REQUIRE README.md "gamescope would bridge the clipboard, so the launcher loads a cut-off into it, and that cut-off reports from inside the compositor. Without its report the launcher says that the clipboard is not known to be cut"}}
+<li>On a Wayland session the launcher asks the compositor for a socket that is marked as sandboxed (<code>wp_security_context_v1</code>), on which a compositor is expected to withhold screen capture, input injection and clipboard-manager access. The protocol only says “should”, so the launcher lists what is offered on that socket itself and says so if a privileged interface it knows is still offered. According to the protocol registry's support table, read on 2026-11-13, KWin (KDE Plasma), Sway, Hyprland, niri, COSMIC, labwc and river implement it.</li>
+{{REQUIRE README.md "on which a compositor is expected to withhold screen capture, input injection and clipboard-manager access. The protocol only says \"should\", so the launcher connects to that socket itself and lists what is offered there; if a privileged interface it knows is still on offer, it says so"}}
+{{REQUIRE README.md "read 2026-11-13"}}
+<li>A sound server that loads modules for its clients is a way out of the sandbox, and PulseAudio and pipewire-pulse do that by default. So with <code>audio = "pulse"</code>, the launcher's default, it asks your sound server before each launch and hands the game the audio socket only if the server says no, unless you set <code>allow_pulse_module_loading = true</code> and accept the risk.</li>
+{{REQUIRE README.md "refuses to hand the game the audio socket unless the server says no"}}
+</ul>
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>Mutter (GNOME), Weston and Wayfire do not implement the protocol, according to the same table. There the launcher says so and gives the game the session's socket (with <code>wayland_security_context = "require"</code> it refuses instead); on GNOME that makes the game an ordinary Wayland client of your session.</li>
+<li>The Wayland path was tested against sway only, headless, and not on a real desktop session. Whether the game is playable inside gamescope has not been assessed.</li>
+{{REQUIRE docs/THREAT_MODEL.md "Tested against sway only, headless; not on a real desktop session."}}
+{{REQUIRE docs/THREAT_MODEL.md "Playability inside gamescope (pointer capture, full screen) is not assessed."}}
+<li>A bug in gamescope or Xwayland that the game can reach yields the compositor's sandbox, and with it the session's display. With <code>allow_x11 = true</code> and no gamescope, the display is a way out of the sandbox.</li>
+<li>On Wayland the game has the ordinary clipboard while it has focus.</li>
+<li>With sound enabled, code in the game can record the microphone. Getting a recording out still has to pass the network filter, and where a server rule names a voice port, recorded sound can leave as datagrams to that server. The sound server's answer is checked at launch, not continuously.</li>
+<li><code>audio = "alsa"</code> hands the game the raw sound devices: playback and capture of every sound card, with no server to ask and no module-loading check, the most access of the three.</li>
+{{REQUIRE README.md "playback and capture of every sound card, with no server to ask and no module-loading check, the most access of the three"}}
+{{REQUIRE docs/THREAT_MODEL.md "where a server rule names a voice port, recorded sound can also leave as datagrams to that server"}}
+</ul>
+<p><a href="threat-model.html#43-desktop-integration-the-deliberate-holes">Threat model 4.3, rows D1 to D4</a> · <a href="manual.html#display-isolation">Manual, display isolation</a></p>
+</article>
+<article class="panel">
+<p class="label">06 · The account itself</p>
+<h3>Canary, scram and the runbook</h3>
+<p>An account is more often lost somewhere else: a phished password, a “verification” app that was given consent. The launcher cannot prevent that; it can notice it and make the response quick.</p>
+<p class="label">In force</p>
+<ul class="defended">
+<li><strong>Profile canary.</strong> The launcher pins the account's name, skin and cape and compares at every launch. By default, a change that was not made through the launcher stops the launch until you accept it with <code>bastion-mc canary accept</code>.</li>
+<li><strong>Scram.</strong> <code>bastion-mc scram</code> stops running games and removes every credential the launcher keeps from this machine in one step: the sign-ins, the Spotify token, the Realms TOTP secret and the phone browser's profile. It says what it could not remove, and it needs no network.</li>
+{{REQUIRE README.md "to remove every credential the launcher keeps from the machine in one step — the sign-ins, the Spotify token, the Realms TOTP secret, the phone browser's profile — and to say what it could not remove"}}
+<li><strong>Runbook.</strong> <code>bastion-mc wiki scram</code> prints what to do next, with the exact Microsoft addresses, taken from Microsoft's own help articles. The warning to use another device if this one is in doubt comes first. On this site it is the <a href="emergency.html">emergency page</a>.</li>
+<li><strong>Proofs.</strong> <code>bastion-mc export-proofs</code> writes out what the launcher recorded that shows the account is yours, for a dispute with support. It holds only what this launcher saw.</li>
+</ul>
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>The canary is a tripwire for visible tampering only: an intruder who just plays trips nothing. Its pin is a file of yours: it guards against the account changing elsewhere, not against software on this machine.</li>
+{{REQUIRE docs/THREAT_MODEL.md "an intruder who just plays trips nothing"}}
+<li>Scram revokes nothing at Microsoft or Mojang, and deleted files are not securely wiped; its output says both every time. A token that was copied earlier works until you sign out everywhere, and an issued session token lives up to about 24 hours. That is why the runbook is the second step. Nothing is revoked at Spotify or at the sites the phone's browser was signed in to either.</li>
+{{REQUIRE docs/THREAT_MODEL.md "Revokes nothing at Microsoft or Mojang"}}
+{{REQUIRE docs/THREAT_MODEL.md "Nothing is revoked at Spotify"}}
+<li>The runbook's links were checked on the date given in the file and can go stale. Minecraft's help centre could not be read by a program, so only the existence of its request form was checked. A compromised machine can show a different text.</li>
+{{REQUIRE docs/THREAT_MODEL.md "only the existence of its request form was checked"}}
+<li>Nothing in the launcher revokes a session or secures the Microsoft account.</li>
+</ul>
+<p><a href="threat-model.html#46-the-account-itself-after-a-compromise-elsewhere">Threat model 4.6, rows A1 to A5</a></p>
+</article>
+<article class="panel">
+<p class="label">07 · The companion mod and the phone</p>
+<h3>Interface in the game, decisions outside it</h3>
+<p>To Fabric profiles of the ten Minecraft versions it was run with, the launcher adds its own companion mod, for one session at a time, as two read-only files outside <code>mods/</code>, which stays exactly what you signed; <code>force = true</code> adds it to the other versions from 1.20.1 to 26.3. It brings the in-game phone, a redone title screen and darker menus. The mod runs inside the game and is not a security feature: the launcher does the deciding.</p>
+{{REQUIRE README.md "The launcher adds the mod by itself to Fabric profiles of the ten Minecraft versions it was run with (Minecraft versions; force = true adds it to the other versions from 1.20.1 to 26.3)"}}
+{{REQUIRE README.md "added for one session at a time as two read-only files outside mods/, which stays exactly what you signed"}}
+{{REQUIRE README.md "It is a convenience, not a security feature"}}
+<p class="label">In force</p>
+<ul class="defended">
+<li>Every command from the phone is parsed strictly, routed to an app of this launch by its exact name, refused unless its verb is in that app's fixed vocabulary, and limited per app and verb, and in all per second. No argument is ever used as a path, an address, a command line or code.</li>
+<li>What the game cannot get through the phone: a token, a cookie, the browser's profile, the TOTP secret, a path, a web address or a program to run.</li>
+<li>The services run outside the game's sandbox. The browser, the D-Bus proxy for the Spotify app, the clip recorder and the Realms dialer are started before the launcher confines itself, each in a sandbox of its own; the Spotify token keeper, which holds the Spotify refresh token so that the launcher does not, runs in none. The game reaches none of these programs.</li>
+<li>The browser shows only the sites you list, each held to its budgets. You sign in to them outside the game, with <code>bastion-mc browser login &lt;site&gt;</code>.</li>
+</ul>
+{{REQUIRE README.md "Every command is parsed strictly, routed to an app of this launch by its exact name, refused unless its verb is in that app's fixed vocabulary, and limited per app and verb (and in all, per second); no argument is ever used as a path, an address, a command line or code."}}
+{{REQUIRE README.md "What it cannot get through the phone: a token, a cookie, the browser's profile, the TOTP secret, a path, a web address or a program to run."}}
+{{REQUIRE README.md "Each is started before the launcher confines itself, and all but one run in a sandbox of their own"}}
+{{REQUIRE README.md "The Spotify token keeper is the one helper without a sandbox"}}
+{{REQUIRE README.md "The game reaches none of these programs."}}
+<p class="label">Stays open</p>
+<ul class="not-defended">
+<li>Whatever is shown on the phone or typed into it is visible to every mod in the game. Type no password into the phone.</li>
+<li>Whatever an app allows, any code in the game can do, at the rate the launcher allows: control your Spotify playback, open a listed site and act there as you if you are signed in, save, rename or delete clips the launcher saved, type a Realms code, sync settings.</li>
+<li>Code in the game of one instance can change the synced settings of your other instances: bind a key, change a volume, the field of view, the language.</li>
+<li>The services that need an account of yours, the Spotify Web API, a signed-in Discord and Realms, have not run against the real services.</li>
+</ul>
+{{REQUIRE README.md "Whatever is shown on the phone or typed into it is visible to every mod in the game"}}
+{{REQUIRE README.md "Type no password into the phone"}}
+{{REQUIRE README.md "Whatever an app allows, any code in the game can do, at the rate the launcher allows: control your Spotify playback, open a listed site and act there as you if you are signed in, save, rename or delete clips the launcher saved, type a Realms code, sync settings."}}
+{{REQUIRE README.md "code in the game of one instance can change, through what it leaves in its options.txt, the listed settings of your other instances — bind a key elsewhere, change a volume, the field of view, the language"}}
+<p><a href="threat-model.html#47-the-in-game-phone-and-its-services">Threat model 4.7, rows H1 to H23</a> · <a href="phone.html">The phone</a> · <a href="companion.html">The companion mod</a></p>
+</article>
+</div>
+</section>
+
+<section class="section" id="not-defended">
+<p class="label">Read this before relying on it</p>
+<h2>What it does not defend</h2>
+<p>This is section 5 of the threat model, word for word. Nothing that is said there is left out or softened here.</p>
+<div class="panel danger">
+{{SECTION docs/THREAT_MODEL.md "5. Not defended"}}
+</div>
+<p>The codes in brackets name rows of the threat model, for example <a href="threat-model.html#row-p7">P7</a>, reading the game's memory; <a href="threat-model.html#row-d1">D1</a>, X11; <a href="threat-model.html#row-j13">J13</a>, the access token inside the game; <a href="threat-model.html#row-d3">D3</a>, audio; <a href="threat-model.html#row-j20">J20</a>, the voice relay; and <a href="threat-model.html#row-h8">H8</a>, the phone's browser. §4.6 is its section on <a href="threat-model.html#46-the-account-itself-after-a-compromise-elsewhere">the account itself</a>. What to do about other software running as you is the subject of the <a href="dedicated-account.html">dedicated-account guide</a>.</p>
+<div class="callout note">
+{{PARAGRAPH docs/THREAT_MODEL.md "Out of scope:"}}
+</div>
+</section>
+
+<section class="section" id="front-end">
+<h2>The front end</h2>
+<p>The launcher is a command-line program. <code>bastion-mc-gui</code> is an optional window around it, of its own design: a dark instrument panel with a ring gauge around the launch control, and no advertising, news, shop or telemetry. A rail leads to five pages: the launch, with the instance, the stages of a launch and, once the game starts, which protections that launch runs with; the accounts, with sign-in; the instances; a console with the launcher's, the relay's and the game's output; and security, with the emergency panel. While a Realms join waits for your approval, the launch page shows its prompt. The phone's own commands are run in a terminal: the window offers none of them.</p>
+{{REQUIRE README.md "It is its own design — a dark instrument panel with a ring gauge around the launch control — and it has no advertising, no news, no shop and no telemetry"}}
+{{REQUIRE README.md "A navigation rail on the left leads to five pages"}}
+{{REQUIRE README.md "While a Realms join waits for your approval, the page shows the prompt"}}
+{{REQUIRE README.md "It offers none of the fourth round's commands (browser login, spotify …, realms totp-setup): they are run in a terminal."}}
+<div class="callout note">
+<p><strong>These pictures are not captures of a session.</strong> They are the front end's own test snapshots: its tests draw every state of the window in software from fixed test data. No game was running and nobody was signed in; the player name, the account labels, the instance and the timer are test data.</p>
+</div>
+<div class="shots">
+<figure class="shot">
+{{SHOT launch "The launch page while a game runs. On the left the instance (vanilla, Minecraft 26.3) and the launch sequence: files, verify, sign-in and sandbox are done, the game is running. In the middle a dial reads RUNNING with the elapsed time, above a Stop button. On the right the protection readout lists display, network, credential, limits and launcher, each marked IN FORCE with one line of explanation, for example: broker: the game holds a placeholder, the token stays in the launcher."}}
+<figcaption>While a game runs, the launch page shows what that launch got: display, network, credential, limits and the launcher's own confinement.</figcaption>
+</figure>
+<figure class="shot">
+{{SHOT refused "The launch page after a refused launch. A message across the top begins: policy violation: refusing to give the game the audio socket: the sound server accepts module-loading requests from its clients. It names three choices: keep sound and close the hole, play without sound, or accept the risk. Below it the dial is back at Play, the text under it reads: The launch did not complete, and the protection readout says: no launch yet."}}
+<figcaption>A refused launch: the sound server would load modules for its clients, so the launcher does not hand the game the audio socket, and it names the three ways on.</figcaption>
+</figure>
+<figure class="shot">
+{{SHOT accounts "The accounts page with three accounts as cards, each with its sign-in state and where its token is kept: alt, not signed in; default, in use and signed in, token in the kernel keyring (RAM only, cleared at reboot); work-2, signed in, token in an age vault with a hardware-backed identity. A form adds another account under a label."}}
+<figcaption>Accounts: who is signed in under which label, and where each refresh token rests.</figcaption>
+</figure>
+<figure class="shot">
+{{SHOT security "The security page. An emergency panel warns to do the account steps from another device if this computer may be compromised, and offers Scram: stops running games, deletes refresh tokens and vault files, revokes nothing at Microsoft. Below it the recovery pages, each with its address and with Open and Copy buttons, under the line: besides them the window opens only the sign-in pages a sign-in asks for. Beside it the protection readout of the last launch, with no report yet for any of the five, and the start of the runbook."}}
+<figcaption>The security page: the warning to use another device comes first, then scram, then the recovery pages, the only addresses its emergency panel opens. For signing in, the window also opens links to four Microsoft sign-in hosts.</figcaption>
+{{REQUIRE docs/THREAT_MODEL.md "compared for equality — no host or prefix matching"}}
+{{REQUIRE docs/THREAT_MODEL.md "\"Open link\" exists only for https:// links to four Microsoft sign-in hosts"}}
+</figure>
+</div>
+</section>
+
+<section class="section" id="status">
+<p class="label">Pre-release</p>
+<h2>What has been tested, and what has not</h2>
+<p>This is the “Status” section of the <a href="manual.html#status">manual</a>, word for word. Each row of the table first names what it is about, then says how that was checked, and what was not.</p>
+{{SECTION README.md "Status"}}
+<div class="callout warning">
+<p class="label">From the threat model, section 7</p>
+{{PARAGRAPH docs/THREAT_MODEL.md "Not exercised:"}}
+</div>
+<p>In the threat model's <a href="threat-model.html#4-attack-surface-matrix">attack surface matrix</a>, the column “Verified by” names the test or the <a href="threat-model.html#7-experiments-behind-the-claims-development-machine">experiment</a> behind a row; a few rows name none. How to run the tests yourself is in the <a href="manual.html#tests">manual</a>.</p>
+</section>
+
+<section class="section" id="get-it">
+<h2>How to get it</h2>
+<p><strong>There are no releases and no binary downloads.</strong> bastion-mc is built from its source on Arch Linux with <code>cargo</code>. The <code>PKGBUILD</code> in the repository is a template until there is a release: <code>makepkg</code> builds whatever its <code>source=</code> line points to, not the checkout it lies in. What it needs, in the words of the manual:</p>
+{{REQUIRE README.md "packaging/arch/PKGBUILD does not build this checkout: until there is a release it is a template, and makepkg builds whatever its source= line points to."}}
+<div class="panel">
+{{SECTION README.md "Requirements"}}
+</div>
+<p>Signing in needs an Azure application that you register yourself, because there is no shared client ID, and Mojang has to approve its ID, which can take days. Until then <code>bastion-mc launch &lt;id&gt; --demo</code> starts Mojang's demo mode, with no account and no token.</p>
+{{REQUIRE README.md "This can take days."}}
+<p class="actions">
+<a class="button primary" href="getting-started.html">Get started</a>
+<a class="button" href="{{REPO_URL}}" rel="noopener noreferrer">Source code</a>
+</p>
+</section>
+
+<section class="section" id="read-on">
+<h2>Where to read on</h2>
+<div class="grid three">
+<div class="panel quiet">
+<h3><a href="getting-started.html">Get started</a></h3>
+<p>Requirements, building with <code>cargo</code>, the decisions about display and sound, your own sign-in application, the first commands, including a demo launch that needs no account, and a signed mod profile with the companion mod.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="security.html">Security overview</a></h3>
+<p>The security model in plain language: who it is defended against, what each layer stops, what the credential broker changes, what the phone can and cannot do, and what is not defended or not yet verified.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="manual.html">Manual</a></h3>
+<p>The repository's README as a page: a demo launch, each layer of protection, the front end, mods, the companion mod and the phone, Realms, settings sync, accounts, the emergency steps, the configuration and the tests.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="threat-model.html">Threat model</a></h3>
+<p>What is defended, against whom, with which mechanism and how each claim is checked, and what is not defended.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="token-injection.html">Token path</a></h3>
+<p>The token path in detail: how the launch data reaches the game over an inherited socket instead of a command line or the environment.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="dedicated-account.html">Dedicated account</a></h3>
+<p>What to do about other software running as you: <code>ptrace_scope</code> and a dedicated UNIX account for playing. Neither has been exercised on the development machine.</p>
+{{REQUIRE docs/THREAT_MODEL.md "a mc-vault account and ptrace_scope=3"}}
+</div>
+<div class="panel quiet">
+<h3><a href="phone.html">The phone</a></h3>
+<p>The in-game phone and its services: Spotify, Discord and the browser, clips, Realms approvals and settings sync, their settings and limits, and what the game can see.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="companion.html">Companion mod</a></h3>
+<p>The launcher's own Fabric mod: what it adds on which Minecraft version, its settings, its channel to the launcher, how it is built and what was verified.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="mods.html">Mods</a></h3>
+<p>Signed profiles, fetching mods from Modrinth with verified hashes, what Modrinth learns, ViaFabric, and the server rule that lets voice chat through.</p>
+</div>
+</div>
+<div class="callout danger">
+<p class="label">If you think the account is compromised</p>
+<p>The <a href="emergency.html">emergency page</a> is the runbook the launcher carries: first remove the credentials from this machine, then secure the Microsoft account, with the exact addresses. If this computer itself may be compromised, open that page on another device.</p>
+</div>
+</section>

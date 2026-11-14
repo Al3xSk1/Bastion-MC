@@ -1,0 +1,2063 @@
+/* bastion-mc website: the one style sheet.
+
+   The look is the launcher's own ("Bastion Workshop", gui/src/theme.rs): near-black
+   gunmetal surfaces, thin luminous lines, one cool accent and two alarms.
+     accent  in force, selected, the way forward
+     amber   caution: weaker than it could be, not yet verified
+     red     danger: not defended, destructive, the emergency
+   Colour never carries a meaning alone: every state also has a word in the page, and the
+   drawn marks differ in shape.
+
+   Three rules keep the layout inside the window at every width:
+     1. every grid and flex child may shrink (min-width: 0) and long words may break;
+     2. what is wider than its column by nature scrolls inside its own box
+        (pre, .table-wrap), never the page;
+     3. tables of four or more columns are stacked records at every width, tables of
+        three on a narrow screen, instead of a strip to scroll through.
+
+   No script, no font file, no image and no address is referenced from here; the
+   generator's check refuses a style sheet that could load anything. */
+
+/* ---------------------------------------------------------------- tokens */
+
+:root {
+  --void: #0a0d10;
+  --deck: #070a0c;
+  --plate: #10161b;
+  --plate-hi: #16202a;
+  --well: #05080a;
+
+  /* line and line-hi are hairlines that structure and decorate: rules, frames, the borders
+     of cells and code blocks, none of them needed to find or use anything. edge is the line
+     that has to be seen: the border of a control and the thumb of a scrollbar (3:1 or more
+     against void, well and plate, WCAG 1.4.11). */
+  --line: #1f2b35;
+  --line-hi: #33485a;
+  --edge: #556c7e;
+
+  --accent: #3fd9e6;
+  --accent-edge: #2a8790;
+  --accent-tint: #0e1d21;
+  --amber: #f5b041;
+  --amber-edge: #976f2d;
+  --amber-tint: #1d1a14;
+  --red: #ff5f56;
+  --red-edge: #c24a44;
+  --red-tint: #1e1416;
+
+  --text: #dbe6ec;
+  --bright: #f2f7f9;
+  --dim: #9bb0bd;
+  --faint: #738a9a;
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", "Adwaita Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", Menlo, Consolas, monospace;
+  /* Box drawings need a face that has the lines, the arrows and the triangles at the same
+     advance as its letters; the faces known to have all of them come first. */
+  --mono-box: "DejaVu Sans Mono", Menlo, "Adwaita Mono", "Cascadia Mono", "JetBrains Mono", "Noto Sans Mono", "FreeMono", Consolas, "Liberation Mono", ui-monospace, monospace;
+
+  --gutter: clamp(1rem, 4vw, 2rem);
+  --page: 76rem;
+  --measure: 46rem;
+  --cut: 14px;
+
+  /* The surface something sits on: marks that have a hole are filled with it. */
+  --surface: var(--void);
+  /* A hairline with a short luminous lead: the top edge of a section. */
+  --rule:
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 2.5rem 2px no-repeat,
+    linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat;
+
+  color-scheme: dark;
+}
+
+/* ---------------------------------------------------------------- base */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  background: var(--void);
+}
+
+body {
+  margin: 0;
+  background: var(--void);
+  color: var(--text);
+  font: 400 1rem/1.6 var(--sans);
+  overflow-wrap: break-word;
+}
+
+::selection {
+  background: #1d545b;
+  color: #fff;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  color: #8eeaf2;
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+[id] {
+  scroll-margin-top: 1.25rem;
+}
+
+/* ---------------------------------------------------------------- text */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 2rem 0 0.75rem;
+  color: var(--bright);
+  font-weight: 600;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+h1 {
+  margin-top: 0;
+  font-size: clamp(1.75rem, 1.25rem + 2.4vw, 2.75rem);
+  line-height: 1.12;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: clamp(1.35rem, 1.15rem + 0.9vw, 1.7rem);
+}
+
+h3 {
+  font-size: 1.125rem;
+  line-height: 1.3;
+}
+
+h4,
+h5,
+h6 {
+  font-size: 1rem;
+}
+
+p,
+ul,
+ol,
+dl,
+blockquote,
+pre,
+figure {
+  margin: 0 0 1rem;
+}
+
+ul,
+ol {
+  padding-left: 1.5rem;
+}
+
+ul {
+  list-style: square;
+}
+
+li {
+  margin: 0.35rem 0;
+}
+
+li::marker {
+  color: var(--faint);
+}
+
+li > p {
+  margin-bottom: 0.5rem;
+}
+
+li > ul,
+li > ol {
+  margin: 0.35rem 0 0.5rem;
+}
+
+strong,
+b {
+  color: var(--bright);
+  font-weight: 650;
+}
+
+hr {
+  height: 1px;
+  margin: 2.5rem 0;
+  border: 0;
+  background: var(--line);
+}
+
+blockquote {
+  margin-left: 0;
+  margin-right: 0;
+  padding: 0.25rem 0 0.25rem 1rem;
+  border-left: 2px solid var(--line-hi);
+  color: var(--dim);
+}
+
+blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+img,
+svg {
+  max-width: 100%;
+  height: auto;
+}
+
+figure {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+figcaption {
+  margin-top: 0.6rem;
+  color: var(--dim);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- code */
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Code in a sentence is one box: a command, an option or a path moves to the next line
+   whole. As ordinary inline text it broke wherever a browser may break a line, after a
+   hyphen or a slash too: "--" | "repair" read as two arguments, "bastion-" | "mc" split the
+   program's name, "/" | "etc" a path. Only a piece longer than its line now wraps, inside
+   its box (overflow-wrap), so the box never reaches past its column. The price: a bracket
+   or a punctuation mark next to a box can stand alone at the end or the start of a line.
+   Counted on four pages at five widths, that happens less than half as often as a piece
+   was broken before, and a stray mark changes nothing that a command says (numbers in
+   docs/notes/website-progress.md, "Decisions"). The same holds in table cells (see
+   "tables"). */
+code {
+  display: inline-block;
+  /* (one em short of the line: the comma or the bracket after a piece that has to wrap
+     still fits beside its last line) */
+  max-width: calc(100% - 1em);
+  padding: 0.08em 0.32em;
+  background: var(--plate-hi);
+  color: var(--bright);
+  overflow-wrap: anywhere;
+  /* (a piece that has to wrap breaks near its middle, at a space where it has one, not
+     after the dashes of its last option) */
+  text-wrap-style: balance;
+}
+
+a code {
+  color: inherit;
+}
+
+/* A box does not take the underline of the link around it: it draws its own. */
+a > code {
+  text-decoration: inherit;
+}
+
+pre {
+  max-width: 100%;
+  padding: 0.9rem 1.1rem;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-hi);
+  /* Two shadows that the content's own background covers at either end: they are
+     visible only where there is more to scroll to. */
+  background:
+    linear-gradient(to right, var(--well) 40%, rgba(5, 8, 10, 0)) 0 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--well) 40%, rgba(5, 8, 10, 0)) 100% 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to right, rgba(63, 217, 230, 0.28), rgba(63, 217, 230, 0)) 0 0 / 0.9rem 100% no-repeat scroll,
+    linear-gradient(to left, rgba(63, 217, 230, 0.28), rgba(63, 217, 230, 0)) 100% 0 / 0.9rem 100% no-repeat scroll,
+    var(--well);
+  color: var(--text);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 4;
+  /* A scrollbar whose colours a page sets is no longer the browser's own: its thumb is a
+     control of this page and needs 3:1 against its track. On a phone it is often the only
+     sign that a box scrolls. edge has 3.67:1 on well and 3.56:1 on void; line-hi had 2.1. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) var(--well);
+}
+
+pre code {
+  display: inline;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  white-space: inherit;
+  overflow-wrap: normal;
+}
+
+/* A drawing made of box characters: its lines must touch and its columns must agree. */
+pre.diagram {
+  font-family: var(--mono-box);
+  line-height: 1.25;
+  font-variant-ligatures: none;
+}
+
+/* ---------------------------------------------------------------- tables */
+
+.table-wrap {
+  max-width: 100%;
+  margin: 1.25rem 0 1.5rem;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(to right, var(--void) 40%, rgba(10, 13, 16, 0)) 0 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--void) 40%, rgba(10, 13, 16, 0)) 100% 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to right, rgba(63, 217, 230, 0.28), rgba(63, 217, 230, 0)) 0 0 / 0.9rem 100% no-repeat scroll,
+    linear-gradient(to left, rgba(63, 217, 230, 0.28), rgba(63, 217, 230, 0)) 100% 0 / 0.9rem 100% no-repeat scroll,
+    var(--void);
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) var(--void);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+th,
+td {
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  border-bottom-color: var(--line-hi);
+  color: var(--dim);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  vertical-align: bottom;
+}
+
+tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+td code,
+th code {
+  overflow-wrap: anywhere;
+}
+
+.align-right {
+  text-align: right;
+}
+
+.align-center {
+  text-align: center;
+}
+
+/* A row with an identifier (P1, J13, E4): the identifier is a read-out and keeps to one line. */
+tr[id] > td:first-child {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+tr:target > td {
+  background: var(--accent-tint);
+}
+
+tr:target > td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Columns of prose need room; below that the table scrolls inside its wrapper. */
+table.cols-3 {
+  min-width: 34rem;
+}
+
+/* The first column of a three-column grid names its row ("The display", "Sound"). Laid out
+   automatically beside a column of long code it was squeezed to a word per line. Rows that
+   carry an identifier (N, E4) keep their narrow first column. */
+@media (min-width: 44em) {
+  table.cols-3 > tbody > tr:not([id]) > td:first-child {
+    min-width: 8rem;
+  }
+
+  /* (room for an option such as -XX:+DisableAttachAgent on one line of its box) */
+  table.cols-3 > tbody > tr:not([id]) > td:first-child:has(code) {
+    min-width: 13rem;
+  }
+}
+
+/* The generator's tables of four or more columns are stacked records at every width:
+   each row a block, each cell a labelled line. As a grid, even at 1280 px, their columns
+   were too narrow for what the threat model puts in them (test names, paths, options):
+   about a hundred code pieces of its matrix were broken over two lines, a quarter of them
+   pieces that would have fitted a line whole. As records nothing that fits a line is
+   broken. From 62em the labels stand in a gutter beside the values (below). The roles the
+   generator writes keep each of them a table for a screen reader. */
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8),
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody,
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr,
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td {
+  display: block;
+  min-width: 0;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr {
+  padding: 0.9rem 1rem 1rem;
+  border-bottom: 1px solid var(--line-hi);
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr:last-child {
+  border-bottom: 0;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td {
+  padding: 0.3rem 0;
+  border: 0;
+  white-space: normal;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td:empty {
+  display: none;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td[data-label]::before {
+  display: block;
+  margin-bottom: 0.1rem;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  content: attr(data-label);
+  content: attr(data-label) / "";
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr[id] > td:first-child {
+  padding-top: 0;
+  font-size: 1.0625rem;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr[id] > td:first-child::before {
+  content: none;
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr:target {
+  background: var(--accent-tint);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr:target > td {
+  background: none;
+  box-shadow: none;
+}
+
+/* From 62em the label of a cell stands in a gutter on the left of its value, as on a
+   specification sheet, and a record keeps to the measure: a line of a value holds as many
+   characters as a line of a paragraph (the measure at the table's 0.875 of the size,
+   beside the gutter and the record's padding). */
+@media (min-width: 62em) {
+  .table-wrap:has(> table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8)) {
+    max-width: calc(var(--measure) * 0.875 + 12.5rem + 2px);
+  }
+
+  table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td[data-label] {
+    display: flow-root;
+    padding-left: 10.5rem;
+  }
+
+  table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr > td[data-label]::before {
+    float: left;
+    width: 9.25rem;
+    margin: 0.2em 0 0 -10.5rem;
+  }
+
+  table[role="table"]:is(.cols-4, .cols-5, .cols-6, .cols-7, .cols-8) > tbody > tr[id] > td:first-child {
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 43.99em) {
+  table[role="table"].cols-3,
+  table[role="table"].cols-3 > tbody,
+  table[role="table"].cols-3 > tbody > tr,
+  table[role="table"].cols-3 > tbody > tr > td {
+    display: block;
+    min-width: 0;
+  }
+
+  table[role="table"].cols-3 > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  table[role="table"].cols-3 > tbody > tr {
+    padding: 0.9rem 1rem 1rem;
+    border-bottom: 1px solid var(--line-hi);
+  }
+
+  table[role="table"].cols-3 > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+
+  table[role="table"].cols-3 > tbody > tr > td {
+    padding: 0.3rem 0;
+    border: 0;
+    white-space: normal;
+  }
+
+  table[role="table"].cols-3 > tbody > tr > td:empty {
+    display: none;
+  }
+
+  table[role="table"].cols-3 > tbody > tr > td[data-label]::before {
+    display: block;
+    margin-bottom: 0.1rem;
+    color: var(--faint);
+    font-family: var(--sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    content: attr(data-label);
+    content: attr(data-label) / "";
+  }
+
+  /* A first cell whose column has no header names the row (the dedicated-account guide's
+     "Which one"): it is the record's heading, as in the two-column records below. */
+  table[role="table"].cols-3 > tbody > tr > td:first-child:not([data-label]) {
+    color: var(--bright);
+    font-weight: 600;
+  }
+
+  table[role="table"].cols-3 > tbody > tr[id] > td:first-child {
+    padding-top: 0;
+    font-size: 1.0625rem;
+  }
+
+  table[role="table"].cols-3 > tbody > tr[id] > td:first-child::before {
+    content: none;
+  }
+
+  table[role="table"].cols-3 > tbody > tr:target {
+    background: var(--accent-tint);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  table[role="table"].cols-3 > tbody > tr:target > td {
+    background: none;
+    box-shadow: none;
+  }
+
+  /* Two columns side by side are too narrow on a phone (the manual's source map left its
+     paths a few letters wide): one under the other, the first cell as the record's
+     heading. A header row is hidden from the eye, not from a screen reader. */
+  table[role="table"].cols-2,
+  table[role="table"].cols-2 > tbody,
+  table[role="table"].cols-2 > tbody > tr,
+  table[role="table"].cols-2 > tbody > tr > td {
+    display: block;
+  }
+
+  table[role="table"].cols-2 > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  table[role="table"].cols-2 > tbody > tr {
+    padding: 0.85rem 1rem 0.95rem;
+    border-bottom: 1px solid var(--line-hi);
+  }
+
+  table[role="table"].cols-2 > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+
+  table[role="table"].cols-2 > tbody > tr > td {
+    padding: 0;
+    border: 0;
+  }
+
+  table[role="table"].cols-2 > tbody > tr > td:first-child {
+    margin-bottom: 0.4rem;
+    color: var(--bright);
+    font-weight: 600;
+  }
+
+  table[role="table"].cols-2 > tbody > tr > td:empty {
+    display: none;
+  }
+
+  table.cols-3,
+  table.cols-2 {
+    min-width: 0;
+  }
+}
+
+/* ---------------------------------------------------------------- shell */
+
+.skip {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 10;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--accent);
+  background: var(--void);
+  color: var(--accent);
+  font-weight: 600;
+  transform: translateY(-250%);
+}
+
+.skip:focus {
+  transform: none;
+}
+
+.bar {
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.site-header {
+  border-bottom: 1px solid var(--line);
+  background: var(--deck);
+}
+
+.site-header .bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: 1.5rem;
+}
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.85rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 3.25rem;
+  color: var(--bright);
+  font: 600 1.0625rem/1.2 var(--mono);
+  letter-spacing: 0.02em;
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--accent);
+}
+
+.brand img {
+  display: block;
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--amber-edge);
+  color: var(--amber);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.site-nav {
+  min-width: 0;
+  margin: 0 -0.6rem;
+}
+
+.site-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.site-nav li {
+  margin: 0;
+}
+
+.site-nav a {
+  display: block;
+  padding: 1rem 0.6rem 0.85rem;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+  text-decoration: none;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.site-nav a:hover {
+  background: var(--plate);
+  color: var(--bright);
+}
+
+.site-nav a[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+/* On a phone the five entries need two rows: lower ones, so that the page begins sooner,
+   and three above two. From about 30em to 36em a row held four of them and left the
+   Emergency entry alone on the second; the list is kept narrower than four entries and
+   wider than three. */
+@media (max-width: 35.99em) {
+  .brand {
+    min-height: 2.75rem;
+  }
+
+  .site-nav {
+    margin-bottom: 0.3rem;
+  }
+
+  .site-nav ul {
+    max-width: 22rem;
+  }
+
+  .site-nav a {
+    padding: 0.6rem 0.6rem 0.45rem;
+  }
+}
+
+.site-nav a.nav-emergency {
+  color: var(--red);
+}
+
+.site-nav a.nav-emergency:hover {
+  background: var(--red-tint);
+  color: #ff8d86;
+}
+
+.site-nav a.nav-emergency[aria-current="page"] {
+  border-bottom-color: var(--red);
+  color: var(--red);
+}
+
+main {
+  display: block;
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: clamp(1.5rem, 4vw, 2.75rem) var(--gutter) 0;
+}
+
+main > * {
+  min-width: 0;
+}
+
+/* Running text keeps to a readable measure wherever it stands. */
+main > p,
+main > ul,
+main > ol,
+main > blockquote {
+  max-width: var(--measure);
+}
+
+.site-footer {
+  margin-top: clamp(3rem, 8vw, 5rem);
+  padding: 2rem 0 2.5rem;
+  border-top: 1px solid var(--line);
+  background: var(--deck);
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
+.site-footer p {
+  max-width: 62rem;
+  margin: 0 0 0.75rem;
+}
+
+.footer-nav ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0 1.5rem;
+  margin: 0 0 1.5rem;
+  padding: 0 0 1.25rem;
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+}
+
+/* Where four fit, four: the eight pages in two even rows (seven on the emergency page). */
+@media (min-width: 46em) {
+  .footer-nav ul {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.footer-nav li {
+  margin: 0;
+}
+
+.footer-nav a {
+  display: inline-block;
+  padding: 0.45rem 0;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.footer-nav a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.legal {
+  color: var(--faint);
+  font-size: 0.8125rem;
+}
+
+/* ---------------------------------------------------------------- labels and values */
+
+.label {
+  margin: 0 0 0.45rem;
+  color: var(--faint);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  /* (a label that needs two lines gets two even ones, not a last word alone) */
+  text-wrap: balance;
+}
+
+.label + h1,
+.label + h2,
+.label + h3 {
+  margin-top: 0;
+}
+
+.readout {
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.9375em;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.lede {
+  max-width: var(--measure);
+  color: var(--dim);
+  font-size: clamp(1.0625rem, 1rem + 0.5vw, 1.25rem);
+  line-height: 1.55;
+}
+
+/* ---------------------------------------------------------------- hero */
+
+.hero {
+  position: relative;
+  margin: 0 0 2rem;
+  padding: clamp(1rem, 4vw, 3rem) 0 clamp(1.5rem, 4vw, 2.5rem);
+}
+
+.hero > * {
+  position: relative;
+}
+
+.hero h1 {
+  max-width: 21ch;
+  margin-bottom: 1.25rem;
+  font-size: clamp(2rem, 1.15rem + 3.9vw, 3.5rem);
+  line-height: 1.06;
+  letter-spacing: -0.015em;
+}
+
+.hero .label {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- actions */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.75rem 0 0;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.55rem 1.15rem;
+  border: 1px solid var(--edge);
+  background: var(--plate);
+  color: var(--bright);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.button:hover {
+  border-color: var(--accent);
+  background: var(--plate-hi);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--void);
+}
+
+.button.primary:hover {
+  border-color: #8eeaf2;
+  background: #8eeaf2;
+  color: var(--void);
+}
+
+/* ---------------------------------------------------------------- sections and grids */
+
+.section {
+  margin-top: clamp(2.5rem, 6vw, 4rem);
+  padding-top: 1.5rem;
+  background: var(--rule);
+}
+
+.section > :first-child {
+  margin-top: 0;
+}
+
+.section > p,
+.section > ul,
+.section > ol,
+.section > blockquote {
+  max-width: var(--measure);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.grid > * {
+  min-width: 0;
+  margin: 0;
+}
+
+@media (min-width: 46em) {
+  .grid.two,
+  .grid.three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* While a three-column grid stands in two columns, an odd last item takes the whole row
+   instead of leaving a hole beside it (the three panels under "If the account is
+   compromised anyway" stood two and one). */
+@media (min-width: 46em) and (max-width: 65.99em) {
+  .grid.three > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .grid.three > :last-child:nth-child(odd) > p {
+    max-width: var(--measure);
+  }
+}
+
+/* The same for a two-column grid with an odd number of items (the seven panels of the
+   security overview's layers: the last, the launcher, stood alone beside a hole). */
+@media (min-width: 46em) {
+  .grid.two > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .grid.two > :last-child:nth-child(odd) > :is(p, ul, ol) {
+    max-width: var(--measure);
+  }
+}
+
+@media (min-width: 66em) {
+  .grid.three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  /* In three columns, a last item that would stand alone in its row takes the whole row
+     (the seven adversaries of the security overview: the last, U, stood beside two holes). */
+  .grid.three > :last-child:nth-child(3n + 1) {
+    grid-column: 1 / -1;
+  }
+
+  .grid.three > :last-child:nth-child(3n + 1) > :is(p, ul, ol) {
+    max-width: var(--measure);
+  }
+}
+
+/* ---------------------------------------------------------------- panels */
+
+/* A plate with its top-left and bottom-right corners cut off. The element's own
+   background is the hairline; a plate one pixel smaller lies on it; a luminous lead marks
+   the corner where the plate begins. */
+.panel {
+  --surface: var(--plate);
+  --frame: var(--line);
+  --mark: var(--accent);
+  position: relative;
+  isolation: isolate;
+  margin: 1.5rem 0;
+  padding: 1.25rem clamp(1rem, 3vw, 1.4rem) 1.35rem;
+  background: var(--frame);
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+}
+
+.panel::before {
+  position: absolute;
+  inset: 1px;
+  z-index: -1;
+  background: var(--surface);
+  clip-path: polygon(calc(var(--cut) - 0.59px) 0, 100% 0, 100% calc(100% - var(--cut) + 0.59px), calc(100% - var(--cut) + 0.59px) 100%, 0 100%, 0 calc(var(--cut) - 0.59px));
+  content: "";
+}
+
+.panel::after {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(var(--mark), var(--mark)) var(--cut) 0 / calc(var(--cut) * 1.6) 2px no-repeat,
+    linear-gradient(var(--mark), var(--mark)) 0 var(--cut) / 2px calc(var(--cut) * 1.6) no-repeat,
+    linear-gradient(135deg, transparent 50%, var(--mark) 50%, var(--mark) calc(50% + 1.6px), transparent calc(50% + 1.6px)) 0 0 / var(--cut) var(--cut) no-repeat,
+    linear-gradient(135deg, transparent calc(50% - 1.6px), var(--mark) calc(50% - 1.6px), var(--mark) 50%, transparent 50%) 100% 100% / var(--cut) var(--cut) no-repeat;
+  content: "";
+  pointer-events: none;
+}
+
+.panel > :first-child {
+  margin-top: 0;
+}
+
+.panel > :last-child {
+  margin-bottom: 0;
+}
+
+.panel h3 {
+  margin: 0 0 0.6rem;
+}
+
+.panel h3 + p {
+  color: var(--dim);
+}
+
+.panel .label {
+  margin-top: 1.1rem;
+}
+
+.panel > .label:first-child {
+  margin-top: 0;
+}
+
+.panel.caution {
+  --frame: var(--amber-edge);
+  --mark: var(--amber);
+}
+
+.panel.danger {
+  --frame: var(--red-edge);
+  --mark: var(--red);
+}
+
+.panel.quiet {
+  --surface: var(--void);
+  --mark: var(--edge);
+}
+
+.panel.quiet p {
+  color: var(--dim);
+}
+
+.grid > .panel {
+  margin: 0;
+}
+
+/* A long list in a panel that spans the page: two columns where each has room for a
+   readable line, one otherwise. The numbers stay; an item is never cut in two. One column
+   keeps to the measure: from about 50em to 64em the panel is wider than a readable line
+   but not yet wide enough for two (2 × 26rem + the gap: 55.5rem of content; at 64em that
+   remains even with a classic scrollbar). */
+main > .panel > ol,
+main > .panel > ul,
+.section > .panel > ol,
+.section > .panel > ul {
+  max-width: var(--measure);
+  columns: 2 26rem;
+  column-gap: 3.5rem;
+}
+
+@media (min-width: 64em) {
+  main > .panel > ol,
+  main > .panel > ul,
+  .section > .panel > ol,
+  .section > .panel > ul {
+    max-width: none;
+  }
+}
+
+main > .panel > ol > li,
+main > .panel > ul > li,
+.section > .panel > ol > li,
+.section > .panel > ul > li {
+  break-inside: avoid;
+}
+
+main > .panel > ol > li:first-child,
+main > .panel > ul > li:first-child,
+.section > .panel > ol > li:first-child,
+.section > .panel > ul > li:first-child {
+  margin-top: 0;
+}
+
+/* A paragraph in such a panel keeps to the measure like one outside it (a code block
+   beside it may use the whole width). */
+main > .panel > p,
+.section > .panel > p {
+  max-width: var(--measure);
+}
+
+/* ---------------------------------------------------------------- callouts */
+
+/* A statement the reader must not miss: a tinted plate with a band on its leading edge.
+   The band differs in shape as well as in colour: a thin line for a note, a hatched one
+   for a warning, a solid one for danger. It keeps to the measure, so that it lines up with
+   the paragraphs and the table of contents around it (at 58rem a line of the "Not
+   exercised" callout ran to about 130 characters). */
+.callout {
+  --band: var(--accent);
+  --surface: var(--accent-tint);
+  position: relative;
+  max-width: var(--measure);
+  margin: 1.5rem 0;
+  padding: 1rem 1.15rem 1rem 1.6rem;
+  border: 1px solid var(--accent-edge);
+  background: var(--surface);
+}
+
+.callout::before {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: -1px;
+  width: 4px;
+  background: var(--band);
+  content: "";
+}
+
+.callout > :first-child {
+  margin-top: 0;
+}
+
+.callout > :last-child {
+  margin-bottom: 0;
+}
+
+.callout .label {
+  color: var(--band);
+}
+
+.callout.warning {
+  --band: var(--amber);
+  --surface: var(--amber-tint);
+  padding-left: 1.9rem;
+  border-color: var(--amber-edge);
+}
+
+.callout.warning::before {
+  width: 10px;
+  background: repeating-linear-gradient(-45deg, var(--amber) 0, var(--amber) 4px, var(--amber-tint) 4px, var(--amber-tint) 8px);
+}
+
+.callout.danger {
+  --band: var(--red);
+  --surface: var(--red-tint);
+  padding-left: 1.9rem;
+  border-color: var(--red-edge);
+}
+
+.callout.danger::before {
+  width: 10px;
+}
+
+/* ---------------------------------------------------------------- defended / not defended */
+
+/* The marks of the launcher's protection read-out: a solid shield for "in force", an
+   open, struck-through one for "not defended". */
+ul.defended,
+ul.not-defended {
+  padding-left: 0;
+  list-style: none;
+}
+
+ul.defended > li,
+ul.not-defended > li {
+  position: relative;
+  margin: 0.55rem 0;
+  padding-left: 1.75rem;
+}
+
+ul.defended > li::before,
+ul.not-defended > li::before,
+ul.not-defended > li::after {
+  position: absolute;
+  top: 0.3em;
+  left: 0.1rem;
+  width: 0.875rem;
+  height: 1rem;
+  clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+  content: "";
+}
+
+ul.defended > li::before {
+  background: var(--accent);
+}
+
+ul.not-defended > li::before {
+  background: var(--red);
+}
+
+ul.not-defended > li::after {
+  top: calc(0.3em + 1.5px);
+  left: calc(0.1rem + 1.5px);
+  width: calc(0.875rem - 3px);
+  height: calc(1rem - 3.6px);
+  background:
+    linear-gradient(to top right, transparent calc(50% - 0.9px), var(--red) calc(50% - 0.9px), var(--red) calc(50% + 0.9px), transparent calc(50% + 0.9px)),
+    var(--surface);
+}
+
+/* ---------------------------------------------------------------- status table */
+
+table.status td.tested,
+table.status td.partly,
+table.status td.untested {
+  position: relative;
+  padding-left: 2.1rem;
+  font-weight: 600;
+}
+
+table.status td.tested::before,
+table.status td.partly::before,
+table.status td.untested::before {
+  position: absolute;
+  top: 0.95rem;
+  left: 0.8rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid currentColor;
+  content: "";
+}
+
+table.status td.tested {
+  color: var(--accent);
+}
+
+table.status td.tested::before {
+  background: currentColor;
+}
+
+table.status td.partly {
+  color: var(--amber);
+}
+
+table.status td.partly::before {
+  background: linear-gradient(to right, currentColor 50%, transparent 50%);
+}
+
+table.status td.untested {
+  color: var(--red);
+}
+
+/* ---------------------------------------------------------------- steps */
+
+ol.steps {
+  padding-left: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+ol.steps > li {
+  position: relative;
+  /* (high enough for the line that joins two numerals to be a line, not a dot) */
+  min-height: 3.75rem;
+  margin: 0;
+  padding: 0.2rem 0 1.25rem 3.4rem;
+  counter-increment: step;
+}
+
+ol.steps > li::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2.5rem;
+  border-bottom: 2px solid var(--accent);
+  color: var(--accent);
+  font: 600 1.35rem/1.5 var(--mono);
+  font-variant-numeric: tabular-nums;
+  content: counter(step, decimal-leading-zero);
+}
+
+ol.steps > li::after {
+  position: absolute;
+  top: 2.6rem;
+  bottom: 0.35rem;
+  left: 1.2rem;
+  width: 1px;
+  background: var(--line-hi);
+  content: "";
+}
+
+ol.steps > li:last-child {
+  padding-bottom: 0.25rem;
+}
+
+ol.steps > li:last-child::after {
+  content: none;
+}
+
+/* Whatever a step begins with (a paragraph, a heading) stands level with its numeral. */
+ol.steps > li > :first-child {
+  margin-top: 0;
+}
+
+ol.steps > li > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------------------------------------------------------------- screenshots */
+
+.shots {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem 1.25rem;
+  margin: 1.5rem 0;
+}
+
+@media (min-width: 46em) {
+  .shots {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+figure.shot {
+  min-width: 0;
+  margin: 0;
+}
+
+a.shot {
+  display: block;
+  padding: 5px;
+  /* Four corner brackets: what the eye should go to. */
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 14px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 1.5px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 14px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 1.5px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 14px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 1.5px 14px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 14px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 1.5px 14px no-repeat,
+    var(--well);
+}
+
+a.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+}
+
+a.shot:hover img {
+  border-color: var(--accent-edge);
+}
+
+/* ---------------------------------------------------------------- the layers diagram */
+
+/* On a narrow screen the drawing needs every pixel of the column (its text is drawn for a
+   width of 328), so the frame reaches 6px into the page's gutter instead of taking room
+   from the drawing. */
+figure.diagram {
+  margin: 1.75rem -6px;
+  padding: 6px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 18px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 0 / 1.5px 18px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 18px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 0 / 1.5px 18px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 18px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 0 100% / 1.5px 18px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 18px 1.5px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) 100% 100% / 1.5px 18px no-repeat,
+    var(--well);
+}
+
+figure.diagram img {
+  display: block;
+  margin: 0 auto;
+}
+
+figure.diagram figcaption {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 0.75rem 0.65rem 0.6rem;
+}
+
+/* Two drawings of the same thing: layers-stacked.svg for a narrow window, layers.svg where
+   its lettering is large enough to read. Exactly one is shown (and read out) at a time.
+   The page may give the wide one the `hidden` attribute, so that a reader without this
+   style sheet gets one drawing and not two; the rules below work with and without it. */
+figure.diagram img[src$="layers.svg"] {
+  display: none;
+}
+
+figure.diagram img[src$="layers-stacked.svg"] {
+  width: 100%;
+  max-width: 26rem;
+}
+
+/* Wider than the stacked drawing may grow: the frame keeps to the drawing. */
+@media (min-width: 30em) {
+  figure.diagram {
+    max-width: calc(26rem + 12px);
+    margin: 1.75rem auto;
+  }
+}
+
+@media (min-width: 62em) {
+  figure.diagram {
+    max-width: none;
+    margin: 1.75rem 0;
+    padding: 1.25rem 1.25rem 0.75rem;
+  }
+
+  figure.diagram img[src$="layers.svg"] {
+    display: block;
+  }
+
+  figure.diagram img[src$="layers-stacked.svg"] {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------- table of contents */
+
+.toc {
+  max-width: var(--measure);
+  margin: 1.5rem 0;
+  padding: 0.5rem 0;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-hi);
+}
+
+.toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.toc li {
+  margin: 0;
+}
+
+.toc a {
+  display: block;
+  padding: 0.4rem 1rem;
+  color: var(--text);
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.toc a:hover {
+  background: var(--plate);
+  color: var(--accent);
+}
+
+/* An entry fills the width of its list, so its focus ring is drawn inside it. Beside a
+   rendered document the list is a box that scrolls (the rail, from 80em), and that box cut
+   off a ring drawn outside the entry at both sides: two lines instead of a ring. The
+   entry's padding keeps the ring clear of its text. */
+.toc a:focus-visible {
+  outline-offset: -2px;
+}
+
+.toc ol ol a {
+  padding-left: 2rem;
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
+.toc ol ol a:hover {
+  color: var(--accent);
+}
+
+.toc .label {
+  margin: 0;
+  padding: 0.4rem 1rem 0.5rem;
+}
+
+/* ---------------------------------------------------------------- rendered documents */
+
+.doc-head {
+  margin-bottom: 1.5rem;
+}
+
+.doc-head h1 {
+  max-width: 30ch;
+  margin-bottom: 0.75rem;
+}
+
+.doc-source {
+  max-width: var(--measure);
+  margin: 0;
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
+.toc-fold {
+  max-width: var(--measure);
+  margin: 0 0 2rem;
+  border: 1px solid var(--edge);
+  background: var(--plate);
+}
+
+.toc-fold > summary {
+  padding: 0.85rem 1rem;
+  color: var(--bright);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.toc-fold > summary::marker {
+  color: var(--accent);
+}
+
+.toc-fold > summary:hover {
+  background: var(--plate-hi);
+}
+
+.toc-fold[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.toc-fold > .toc {
+  max-width: none;
+  margin: 0;
+  border: 0;
+}
+
+.toc-rail {
+  display: none;
+}
+
+.doc > :first-child {
+  margin-top: 0;
+}
+
+.doc > p,
+.doc > ul,
+.doc > ol,
+.doc > blockquote,
+.runbook-lead {
+  max-width: var(--measure);
+}
+
+.doc > h2 {
+  margin-top: 3rem;
+  padding-top: 1.25rem;
+  background: var(--rule);
+}
+
+.heading {
+  margin: 2.25rem 0 0.75rem;
+}
+
+.heading > h2,
+.heading > h3,
+.heading > h4,
+.heading > h5,
+.heading > h6 {
+  display: inline;
+  margin: 0;
+}
+
+.heading:has(> h2) {
+  margin-top: 3.25rem;
+  padding-top: 1.25rem;
+  background: var(--rule);
+}
+
+.heading > :target {
+  color: var(--accent);
+}
+
+.anchor {
+  margin-left: 0.4rem;
+  padding: 0.2rem 0.35rem;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.anchor:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+@media (min-width: 80em) {
+  .doc-layout {
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 1fr);
+    column-gap: 2.75rem;
+    align-items: start;
+  }
+
+  .doc-head,
+  .doc {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .toc-fold {
+    display: none;
+  }
+
+  .toc-rail {
+    display: block;
+    position: sticky;
+    top: 1rem;
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    max-height: calc(100vh - 2rem);
+    margin: 0;
+    overflow-y: auto;
+    border: 0;
+    border-left: 1px solid var(--line);
+    scrollbar-width: thin;
+    scrollbar-color: var(--edge) var(--void);
+  }
+
+  .toc-rail a {
+    padding: 0.32rem 0.9rem;
+    font-size: 0.875rem;
+  }
+
+  .toc-rail ol ol a {
+    padding-left: 1.7rem;
+    font-size: 0.8125rem;
+  }
+
+  .toc-rail .label {
+    padding: 0 0.9rem 0.5rem;
+  }
+}
+
+/* ---------------------------------------------------------------- the emergency page */
+
+/* The runbook is one column; it stands where every page's content begins, under the
+   name in the header, and not centred on its own. */
+.runbook {
+  max-width: 54rem;
+}
+
+.runbook .doc-head h1 {
+  max-width: none;
+}
+
+.device-check {
+  margin: 0 0 2rem;
+  padding-top: 1.15rem;
+  padding-bottom: 1.15rem;
+  font-size: 1.0625rem;
+}
+
+.device-check h2 {
+  margin: 0 0 0.75rem;
+  /* (a token, not a literal white: on paper it has to turn black with the rest) */
+  color: var(--bright);
+  font-size: clamp(1.25rem, 1.1rem + 1vw, 1.5rem);
+}
+
+.runbook-lead {
+  color: var(--dim);
+}
+
+.runbook pre {
+  font-size: 1.0625rem;
+}
+
+.runbook li {
+  margin: 0.6rem 0;
+}
+
+a.tap {
+  display: block;
+  position: relative;
+  max-width: 40rem;
+  min-height: 3.5rem;
+  margin: 0.6rem 0;
+  padding: 0.8rem 2.9rem 0.85rem 1rem;
+  border: 1px solid var(--accent-edge);
+  border-left: 3px solid var(--accent);
+  background: var(--plate);
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.tap::after {
+  position: absolute;
+  top: 50%;
+  right: 1.2rem;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-top: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  transform: translateY(-50%) rotate(45deg);
+  content: "";
+}
+
+a.tap:hover {
+  border-color: var(--accent);
+  background: var(--plate-hi);
+}
+
+.tap-what {
+  display: block;
+  color: var(--accent);
+  font-weight: 600;
+  line-height: 1.35;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+.tap-where {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.runbook-note {
+  margin-top: 2.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
+.runbook-note p {
+  max-width: var(--measure);
+}
+
+/* ---------------------------------------------------------------- motion */
+
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  .button,
+  a.tap,
+  .site-nav a,
+  .toc a {
+    transition: color 0.12s linear, background-color 0.12s linear, border-color 0.12s linear;
+  }
+
+  .skip {
+    transition: transform 0.12s ease-out;
+  }
+}
+
+/* ---------------------------------------------------------------- forced colours */
+
+@media (forced-colors: active) {
+  .panel {
+    border: 1px solid CanvasText;
+    clip-path: none;
+  }
+
+  .panel::before,
+  .panel::after,
+  ul.defended > li::before,
+  ul.not-defended > li::before,
+  ul.not-defended > li::after {
+    display: none;
+  }
+
+  ul.defended,
+  ul.not-defended {
+    padding-left: 1.5rem;
+    list-style: square;
+  }
+
+  ul.defended > li,
+  ul.not-defended > li {
+    padding-left: 0;
+  }
+
+  .callout::before {
+    background: CanvasText;
+  }
+}
+
+/* ---------------------------------------------------------------- paper */
+
+@media print {
+  :root {
+    --void: #fff;
+    --deck: #fff;
+    --plate: #fff;
+    --plate-hi: #fff;
+    --well: #fff;
+    --line: #9a9a9a;
+    --line-hi: #555;
+    --edge: #333;
+    --accent: #000;
+    --accent-edge: #000;
+    --accent-tint: #fff;
+    --amber: #000;
+    --amber-edge: #000;
+    --amber-tint: #fff;
+    --red: #000;
+    --red-edge: #000;
+    --red-tint: #fff;
+    --text: #000;
+    --bright: #000;
+    --dim: #222;
+    --faint: #333;
+    color-scheme: light;
+  }
+
+  @page {
+    margin: 16mm 15mm;
+  }
+
+  html,
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 11pt;
+  }
+
+  .skip,
+  .site-header,
+  .site-footer nav,
+  .toc,
+  .toc-fold,
+  .anchor,
+  .actions {
+    display: none;
+  }
+
+  main {
+    max-width: none;
+    padding: 0;
+  }
+
+  .site-footer {
+    margin-top: 2rem;
+    padding: 1rem 0 0;
+    border-top: 1px solid #000;
+  }
+
+  .bar {
+    max-width: none;
+    padding: 0;
+  }
+
+  a {
+    color: #000;
+  }
+
+  /* A control that is printed after all: an outline, never light text on a fill that the
+     printer leaves out. */
+  .button,
+  .button.primary {
+    border: 1pt solid #000;
+    background: none;
+    color: #000;
+  }
+
+  /* On paper an address has to be written out. */
+  a[href^="http"]:not(.tap)::after {
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+    content: " (" attr(href) ")";
+  }
+
+  pre,
+  .table-wrap {
+    overflow: visible;
+    background: #fff;
+  }
+
+  pre {
+    border: 1px solid #555;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  pre.diagram {
+    font-size: 6.5pt;
+    white-space: pre;
+  }
+
+  code {
+    background: none;
+    color: #000;
+  }
+
+  table {
+    min-width: 0 !important;
+  }
+
+  .panel {
+    border: 1px solid #555;
+    background: #fff;
+    clip-path: none;
+  }
+
+  .panel::before,
+  .panel::after {
+    display: none;
+  }
+
+  .callout {
+    border: 1.5pt solid #000;
+    background: #fff;
+  }
+
+  .callout.warning::before {
+    background: repeating-linear-gradient(-45deg, #000 0, #000 4px, #fff 4px, #fff 8px);
+  }
+
+  ul.defended > li::before,
+  ul.not-defended > li::before,
+  ul.not-defended > li::after,
+  .callout::before,
+  table.status td::before,
+  ol.steps > li::before {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  a.tap {
+    max-width: none;
+    min-height: 0;
+    padding: 0.5rem 0.75rem;
+    border: 1pt solid #000;
+    border-left: 3pt solid #000;
+    break-inside: avoid;
+  }
+
+  a.tap::after {
+    content: none;
+  }
+
+  .tap-what {
+    text-decoration: none;
+  }
+
+  .tap-where {
+    color: #000;
+    font-size: 10pt;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  .heading {
+    break-after: avoid;
+  }
+
+  .callout,
+  pre,
+  figure,
+  tr,
+  li {
+    break-inside: avoid;
+  }
+
+  .page-emergency .device-check {
+    border-width: 2.5pt;
+  }
+}

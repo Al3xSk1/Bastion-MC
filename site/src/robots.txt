@@ -1,0 +1,9 @@
+# bastion-mc website: every page may be crawled, and the sitemap lists them.
+#
+# Crawlers read robots.txt only at the root of a host. A GitHub Pages project site is
+# served one level below the root, where none of them looks: there this file has no
+# effect. It takes effect only if the site is ever served from the root of a host.
+User-agent: *
+Allow: /
+
+Sitemap: {{SITE_URL}}sitemap.xml

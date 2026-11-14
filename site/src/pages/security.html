@@ -1,0 +1,742 @@
+title: Security overview | bastion-mc
+description: The security model of bastion-mc in plain language: who it is defended against, what each layer of the sandbox stops, what the credential broker changes, what the in-game phone can and cannot do, and what is not defended or not yet verified.
+nav: security
+---
+<p class="label">Security overview</p>
+<h1>The security model in plain language</h1>
+<p class="lede">bastion-mc treats the game as hostile code. The Java process that runs Minecraft is assumed to belong to an attacker from its first instruction, whether through a malicious mod or through something a server sent, and everything around it is arranged on that assumption. That includes the launcher's own companion mod and its in-game phone, which run inside the game.</p>
+{{REQUIRE docs/THREAT_MODEL.md "The JVM is treated as hostile from its first instruction — and so is the launcher's own companion mod, which runs in it (J19) — and with it the in-game phone, which is part of that mod"}}
+<p>This page is the short version, for a reader who will not go through the whole <a href="threat-model.html">threat model</a>. The threat model is the authority: for each attack it names the defence and what remains, and for most of them the test or experiment behind the claim. The letters and numbers in brackets on this page, such as J10 or D1, are its rows, and each one is a link to that row.</p>
+<div class="callout warning">
+<p class="label">Pre-release</p>
+<p>The tests that the threat model cites pass on the development machine, an Arch Linux system. Several parts have never been run against the live services or on other hardware (<a href="#not-verified">what has not been verified</a>), and some things are not defended at all (<a href="#not-defended">what is not defended</a>). Read those two sections before you rely on anything here.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Where a row cites a test, that test lives in this repository and passes on the development machine (Arch Linux,"}}
+</div>
+<nav class="toc" aria-label="On this page">
+<p class="label">On this page</p>
+<ol>
+<li><a href="#assets">What is being protected</a></li>
+<li><a href="#adversaries">Who it is defended against</a></li>
+<li><a href="#layers">The layers, and what each one stops</a></li>
+<li><a href="#holes">The deliberate holes: display, sound, graphics</a></li>
+<li><a href="#broker">What the credential broker changes</a></li>
+<li><a href="#phone">The companion mod and the in-game phone</a></li>
+<li><a href="#not-defended">What is not defended</a></li>
+<li><a href="#not-verified">What has not been verified</a></li>
+<li><a href="#account">If the account is compromised anyway</a></li>
+</ol>
+</nav>
+
+<section class="section" id="assets">
+<h2>What is being protected</h2>
+<ul>
+<li>The <strong>Microsoft refresh token</strong>. It lives for weeks to months and mints new sessions for the account's Xbox and Minecraft identity. It is the most valuable secret.</li>
+<li>The <strong>Minecraft access token</strong>. It lives for 24 hours and lets its holder join servers as you and change your skin and name. It is what “session stealers” take.</li>
+<li>The <strong>signing key</strong> for mod profiles, which decides what code may run in a curated instance.</li>
+<li><strong>Your files and your session</strong>: everything in your home directory, the desktop session (keystrokes, clipboard, screen), SSH and GPG agents, browser profiles.</li>
+<li>The <strong>integrity of what runs</strong>: client jar, libraries, loader, mods, and in Fabric profiles the launcher's own companion mod.</li>
+<li>The <strong>site sessions of the phone's browser</strong>, kept in its profile until you sign out at the site or scram deletes the profile. A signed-in Discord, or any other listed site you signed in to, is a credential: whoever holds it acts as you on that site.</li>
+<li>The <strong>Spotify refresh token</strong>, only if you set up the Spotify Web API. It lasts until you revoke the grant. It controls your Spotify playback and devices and reads what is playing; the scopes asked for are playback state and control, nothing of your library.</li>
+<li>The <strong>Realms TOTP secret</strong>, only with <code>[realms] approve = "totp"</code>. Whoever has it can approve Realms joins.</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "Microsoft refresh token weeks–months Mints new sessions for the Microsoft account's Xbox/Minecraft identity. The most valuable secret."}}
+{{REQUIRE docs/THREAT_MODEL.md "Minecraft access token 24 h Lets its holder join servers as you and change skin/name."}}
+{{REQUIRE docs/THREAT_MODEL.md "Client jar, libraries, loader, mods — and, in Fabric profiles, the launcher's own companion mod."}}
+{{REQUIRE docs/THREAT_MODEL.md "until you sign out at the site, or scram deletes the profile A signed-in Discord, or any other listed site you signed in to, is a credential: its holder acts as you on that site"}}
+{{REQUIRE docs/THREAT_MODEL.md "Spotify refresh token (only with the Web API set up) until you revoke the grant Controls your Spotify playback and devices and reads what is playing; the scopes asked for are playback state and control, nothing of your library"}}
+{{REQUIRE docs/THREAT_MODEL.md "Realms TOTP secret (only with [realms] approve = \"totp\") until replaced Whoever has it can approve Realms joins"}}
+<p><a href="threat-model.html#1-assets">Threat model, section 1</a></p>
+</section>
+
+<section class="section" id="adversaries">
+<h2>Who it is defended against</h2>
+<p>The threat model gives each adversary a letter and uses the letters throughout, so they are kept here.</p>
+<div class="grid three">
+<article class="panel">
+<p class="label">M · mod</p>
+<h3>A malicious or compromised mod</h3>
+<p>Assumed to run arbitrary Java and native code inside the game from the first instruction.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Arbitrary Java and native code inside the game JVM from the first instruction."}}
+<p>The sandbox exists for this adversary. <a href="#layers">The layers</a> below are the answer, and each of them leaves something over.</p>
+<p><a href="threat-model.html#42-malicious-mod--in-jvm-code-execution-adversaries-m-s">Threat model, section 4.2</a></p>
+</article>
+<article class="panel">
+<p class="label">S · server or content</p>
+<h3>A malicious game server, or malicious content</h3>
+<p>Assumed to send data that makes the game run the attacker's code: Log4Shell-class lookups, deserialisation gadgets, parser bugs. It ends up with the same capability as a malicious mod and meets the same layers.</p>
+<p>Two of those classes have a measure of their own as well. The patched logging configuration that Mojang publishes is mandatory and message lookups are off (<a href="threat-model.html#row-j14">J14</a>). A filter for the whole Java process rejects deserialisation unless you opt out; mods that install their own filter are the stated remainder (<a href="threat-model.html#row-j15">J15</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "Ends up with the same capability as M."}}
+{{REQUIRE docs/THREAT_MODEL.md "Mods that install their own stream filter."}}
+</article>
+<article class="panel">
+<p class="label">N · network</p>
+<h3>A network attacker</h3>
+<p>Assumed to control DNS answers and to intercept and modify traffic: hostile Wi-Fi, a compromised resolver, BGP. Assumed unable to break TLS 1.3 or to forge certificates from the system trust store.</p>
+<p>The launcher speaks TLS 1.3 only, to a fixed list of hosts, without redirects and without plaintext (<a href="threat-model.html#row-n1">N1</a>). For Microsoft and Mojang hosts it also pins the keys those services chain to, for the case that a trusted certificate authority issues a certificate it should not have; other hosts, such as the mod loaders' sites, are not pinned unless you pin them (<a href="threat-model.html#row-n3">N3</a>).</p>
+<p>What remains: denial of service, and being steered to a game server the attacker runs, which is then adversary S (<a href="threat-model.html#row-n2">N2</a>). If Microsoft moves to a root outside the pinned list, connections fail until the list is updated or the pins are switched off (<a href="threat-model.html#row-n3">N3</a>). And traffic that is recorded today, to hosts that do not negotiate the hybrid post-quantum key exchange the launcher offers first, stays exposed to a future quantum adversary; Microsoft's sign-in hosts were seen to pick a classical one (<a href="threat-model.html#row-n1">N1</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "Cannot break TLS 1.3 or forge certificates from the system trust store"}}
+{{REQUIRE docs/THREAT_MODEL.md "Other hosts (Fabric, Quilt) are unpinned unless you pin them."}}
+{{REQUIRE docs/THREAT_MODEL.md "DoS; being steered to an attacker-run game server (contained by §4.2)."}}
+{{REQUIRE docs/THREAT_MODEL.md "If Microsoft moves to a root outside the list, connections fail closed until the list is updated or the pins are disabled."}}
+{{REQUIRE docs/THREAT_MODEL.md "Recorded traffic to hosts that do not negotiate the hybrid group stays exposed to a future quantum adversary."}}
+{{REQUIRE docs/THREAT_MODEL.md "Microsoft's sign-in hosts still pick a classical group"}}
+</article>
+<article class="panel">
+<p class="label">C · supply chain</p>
+<h3>A tampered file</h3>
+<p>A file altered on a download server or a mirror, or swapped in the local store.</p>
+<p>Every Mojang file is checked against the published chain of hashes on download and again at every launch, and a mismatch stops the launch (<a href="threat-model.html#row-c1">C1</a>). A modded instance needs your signature over the exact list of mods (<a href="threat-model.html#row-c2">C2</a>), and a mod fetched from Modrinth is installed only if it matches the size and hashes the registry lists (<a href="threat-model.html#row-c8">C8</a>). What remains: Mojang publishes SHA-1 hashes only (<a href="threat-model.html#row-c1">C1</a>); a loader library that has no published hash is trusted on first use when you author a profile (<a href="threat-model.html#row-c6">C6</a>); Modrinth's hash and file come from the same party (<a href="threat-model.html#row-c8">C8</a>); the launcher itself is built from crates.io dependencies, a risk the threat model calls inherent to using them (<a href="threat-model.html#row-c7">C7</a>); and other software running as you can get past several of these checks, as <a href="#verified-files">the panel on verified files</a> explains.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Mojang publishes SHA-1 only"}}
+{{REQUIRE docs/THREAT_MODEL.md "TOFU at authoring time."}}
+{{REQUIRE docs/THREAT_MODEL.md "The hash and the file come from the same party."}}
+{{REQUIRE docs/THREAT_MODEL.md "Inherent to using crates.io."}}
+</article>
+<article class="panel">
+<p class="label">O · other user</p>
+<h3>Another user of the same machine</h3>
+<p>A different UNIX account. It reads whatever is world-readable: the command line and status of every process, world-readable files, loopback ports.</p>
+<p>The game is started with no program arguments at all, and nothing secret is put into its environment, so the token is in neither place (<a href="threat-model.html#row-p1">P1</a>, <a href="threat-model.html#row-p2">P2</a>). The launcher makes itself non-dumpable, which closes its memory and its descriptors under <code>/proc</code> (<a href="threat-model.html#row-p6">P6</a>). For the command-line attack the threat model gives the remainder as “none for O”.</p>
+{{REQUIRE docs/THREAT_MODEL.md "none for O"}}
+</article>
+<article class="panel">
+<p class="label">W · web page</p>
+<h3>A page of a site listed for the phone's browser</h3>
+<p>Assumed to run any content and script in the phone's browser, on the hosts that site lists, and with a browser exploit to run code as you inside the browser's sandbox.</p>
+<p>The browser runs headless in a sandbox of its own, outside the game's, without your home directory, a display, D-Bus or sound, and its only way out is the launcher's relay, which answers only for the hosts of the site that is open (<a href="threat-model.html#row-h9">H9</a>, <a href="threat-model.html#row-h11">H11</a>). What remains: a compromised browser can change its own profile, which persists into later sessions, and its system-call filter is a deny-list, which leaves more of the kernel in reach than the game's allowlist does (<a href="threat-model.html#row-h11">H11</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "Arbitrary content and script in the in-game browser, on the hosts that site lists; with a browser exploit, code running as you inside the browser's sandbox"}}
+{{REQUIRE docs/THREAT_MODEL.md "It can change its own profile (site data, service workers), which persists into later sessions"}}
+{{REQUIRE docs/THREAT_MODEL.md "Kernel bugs reachable from a process under a denylist — more of the kernel than the game's allowlist leaves."}}
+</article>
+<article class="panel danger">
+<p class="label">U · same-user software</p>
+<h3>Other software running as you</h3>
+<p>A process under your own account, outside the sandbox: a compromised editor plugin, an install script.</p>
+<p><strong>Not defended.</strong> It can read the game's memory, read the refresh token from the kernel keyring of the same login session, replace the launcher binary in your <code>PATH</code>, or edit <code>config.toml</code>. Some things do hold against it: it cannot attach to the launcher or dump it (<a href="threat-model.html#row-p6">P6</a>), and with the credential broker the game's memory contains a placeholder instead of the token (<a href="threat-model.html#row-p7">P7</a>).</p>
+<p>The remedies the threat model names lie outside the launcher: the kernel setting <code>ptrace_scope=3</code>, which closes the reading of the game's memory, or a dedicated UNIX account for gaming. The <a href="dedicated-account.html">guide</a> describes both and what each leaves open; neither has been exercised on the development machine.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Not defended, and cannot be by an unprivileged sandbox."}}
+{{REQUIRE docs/THREAT_MODEL.md "With the broker (default) the JVM's memory holds a placeholder, not the token"}}
+{{REQUIRE docs/THREAT_MODEL.md "only kernel.yama.ptrace_scope=3, or running the launcher under a dedicated UNIX account, closes this"}}
+{{REQUIRE docs/THREAT_MODEL.md "a mc-vault account and ptrace_scope=3"}}
+</article>
+</div>
+<p><strong>Out of scope:</strong> root, the kernel, firmware, physical access, and Mojang or Microsoft themselves acting maliciously (they can simply hand out a malicious client). The services the phone reaches, Spotify, the sites you list and Realms, are treated like Mojang's: their answers are parsed strictly and bounded, but a service can do whatever it likes with what you gave it, such as your Spotify grant or your session on a site. <a href="threat-model.html#2-adversaries">Threat model, section 2</a>.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Out of scope: root, the kernel, firmware, physical access, and Mojang/Microsoft themselves acting maliciously (they can simply hand out a malicious client)."}}
+{{REQUIRE docs/THREAT_MODEL.md "The services the phone reaches — Spotify, the sites you list, Realms — are treated like Mojang's: their answers are parsed strictly and bounded, but a service can do with what you gave it (your Spotify grant, your session on a site) whatever it likes."}}
+</section>
+
+<section class="section" id="layers">
+<h2>The layers, and what each one stops</h2>
+<p>The game sits behind several mechanisms at once: namespaces set up by bubblewrap, then Landlock, then a seccomp allowlist, all of it inside a systemd scope with memory and task limits. Some of them repeat each other on purpose, and the tests check that: the keyring isolation is tested with each of its two layers alone (<a href="threat-model.html#row-j7">J7</a>), and Landlock alone with the system-call filter only logging (<a href="threat-model.html#row-j4">J4</a>). The launcher stays outside; it is the part that has to be trusted.</p>
+{{REQUIRE docs/THREAT_MODEL.md "(each layer alone)"}}
+{{REQUIRE docs/THREAT_MODEL.md "(Landlock alone, seccomp in log mode)"}}
+{{REQUIRE docs/THREAT_MODEL.md "The launcher is the trusted computing base"}}
+<figure class="diagram">
+<img src="{{ROOT}}assets/layers-stacked.svg" width="328" height="1453" alt="Diagram of the trust boundaries inside a frame labelled host, your UID. The launcher, labelled trusted computing base and non-dumpable, has six parts: auth, with the tokens in locked, self-wiping memory; the verified store, where every file is hashed and bound in by that descriptor; the egress relay and DNS responder, which hold the only sockets that lead out; the credential broker, which holds the access token outside the game; the log relay, which sanitises every byte from the sandbox; and the launch frame. Before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. Lines join five of these parts to the game. The game, a Java process treated as hostile from its first instruction and holding by default a placeholder, not the access token, sits inside four frames, from the outside in: systemd scope, namespaces, Landlock and seccomp. Inside them it has an empty root, a writable scratch directory and the saves, logs and config of one instance, read-only mods and packs, and a network with no route. Three lines labelled deliberate holes pass through all the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device with its sysfs directory. The network is outside the host and is reached only from the launcher. A separate box is the optional front end: a separate process that starts the launcher, reads its events and holds no token.">
+<img src="{{ROOT}}assets/layers.svg" width="960" height="606" alt="Diagram of the trust boundaries inside a frame labelled host, your UID. The launcher, labelled trusted computing base and non-dumpable, has six parts: auth, with the tokens in locked, self-wiping memory; the verified store, where every file is hashed and bound in by that descriptor; the egress relay and DNS responder, which hold the only sockets that lead out; the credential broker, which holds the access token outside the game; the log relay, which sanitises every byte from the sandbox; and the launch frame. Before it reads anything from the game, the launcher confines itself, with Landlock and seccomp, on all its threads. Lines join five of these parts to the game. The game, a Java process treated as hostile from its first instruction and holding by default a placeholder, not the access token, sits inside four frames, from the outside in: systemd scope, namespaces, Landlock and seccomp. Inside them it has an empty root, a writable scratch directory and the saves, logs and config of one instance, read-only mods and packs, and a network with no route. Three lines labelled deliberate holes pass through all the frames: one display socket, one audio socket with audio = &quot;pulse&quot;, and the graphics device with its sysfs directory. The network is outside the host and is reached only from the launcher. A separate box is the optional front end: a separate process that starts the launcher, reads its events and holds no token." hidden>
+<figcaption>The trust boundaries on your machine, drawn after <a href="threat-model.html#3-trust-boundaries">section 3 of the threat model</a>. The four frames around the game are, from the outside in, the systemd scope, the namespaces, Landlock and seccomp; the amber lines are <a href="#holes">the deliberate holes</a>. The audio socket among them is what the default setting <code>audio = "pulse"</code> hands over; <code>audio = "none"</code> removes it, and <code>audio = "alsa"</code> hands over the raw sound devices instead. The drawing shows a launch without the launcher's companion mod: in a Fabric profile the sandbox also holds the mod as two read-only files and one socket to the launcher, and the phone's helpers run beside the launcher, outside the game's sandbox (<a href="#phone">the phone</a>). It shows the mechanisms and not their limits: each panel below takes one mechanism and says what it does not stop.</figcaption>
+</figure>
+{{REQUIRE README.md "audio = \"alsa\" hands the game the raw sound devices (/dev/snd) instead of a server's socket"}}
+{{REQUIRE README.md "When the launcher adds its companion mod to a Fabric profile, the sandbox also gets one socket to the launcher."}}
+<div class="grid two">
+<article class="panel" id="verified-files">
+<p class="label">Before the game starts</p>
+<h3>The game starts from checked files</h3>
+<p>Mojang's files are checked against the hashes Mojang publishes, and mods against a manifest you signed. Jars and mods are hashed from the very descriptor that is then bound into the sandbox.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Jars, asset index, logging config and mods are hashed from the descriptor that is then bind-mounted"}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>A tampered client jar, library or asset, whether it was altered on the download server or in the local store (<a href="threat-model.html#row-c1">C1</a>).</li>
+<li>An unsigned, modified or extra mod. A modded instance exists only by a manifest you signed, and <code>mods/</code> must match it exactly (<a href="threat-model.html#row-c2">C2</a>).</li>
+<li>A jar from Modrinth that is not the one the registry lists. <code>bastion-mc profile add</code> takes the size and the hashes from the registry's answer and the bytes from its file server only, and installs nothing unless every file matches; what it fetches counts only once you sign the manifest (<a href="threat-model.html#row-c8">C8</a>, <a href="threat-model.html#row-c2">C2</a>).</li>
+<li>A malicious Java runtime. Only root-owned runtimes under <code>/usr/lib/jvm</code> are used, and none is ever downloaded (<a href="threat-model.html#row-c5">C5</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>What a mod you signed then does. The signature fixes which files run, not how they behave: a malicious mod is adversary M, and the layers that follow are for it.</li>
+<li>A bad jar with a matching hash, served by a compromised project account or by the registry itself: the hash and the file come from the same party. A build younger than 48 hours is passed over, which is a delay, not detection (<a href="threat-model.html#row-c8">C8</a>, <a href="threat-model.html#row-c9">C9</a>).</li>
+<li>The launcher's own companion mod, the one jar of a Fabric session that is not in your manifest. It is part of the launcher binary, so whoever trusts the launcher already trusts it, and every launch log names it with its SHA-256 (<a href="threat-model.html#row-c2">C2</a>).</li>
+<li>Other software running as you. It can add a signing key of its own unless root-owned keys exist in <code>/etc/bastion-mc/trusted-keys.d</code> (<a href="threat-model.html#row-c4">C4</a>), and it can write the file that remembers each instance's last manifest serial, which is what keeps an older manifest from being accepted again (<a href="threat-model.html#row-c3">C3</a>). On file systems without fs-verity it can also change a file it can write between the check and the mount (<a href="threat-model.html#row-c2">C2</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "profile add (C8–C12) only drafts: a jar it fetches counts once the manifest that lists it is signed."}}
+{{REQUIRE docs/THREAT_MODEL.md "it hashes while writing into a staging directory and installs only on a full match, after every file of the command was verified"}}
+{{REQUIRE docs/THREAT_MODEL.md "Only root-owned runtimes under /usr/lib/jvm; nothing is ever downloaded."}}
+{{REQUIRE docs/THREAT_MODEL.md "A compromised project account, or the registry, serves a bad jar with a matching hash"}}
+{{REQUIRE docs/THREAT_MODEL.md "A delay, not detection"}}
+{{REQUIRE docs/THREAT_MODEL.md "The one mod that is not in the signed list is the launcher's own companion: part of the launcher binary, built from source with it, never in mods/, named with its SHA-256 in every launch log"}}
+{{REQUIRE docs/THREAT_MODEL.md "whoever trusts the launcher binary already trusts it"}}
+{{REQUIRE docs/THREAT_MODEL.md "Without system keys, U can add a key."}}
+{{REQUIRE docs/THREAT_MODEL.md "Monotonic serial remembered per instance"}}
+{{REQUIRE docs/THREAT_MODEL.md "State file is user-writable."}}
+{{REQUIRE docs/THREAT_MODEL.md "Elsewhere: in-place modification by U between check and mount of a file U can write"}}
+</article>
+<article class="panel">
+<p class="label">bubblewrap namespaces</p>
+<h3>An almost empty machine</h3>
+<p>The game runs in namespaces of its own, and its root file system starts empty. What is put into it: a read-only <code>/usr</code>, a synthetic <code>/etc</code>, a fresh <code>/proc</code> and <code>/dev</code>, a scratch directory, the <code>saves/</code>, <code>logs/</code> and <code>config/</code> of one instance, read-only mounts of the verified mods and packs, in a Fabric profile the launcher's companion mod as two read-only files, and <a href="#holes">the deliberate holes</a>.</p>
+{{REQUIRE docs/THREAT_MODEL.md "In a Fabric profile the launcher's companion mod and its settings are two more read-only files, under /bastion/companion, made for each launch and not kept"}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Reading your files. Your home directory, <code>/run</code>, <code>/var</code>, <code>/opt</code> and the real <code>/etc</code> do not exist there (<a href="threat-model.html#row-j1">J1</a>).</li>
+<li>Staying on the machine. The game's directory is made for one launch and deleted on exit, and mods and packs reach it as sealed read-only mounts, so a pack that the game or a server drops cannot install itself for the next session (<a href="threat-model.html#row-j2">J2</a>).</li>
+<li>Seeing, signalling or tracing your processes. The game has a process numbering of its own, and there is no D-Bus, no portal and no agent socket inside (<a href="threat-model.html#row-j9">J9</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Learning the names of host directories, your user name included, from the mount table. The game cannot open them (<a href="threat-model.html#row-j1">J1</a>).</li>
+<li>A mod that executes scripts from <code>config/</code> persisting inside the sandbox, or a hostile world in <code>saves/</code> being parsed at the next start. <code>bastion-mc launch &lt;id&gt; --burner</code> runs untrusted content on copies that are deleted (<a href="threat-model.html#row-j2">J2</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "so in-sandbox code can learn host directory names (including the user name in $HOME). It cannot open them."}}
+{{REQUIRE docs/THREAT_MODEL.md "A mod that executes scripts from config/ can persist inside the sandbox. A hostile world in saves/ is data the game parses on the next start; launch --burner runs untrusted content on copies that are deleted."}}
+</article>
+<article class="panel">
+<p class="label">Landlock</p>
+<h3>The same limits, enforced a second time</h3>
+<p>A second set of rules in the kernel, independent of the mounts. It allows only the listed directory trees and adds limits that mounts cannot express.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Starting other programs. Only the Java runtime and the dynamic loader may be executed, so there is no shell and no download-and-run (<a href="threat-model.html#row-j3">J3</a>).</li>
+<li>Creating symbolic links, FIFOs, sockets or device nodes anywhere, together with the system-call filter (<a href="threat-model.html#row-j2">J2</a>).</li>
+<li>Signalling host processes and connecting to their abstract sockets (<a href="threat-model.html#row-j9">J9</a>).</li>
+<li>Network connections other than TCP to the allowlisted ports and, on kernels with Landlock ABI 10, UDP to the launcher's DNS port, and to the launcher's relay sockets on exactly the UDP ports that a server rule names, if one does (<a href="threat-model.html#row-j10">J10</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Native code inside the Java process itself. That is inherent to a Java runtime with JNI; such code gains nothing the Java process lacks (<a href="threat-model.html#row-j3">J3</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "(Landlock ABI 10) UDP only to the launcher's DNS port, from an ephemeral port — plus, only if a server rule names UDP ports, to the launcher's relay sockets on exactly those ports"}}
+{{REQUIRE docs/THREAT_MODEL.md "In-process native code is inherent to a JVM with JNI; it gains nothing the JVM lacks."}}
+</article>
+<article class="panel">
+<p class="label">seccomp</p>
+<h3>A list of permitted system calls</h3>
+<p>The game may make the system calls on an allowlist. Every other call is answered as if it did not exist. Beside it sits a tripwire: calls that only an exploit would make, such as <code>ptrace</code> or <code>mount</code>, kill the game, and the launcher reports that as a sign of compromise (<a href="threat-model.html#row-j6">J6</a>).</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Reaching the parts of the kernel that are not on the list, <code>io_uring</code>, <code>userfaultfd</code>, <code>perf_event_open</code> and <code>unshare</code> among them (<a href="threat-model.html#row-j4">J4</a>).</li>
+<li>The x32 route around system-call filters, which would have bypassed a deny-list on Arch kernels (<a href="threat-model.html#row-j5">J5</a>).</li>
+<li>Reading the refresh token from the kernel keyring. The filter denies the keyring calls, and independently of that the sandbox starts in a fresh session keyring (<a href="threat-model.html#row-j7">J7</a>).</li>
+<li>Injecting keystrokes into the terminal that started the launcher. The sandbox has no terminal at all, and the filter refuses the call as well (<a href="threat-model.html#row-j8">J8</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Bugs in the system calls that are allowed, and in the graphics driver's interface (<a href="threat-model.html#row-j4">J4</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "Bugs in allowed syscalls and in the GPU driver ioctl surface."}}
+</article>
+<article class="panel">
+<p class="label">Network namespace and relay</p>
+<h3>No route out, except through the launcher</h3>
+<p>In the default, filtered network mode the sandbox has a private network namespace with no route. The only exits are sockets that the launcher holds: a DNS responder and a relay, both working from an allowlist.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Sending data to an attacker's host. Names that are not allowlisted do not resolve, and TCP is relayed only to Mojang's service domains on port 443 with a matching server name, and to the game servers you allowlisted (<a href="threat-model.html#row-j10">J10</a>).</li>
+<li>Smuggling data out in DNS queries. The responder never forwards one (<a href="threat-model.html#row-j11">J11</a>).</li>
+<li>Reaching your router or services on <code>127.0.0.1</code>. The relay refuses private, loopback and link-local targets unless you allow them (<a href="threat-model.html#row-j12">J12</a>).</li>
+<li>Using voice chat as a way out. UDP is relayed only where a server's rule names UDP ports, and then only to such a port of that server, only while a game connection to it is open, and only to the address that connection uses; without such a rule no UDP socket exists (<a href="threat-model.html#row-j20">J20</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Covert channels through what is allowed. A game server you allowlisted sees whatever the game sends it, and that cannot be told apart from play. With a voice rule the same holds for datagrams to that server's voice port (<a href="threat-model.html#row-j10">J10</a>, <a href="threat-model.html#row-j20">J20</a>).</li>
+<li>Code in the game opening a game connection by itself. A connection is not proof that you are playing: code can open one to an allowlisted server, keep it for as long as the server lets it idle, and send datagrams to that server's voice port within the limits (<a href="threat-model.html#row-j20">J20</a>).</li>
+<li>A request inside TLS that names another host than the connection does. A relay that does not terminate TLS cannot see it; the large content networks reject such a mismatch (<a href="threat-model.html#row-j12">J12</a>).</li>
+</ul>
+<p>The price: LAN discovery and everything else over UDP do not exist in the sandbox, and Realms joins are refused unless you choose how they are approved (<a href="#realms">Realms</a>).</p>
+<p>All of this is filtered mode. The two other modes: with <code>none</code> the game has a network namespace with nothing in it, as a <code>--burner</code> session always has; with <code>open</code> it has the host's network, with no relay, no allowlist and no credential broker, so the token goes into the game and services on the host's loopback are reachable. Nothing on this panel is claimed for <code>open</code> mode; see also <a href="#broker">the broker</a>.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Covert channels through the allowed endpoints: an allowlisted game server sees whatever the game sends it (chat, movement, timing), and that cannot be told apart from play. With a voice rule the same holds for datagrams to that server's voice port"}}
+{{REQUIRE docs/THREAT_MODEL.md "Host-header fronting inside TLS is invisible to any non-terminating relay (the large CDNs reject SNI/Host mismatch)."}}
+{{REQUIRE docs/THREAT_MODEL.md "The only exits are sockets held by the launcher: DNS answers only allowlisted names"}}
+{{REQUIRE docs/THREAT_MODEL.md "without one no UDP socket exists and nothing changes"}}
+{{REQUIRE docs/THREAT_MODEL.md "(b) while a relayed TCP game connection made under a rule for the same host and TCP port is open"}}
+{{REQUIRE docs/THREAT_MODEL.md "(c) to the address that connection uses"}}
+{{REQUIRE docs/THREAT_MODEL.md "code in the game can open a connection to an allowlisted server by itself and keep it for as long as the server lets it idle, and send datagrams to that server's named port whenever it likes, within the limits"}}
+{{REQUIRE docs/THREAT_MODEL.md "LAN discovery and everything else over UDP does not exist in the sandbox"}}
+{{REQUIRE README.md "none gives the game a network namespace with nothing in it, no network at all (a --burner session always runs so); open gives it the host's network: no relay, no allowlist, no credential broker (the session token goes into the game), and services listening on the host's loopback are reachable."}}
+</article>
+<article class="panel">
+<p class="label">systemd scope</p>
+<h3>Limits on memory and tasks</h3>
+<p>The whole sandbox runs in a systemd scope with a memory ceiling, no swap and a limit on the number of tasks. A ceiling on CPU time is optional (<code>cpu_quota_percent</code>). The limits come from your systemd user session. Once the game runs they are read back from the kernel: if they are not in force, the launch says so and does not show them as on, and <code>sandbox.cgroup = "require"</code> stops it.</p>
+{{REQUIRE README.md "Once the game runs the limits are read back from the kernel: if they are not in force, the launch says so and does not show them as on (cgroup = \"require\" stops it)."}}
+{{REQUIRE README.md "A systemd user session provides the resource limits."}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Runaway use of memory and runaway numbers of processes and threads. The game is killed inside its own group.</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Filling <code>saves/</code> and the scratch directory up to the free space of those file systems.</li>
+<li>Using all CPUs, unless you set a quota.</li>
+</ul>
+<p><a href="threat-model.html#5-not-defended--read-this-before-relying-on-it">Threat model, section 5, item 6</a></p>
+</article>
+<article class="panel" id="the-launcher">
+<p class="label">The launcher</p>
+<h3>The trusted part hardens itself</h3>
+<p>The launcher handles the tokens. It keeps them only in locked memory that wipes itself, and it makes itself non-dumpable. Before it reads anything the game sends, it gives up, on all its threads: writing anywhere but the instance's settings directory, its cache and the directories of the phone's services that are on; reading anything but <code>/etc</code>, <code>/usr</code>, <code>/proc</code> and the name resolver's configuration; program execution; most of the network; and the kernel keyring where the refresh token rests. All of that needs Landlock ABI 9. On an older kernel the launcher applies what it can and says what is missing, and <code>launcher.confine = "require"</code> refuses to launch instead.</p>
+{{REQUIRE README.md "Before it reads anything the game sends, the launcher gives up — on all its threads — writing anywhere but one settings directory of the instance (persist/), its cache and, for the phone's services that are on, the settings-sync directory, the clips folder and the clip buffer; reading anything else but /etc, /usr, /proc and the name resolver's configuration; program execution; most of the network; and the kernel keyring where the sign-in token rests"}}
+{{REQUIRE README.md "The whole of it needs Landlock ABI 9. On an older kernel launcher.confine = \"auto\" applies what it can and says what is missing — in the launch log, in doctor and in the front end —, and \"require\" refuses to launch."}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Another process attaching to the launcher, or dumping it, to read tokens (<a href="threat-model.html#row-p6">P6</a>).</li>
+<li>The token appearing on the game's command line, in its environment or in a core dump. The game is started without program arguments, its environment is built from scratch, and the kernel is made to abort a core dump (<a href="threat-model.html#row-p1">P1</a>, <a href="threat-model.html#row-p2">P2</a>, <a href="threat-model.html#row-p8">P8</a>).</li>
+<li>A bug in what the launcher reads from the game, or from the phone's helpers, becoming code with the launcher's full rights: it has confined itself before it reads any of that (<a href="threat-model.html#row-j18">J18</a>).</li>
+<li>A bug in the window toolkit, in text shaping or in a graphics driver being used to read tokens. The graphical front end is a separate process in which tokens never exist (<a href="threat-model.html#row-g1">G1</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "The launcher confines itself before it reads any of that, on every thread."}}
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Root, code in the kernel, and cold-boot attacks (<a href="threat-model.html#row-p6">P6</a>).</li>
+<li>What a launcher taken over through such a bug would still have: the session's access token, UDP, TCP to any host on the allowed ports and signals to all your processes; with the phone's services also the browser's remote control, a Spotify access token, the Realms TOTP secret in <code>totp</code> mode and up to 8 connections through the Realms dialer (<a href="threat-model.html#row-j18">J18</a>, <a href="threat-model.html#row-h23">H23</a>).</li>
+<li>The front end being made to click, for instance to start a launch, to sign out, or to trigger scram, after which you have to sign in again. That is a problem of integrity, not of confidentiality (<a href="threat-model.html#row-g1">G1</a>, <a href="threat-model.html#row-g6">G6</a>).</li>
+<li>Other software running as you, or on X11 any other client, reading the sign-in code or link off the window or injecting clicks into it. The code and the link are useless without your Microsoft credentials; a Realms approval code, which the window shows while a join waits, is not useless: it approves that join (<a href="threat-model.html#row-g5">G5</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "root; code in the kernel; cold boot."}}
+{{REQUIRE docs/THREAT_MODEL.md "What a compromised launcher still has: the session's access token (the broker needs it; valid up to a day), UDP"}}
+{{REQUIRE docs/THREAT_MODEL.md "TCP to any host on the allowed ports, signals to every process of yours"}}
+{{REQUIRE docs/THREAT_MODEL.md "What a launcher taken over holds grows with them (J18): the browser's remote control, a Spotify access token, the TOTP secret in totp mode, the Realms dialer."}}
+{{REQUIRE docs/THREAT_MODEL.md "up to 8 connections through the Realms dialer"}}
+{{REQUIRE docs/THREAT_MODEL.md "The GUI process can still be made to click (start a launch, sign out): an integrity, not a confidentiality, problem."}}
+{{REQUIRE docs/THREAT_MODEL.md "Scram can be triggered by anything that can click in the window (G1): a denial of service — you have to sign in again."}}
+{{REQUIRE docs/THREAT_MODEL.md "Not defended (same-user software, and X11 by design). The code and the link are useless without your Microsoft credentials"}}
+{{REQUIRE docs/THREAT_MODEL.md "A Realms approval code read off the window (the Launch page shows it while a join waits) is not useless: it approves the one join it was shown for"}}
+<p><a href="token-injection.html">How the token, or its placeholder, reaches the game</a></p>
+</article>
+</div>
+</section>
+
+<section class="section" id="holes">
+<h2>The deliberate holes: display, sound, graphics</h2>
+<p>A game needs a window, sound and the graphics card. These are the openings in the sandbox. Each one is narrowed, and each one keeps a remainder. For sound the setting <code>audio</code> decides the opening: <code>"pulse"</code>, the default, hands over a sound server's socket after asking the server; <code>"none"</code> removes the sound hole; and <code>"alsa"</code> hands over the raw sound devices, the most access of the three.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Recording is possible with audio = \"pulse\""}}
+{{REQUIRE docs/THREAT_MODEL.md "audio = \"none\" removes the socket"}}
+{{REQUIRE README.md "refuses to hand the game the audio socket unless the server says no"}}
+{{REQUIRE README.md "with no server to ask and no module-loading check, the most access of the three"}}
+<div class="grid two">
+<article class="panel caution">
+<p class="label">Display · X11</p>
+<h3>A display server of the game's own</h3>
+<p>X11 lets any client log keys, inject input into other windows and read the clipboard, so handing the game your session's display would be a way out of the sandbox. On an X11 session the launcher runs the game inside gamescope, a nested compositor that runs in a sandbox of its own.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>The game seeing your other windows or your keystrokes (<a href="threat-model.html#row-d1">D1</a>).</li>
+<li>The clipboard crossing in either direction. gamescope would bridge it, so the launcher loads a cut-off into gamescope, and claims the cut only when the cut-off reports from inside the compositor; without that report it says that the clipboard is not known to be cut (<a href="threat-model.html#row-d1">D1</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>A bug in gamescope or Xwayland that the game can reach. It yields the compositor's sandbox, which holds your session's display (<a href="threat-model.html#row-d1">D1</a>).</li>
+<li>Another way of moving a selection that a build of gamescope might have. The report shows that the bridge's calls land in the cut-off; that gamescope has no other way was tested for gamescope 3.17 as Arch packages it, and for nothing else (<a href="threat-model.html#row-d1">D1</a>).</li>
+<li>Anything, once you set <code>allow_x11 = true</code> and gamescope is absent. The game is then a client of your session's X server, and that is a way out of the sandbox. Without gamescope and without that setting the launch is refused (<a href="threat-model.html#row-d1">D1</a>).</li>
+</ul>
+<p>Whether the game is playable inside gamescope (pointer capture, full screen) has not been assessed.</p>
+{{REQUIRE docs/THREAT_MODEL.md "the library reports from inside the compositor and the launcher claims the cut only for the report \"active\"; without it auto says that the clipboard is not known to be cut"}}
+{{REQUIRE docs/THREAT_MODEL.md "A bug in gamescope or Xwayland reachable from the game yields the compositor's sandbox, i.e. the session's display"}}
+{{REQUIRE docs/THREAT_MODEL.md "The report \"active\" establishes that the bridge's calls land in the cut-off, not that a given build of gamescope has no other way of moving a selection: that is a property of the compositor, tested for gamescope 3.17 as packaged by Arch and for nothing else."}}
+{{REQUIRE docs/THREAT_MODEL.md "With allow_x11 and no gamescope this is a sandbox escape path"}}
+{{REQUIRE docs/THREAT_MODEL.md "Without gamescope the launch is refused unless sandbox.allow_x11 = true hands over the session's display"}}
+{{REQUIRE docs/THREAT_MODEL.md "Playability inside gamescope (pointer capture, full screen) is not assessed."}}
+</article>
+<article class="panel caution">
+<p class="label">Display · Wayland</p>
+<h3>A socket the compositor knows to be sandboxed</h3>
+<p>On a Wayland session whose compositor has the protocol for it (<code>wp_security_context_v1</code>), the game does not get your session's socket but one created for it and registered with the compositor as a sandbox.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Screen capture, input injection and clipboard-manager access, which a compositor with the protocol is expected to withhold on that socket. The protocol only says “should”, so the launcher lists what is offered on the game's socket itself, and says so if an interface it knows to be privileged is still offered there; <code>wayland_security_context = "require"</code> refuses then (<a href="threat-model.html#row-d2">D2</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>The ordinary clipboard while the game has focus. That is how Wayland works (<a href="threat-model.html#row-d2">D2</a>).</li>
+<li>A privileged interface that is not on the launcher's list, such as a compositor's private protocol (<a href="threat-model.html#row-d2">D2</a>).</li>
+<li>Compositors without the protocol, GNOME's Mutter among them. The launcher says so and uses the session socket, so the game is an ordinary Wayland client of your session; <code>wayland_security_context = "require"</code> refuses instead (<a href="threat-model.html#row-d2">D2</a>).</li>
+</ul>
+<p>Tested against sway only, headless; not on a real Wayland desktop session.</p>
+{{REQUIRE docs/THREAT_MODEL.md "the protocol says \"should\", so the launcher does not assume it: it connects to the game's socket itself and lists what is offered there"}}
+{{REQUIRE docs/THREAT_MODEL.md "The ordinary clipboard while the game has focus (that is Wayland)."}}
+{{REQUIRE docs/THREAT_MODEL.md "A privileged interface that is not on the launcher's list — a compositor's private protocol — is not noticed"}}
+{{REQUIRE docs/THREAT_MODEL.md "Compositors without the protocol — Mutter (GNOME), Weston, Wayfire"}}
+{{REQUIRE README.md "Where a compositor lacks it, the launcher says so and uses the session socket (wayland_security_context = \"require\" refuses instead)"}}
+{{REQUIRE docs/THREAT_MODEL.md "Tested against sway only, headless; not on a real desktop session."}}
+</article>
+<article class="panel caution">
+<p class="label">Sound</p>
+<h3>One socket, after the server has been asked</h3>
+<p>With <code>audio = "pulse"</code>, the game gets the PulseAudio-protocol socket and never the native PipeWire socket, which also offers cameras and screen capture. By default PulseAudio and pipewire-pulse let any client ask the server to load modules, and that leads out of the sandbox. So before each launch the launcher asks your sound server to load a module that does not exist, and hands over the socket only after a clean refusal. With <code>audio = "none"</code> the game gets no socket at all. With <code>audio = "alsa"</code> it gets the raw sound devices (<code>/dev/snd</code>) instead: no server to ask and no module-loading check, playback and capture of every sound card.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>The game making the sound server, which runs outside the sandbox, load code or touch files (<a href="threat-model.html#row-d3">D3</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Recording while sound is enabled: the microphone, and other programs' audio, which the threat model lists as part of the same attack. Getting a recording out still needs a way through the network layer. Where a server rule names a voice port, there is one: recorded sound can go to that server as datagrams, which is what voice chat does (<a href="threat-model.html#row-d3">D3</a>, <a href="threat-model.html#row-j20">J20</a>).</li>
+<li>With <code>audio = "alsa"</code>, the game reading every microphone directly. The threat model calls that setting one for machines where that is acceptable (<a href="threat-model.html#row-d3">D3</a>).</li>
+<li>A change of the server's answer during the session. It is checked at launch, not continuously (<a href="threat-model.html#row-d3">D3</a>).</li>
+<li>Module loading itself, once you set <code>allow_pulse_module_loading = true</code>. That setting overrides the check, and a server that loads modules for the game is a way out of the sandbox (<a href="threat-model.html#row-d3">D3</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "audio = \"alsa\" binds the raw sound devices (/dev/snd) instead: no server and no module-loading check, playback and capture of every sound card."}}
+{{REQUIRE docs/THREAT_MODEL.md "Recording is possible with audio = \"pulse\"; exfiltrating it still needs J10. The answer is checked at launch, not continuously. Where a server rule names a voice port, J10's exits include that port (J20): recorded sound can go to that server as datagrams, which is what voice chat does. With audio = \"alsa\" the game reads every microphone directly; that setting is for machines where that is acceptable."}}
+{{REQUIRE docs/THREAT_MODEL.md "record the microphone, capture other apps' audio"}}
+{{REQUIRE docs/THREAT_MODEL.md "(allow_pulse_module_loading = true overrides, audio = \"none\" removes the socket)"}}
+</article>
+<article class="panel caution">
+<p class="label">Graphics</p>
+<h3>The graphics card's own device nodes</h3>
+<p>The sandbox contains <code>/dev/dri</code> (and the NVIDIA device nodes if present), and of <code>/sys</code> only the graphics card's own device directory.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Device control beyond the graphics nodes. The right to issue device ioctls is limited to them (<a href="threat-model.html#row-d4">D4</a>); with <code>audio = "alsa"</code> the raw sound devices are handed over as well (<a href="threat-model.html#row-d3">D3</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Bugs in the kernel's graphics drivers. They are large, and this surface cannot be filtered generically (<a href="threat-model.html#row-d4">D4</a>).</li>
+</ul>
+<p>NVIDIA hardware has not been exercised on the development machine.</p>
+{{REQUIRE docs/THREAT_MODEL.md "device-ioctl right limited to those nodes"}}
+{{REQUIRE docs/THREAT_MODEL.md "Kernel GPU drivers are large; this surface cannot be filtered generically."}}
+{{REQUIRE docs/THREAT_MODEL.md "with live TLS to Mojang); NVIDIA; launching Java 8-era versions"}}
+</article>
+</div>
+</section>
+
+<section class="section" id="broker">
+<h2>What the credential broker changes</h2>
+<p>Playing needs a handful of requests to Mojang's API that carry your access token; joining a server is one of them. Ordinarily the game holds the token and makes those requests itself, and then every mod in the game can read the token.</p>
+<p>With the credential broker, which is on by default in filtered network mode, the game is given a placeholder that is made for one launch. The launcher keeps the real token. It answers the game's HTTPS connections to Mojang's API itself, with a certificate authority that exists for one session and only in the sandbox's trust store, and attaches the real token only to requests on an explicit list (<a href="threat-model.html#row-j13">J13</a>):</p>
+<ul>
+<li>joining a server, the chat-signing key, and reads of the account; friends, settings, reports and telemetry are separate switches and off by default;</li>
+<li>everything that would change something and is not on the list is refused, and changes of skin, cape and name are refused under every configuration;</li>
+<li>a join is honoured once per open game connection that the relay carries, for the session's own profile, and the launcher rebuilds the forwarded request itself;</li>
+<li>replies that contain the token are withheld, and so is a reply to a request with the token that arrives in an encoding, because it could not be checked;</li>
+<li>everything the broker holds in memory for the game comes out of one budget for all connections.</li>
+</ul>
+<p>Realms is brokered the same way once you choose how its joins are approved; <a href="#realms">Realms</a> below says what changes.</p>
+{{REQUIRE docs/THREAT_MODEL.md "Credential broker (filtered mode, on by default)."}}
+{{REQUIRE docs/THREAT_MODEL.md "friends, settings, reports and telemetry are separate switches, off by default"}}
+{{REQUIRE docs/THREAT_MODEL.md "skin, cape and name changes are refused under every configuration"}}
+{{REQUIRE docs/THREAT_MODEL.md "A join is honoured once per open relayed game connection, for the session's own profile, and the forwarded body is rebuilt by the launcher. Replies that contain the token are withheld, and so is a reply to a credentialed request that arrives in an encoding (it could not be checked)."}}
+{{REQUIRE docs/THREAT_MODEL.md "comes out of one budget of 64 MiB over all connections"}}
+<div class="grid two">
+<div class="panel">
+<h3>What that buys</h3>
+<ul class="defended">
+<li>Nothing in the game can change your skin, cape or name, or carry the token away.</li>
+<li>Software running as you that reads the game's memory finds a placeholder there, not the token (<a href="threat-model.html#row-p7">P7</a>).</li>
+</ul>
+</div>
+<div class="panel caution">
+<h3>What remains, and what it costs</h3>
+<ul class="not-defended">
+<li>Code in the game can still ask for what is switched on: the reads of the account, and server joins. A join is spent on a game connection that the relay has just opened to a server you allowlisted, one join per connection, but it is not tied to that server: a mod that learns the hash some other server is waiting for, over chat on an allowlisted server for instance, can authorise a login as you on that other server, once for every game connection it opens. Without at least one allowlisted game server no join is honoured. Removing this needs a proxy for the login protocol, which is not built (<a href="threat-model.html#row-j13">J13</a>, <a href="threat-model.html#8-hardening-what-was-built-what-is-not">section 8</a>).</li>
+<li>The launcher now holds the access token for the whole session, in secret memory and in a process that has confined itself, and with the phone's services also a Spotify access token and, in <code>totp</code> mode, the Realms TOTP secret, never a refresh token. Without the broker it would hold no credential while the game runs (<a href="threat-model.html#6-where-the-implementation-deviates-from-the-written-requirements">section 6</a>).</li>
+<li>In <code>open</code> network mode, or with <code>network.broker.enabled = false</code>, the token itself is in the game. The launch log and the front end say so (<a href="threat-model.html#row-j13">J13</a>).</li>
+<li>The broker is tested against a stand-in for Mojang's API and a real sandboxed Java process. It has not been run against the real Mojang API.</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "Code in the JVM can still ask for what is switched on: the account reads, and server joins. A join is spent on a game connection the relay has just opened to an allowlisted server — one join per connection — but it is not tied to that server"}}
+{{REQUIRE docs/THREAT_MODEL.md "So a mod that learns the hash some other server is waiting for (over chat on an allowlisted server, for instance) can authorise a login as you on that third server; it can do that once for every game connection it opens"}}
+{{REQUIRE docs/THREAT_MODEL.md "What it needs is at least one allowlisted game server; without one no join is ever honoured. Removing this needs a login-protocol proxy (§8)."}}
+{{REQUIRE docs/THREAT_MODEL.md "Not built, with the reason each is still open: Login-protocol proxy."}}
+{{REQUIRE docs/THREAT_MODEL.md "with the broker it holds the access token for the session (in secret memory, in a process that has confined itself) and the game holds none; with the phone's services also a Spotify access token and, in totp mode, the Realms TOTP secret — never a refresh token"}}
+{{REQUIRE docs/THREAT_MODEL.md "the launch log and the front end say so"}}
+{{REQUIRE docs/THREAT_MODEL.md "the broker against the real Mojang API (it is tested against a stand-in Mojang and a real sandboxed JVM)"}}
+</div>
+</div>
+</section>
+
+<section class="section" id="phone">
+<h2>The companion mod and the in-game phone</h2>
+<p>In Fabric profiles the launcher adds a mod of its own, the companion: compiled from source with the launcher, embedded in the launcher binary, and handed to the game for one session at a time as two read-only files outside <code>mods/</code>, which stays exactly what you signed. It does so by itself for the ten Minecraft versions it was run with, and with <code>force = true</code> for the other versions from 1.20.1 to 26.3. On every one of them it gives the game an in-game phone, a redone title screen and darker menus (<a href="companion.html">the companion mod</a>, <a href="phone.html">the phone</a>).</p>
+{{REQUIRE README.md "The launcher adds the mod by itself to Fabric profiles of the ten Minecraft versions it was run with (Minecraft versions; force = true adds it to the other versions from 1.20.1 to 26.3)"}}
+{{REQUIRE README.md "It is compiled from source together with the launcher, embedded in the launcher binary, and added for one session at a time as two read-only files outside mods/, which stays exactly what you signed."}}
+{{REQUIRE docs/COMPANION.md "On every Fabric release from 1.20.1 to 26.3 it gives the game the in-game phone (PHONE.md), a redone home screen and darker menus"}}
+<p><strong>Neither is a security feature.</strong> The mod runs inside the game next to every other mod and enforces nothing; any other mod can change it, imitate it or switch it off. What it reports to the launcher is written into the launch log, marked as coming from the game, and never acted on (<a href="threat-model.html#row-j19">J19</a>). The phone is part of that mod: what it shows and what you type into it is visible to every mod in the game, and any code in the game can do whatever the phone can do. Type nothing secret into it.</p>
+{{REQUIRE README.md "It is a convenience, not a security feature: it runs inside the game next to every other mod and enforces nothing. What it reports over its socket is written into the launch log, marked as coming from the game, and never acted on."}}
+{{REQUIRE docs/THREAT_MODEL.md "What it shows and what you type into it is visible to every mod in the game, and any code in the game can do whatever the phone can do (H2–H5); type nothing secret into it."}}
+<p>What keeps that from mattering is on the launcher's side, outside the game's sandbox.</p>
+<div class="grid two">
+<article class="panel">
+<p class="label">The channel and the dispatcher</p>
+<h3>A fixed vocabulary per app, and rate limits</h3>
+<p>The phone's commands reach the launcher over the companion's one socket, and the launcher reads them only after it has confined itself.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>A command an app does not have, or one beyond its rate. Every command is parsed strictly, routed only to an app of this launch by its exact name, refused unless its verb is in that app's fixed list, and refused when that verb's budget is empty; all connections together are limited per second as well (<a href="threat-model.html#row-h1">H1</a>).</li>
+<li>Paths, addresses, URLs, command lines and code: no argument of a command is ever used as one (<a href="threat-model.html#row-h1">H1</a>).</li>
+<li>Secrets reaching the game. What the launcher sends the phone is state for display, pictures and short notices, never a token, a cookie, the browser's profile or the TOTP secret (<a href="threat-model.html#row-h3">H3</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Any code in the game sending any command an app accepts, at the rate it accepts. The vocabulary and the limits are the defence, not the sender's identity, which does not exist (<a href="threat-model.html#row-h1">H1</a>).</li>
+<li>Any code in the game taking the phone's connection over, reading everything the launcher sends the phone, or drawing a fake phone or a fake prompt (<a href="threat-model.html#row-h1">H1</a>, <a href="threat-model.html#row-h5">H5</a>).</li>
+<li>A bug in the frame reader or the dispatcher. That would be a bug in the trusted base, like one in the DNS or SNI parser; both are small, driven by generated input, and run in the confined launcher (<a href="threat-model.html#row-h1">H1</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "routed only to an app of this launch by its exact name, refused unless its verb is in that app's fixed list (PhoneApp::limits), and refused when that verb's token bucket is empty; no argument is ever a path, a URL, a command line or code"}}
+{{REQUIRE docs/THREAT_MODEL.md "all connections together at most 50 frames and 200 KiB a second"}}
+{{REQUIRE docs/THREAT_MODEL.md "no token, cookie, profile or TOTP secret is ever in a state, a picture or a notice"}}
+{{REQUIRE docs/THREAT_MODEL.md "Any code in the game can send any command an app accepts, at the rate it accepts: the vocabulary and the limits are the defence, not the sender's identity (there is none). Any code in the game can take the phone over"}}
+{{REQUIRE docs/THREAT_MODEL.md "A bug in the frame reader or the dispatcher is a bug in the trusted base, like one in the DNS or SNI parser: small"}}
+</article>
+<article class="panel">
+<p class="label">Helpers</p>
+<h3>Each service in a sandbox of its own</h3>
+<p>The services run in the launcher, after it has confined itself, and in helpers that it starts before that point: headless Firefox for the browser, <code>xdg-dbus-proxy</code> for the Spotify app, ffmpeg for clips and the Realms dialer, each in a sandbox of its own that shares nothing with the game's. The Spotify token keeper runs in none, because it has to reach the token store. The game reaches none of these programs.</p>
+{{REQUIRE README.md "Each is started before the launcher confines itself, and all but one run in a sandbox of their own (bubblewrap, Landlock and a system-call filter) that shares nothing with the game's sandbox except what the feature needs"}}
+{{REQUIRE README.md "The game reaches none of these programs."}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>The launcher holding the Spotify refresh token while the game runs. The token keeper holds it, refreshes at most every 20 seconds and 60 times a session, and hands the launcher only access tokens (<a href="threat-model.html#row-h19">H19</a>).</li>
+<li>The helpers reaching your files and your desktop. The browser has no home directory, display, D-Bus or sound; the D-Bus proxy passes the Spotify app's player interfaces and nothing else of your session bus; the clip recorder has the game's display to read, a buffer in memory to write and no network (<a href="threat-model.html#row-h11">H11</a>, <a href="threat-model.html#row-h17">H17</a>, <a href="threat-model.html#row-h21">H21</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>The token keeper running outside any sandbox for the whole session (<a href="threat-model.html#row-h19">H19</a>).</li>
+<li>A clip recorder taken over through ffmpeg reading the display it was given: with the nested compositor the game's own, on your session's X display the whole X session, as the game itself has it in that mode (<a href="threat-model.html#row-h21">H21</a>).</li>
+<li>Whatever program owns the Spotify app's name on your session bus showing the phone made-up titles (<a href="threat-model.html#row-h17">H17</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "refreshes at most every 20 s and 60 times a session"}}
+{{REQUIRE docs/THREAT_MODEL.md "The keeper runs outside any sandbox for the whole session."}}
+{{REQUIRE docs/THREAT_MODEL.md "no home directory, no other files of yours, nothing of the game's sandbox, no display, no D-Bus, no sound"}}
+{{REQUIRE docs/THREAT_MODEL.md "The launcher can reach only the player and properties interfaces of that one name on that one path: the proxy refuses the rest."}}
+{{REQUIRE docs/THREAT_MODEL.md "A compromised recorder can read the display it was given — with the nested compositor the game's own display; on the session's X display the whole X session"}}
+{{REQUIRE docs/THREAT_MODEL.md "Such a program can show the phone made-up titles"}}
+</article>
+<article class="panel caution">
+<p class="label">Spotify</p>
+<h3>The desktop app, and the Web API if you set it up</h3>
+<p>The phone controls the Spotify desktop app on this machine over D-Bus, through the proxy, and shows what is playing. With an application of your own and <code>bastion-mc spotify login</code> it can also use the Spotify Web API: search, the queue, your devices.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Anything beyond the app's vocabulary. Only the six documented kinds of <code>spotify:</code> address can be opened, only a device the launcher listed can be named, and a search only ever becomes a query value; no token, URL, path or image id reaches the game. Web API calls come out of local budgets, 60 a minute in all (<a href="threat-model.html#row-h15">H15</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Code in the game pausing, skipping, changing the volume, opening or queuing anything of those six kinds, and moving playback to another of your devices. It sees what you listen to and the names of your devices (<a href="threat-model.html#row-h15">H15</a>, <a href="threat-model.html#row-h3">H3</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "open only the six documented kinds of spotify: URI (track, album, playlist, artist, episode, show)"}}
+{{REQUIRE docs/THREAT_MODEL.md "transfer only a device id from the last devices answer; search 1 to 200 characters that only ever become a percent-encoded query value. No token, URL, path or image id reaches the game."}}
+{{REQUIRE docs/THREAT_MODEL.md "60 a minute in all"}}
+{{REQUIRE docs/THREAT_MODEL.md "Code in the game can pause, skip, change the volume, open or queue anything of those six kinds, and move playback to another of your devices"}}
+</article>
+<article class="panel caution">
+<p class="label">Browser and Discord</p>
+<h3>Listed sites only, each within budgets</h3>
+<p>The phone's browser is the installed Firefox, headless, in a sandbox of its own whose only way out is the launcher's relay. It shows only the sites you list, Discord as a preset among them, and holds each site to budgets of requests, calls, connections and bytes per minute. You sign in to a site outside the game, with <code>bastion-mc browser login &lt;site&gt;</code>; the password manager is off, so the profile keeps the site's session, not your password. The browser is off by default.</p>
+{{REQUIRE docs/THREAT_MODEL.md "The password manager is off (the profile keeps the site's session, not your password)"}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Opening anything but a listed site, or a host the open site does not list. Name lookups are answered only for the open site's hosts, and a connection is taken only when its TLS handshake names exactly one of them (<a href="threat-model.html#row-h9">H9</a>).</li>
+<li>The game reading the profile, its cookies or a site's token. The phone gets pictures, the host name, the page title and short notices; the profile is not in the game's sandbox, and the confined launcher cannot open it either (<a href="threat-model.html#row-h8">H8</a>, <a href="threat-model.html#row-h12">H12</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>While the browser runs, code in the game doing what a person at that page could do: in a page where you are signed in, as you, within the site's budgets (<a href="threat-model.html#row-h8">H8</a>).</li>
+<li>Other software running as you reading the site sessions in the profile (<a href="threat-model.html#row-h12">H12</a>).</li>
+<li>On X11, other programs on your display reading what you type into the sign-in window (<a href="threat-model.html#row-h13">H13</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "Name lookups are answered only for hosts of the site that is open"}}
+{{REQUIRE docs/THREAT_MODEL.md "whose TLS ClientHello names exactly that host"}}
+{{REQUIRE docs/THREAT_MODEL.md "cannot read the profile, cookies or tokens (what the browser sends the phone is pictures, the host name, the page title and short notices)"}}
+{{REQUIRE docs/THREAT_MODEL.md "The game cannot reach it (it is not in the game's sandbox); the confined launcher cannot open it"}}
+{{REQUIRE docs/THREAT_MODEL.md "While the browser runs, everything a person at that page could do — in a page where you are signed in, as you"}}
+{{REQUIRE docs/THREAT_MODEL.md "The browser's profile at rest — other programs running as you (U) read the site sessions in it Not defended against U"}}
+{{REQUIRE docs/THREAT_MODEL.md "On X11 the window is an X client like any other: X has no isolation between clients, so other programs on your display can read what you type into it."}}
+</article>
+<article class="panel">
+<p class="label">Clips</p>
+<h3>The last moments of the game, kept as video</h3>
+<p>With clips on (off by default), the launcher records the game's window into a buffer in memory, and the phone saves the last seconds as a clip into a folder of yours. A clip has no sound, and with a Wayland display there is no recording at all.</p>
+{{REQUIRE docs/THREAT_MODEL.md "no sound is recorded; with a Wayland display there is no recording at all"}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>The game naming a path. A clip is named by an id the launcher made up, saves per minute and the number and total size of clips are capped, and of the folder only this feature's own clips are ever removed (<a href="threat-model.html#row-h16">H16</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Code in the game deleting every clip this feature made, keeping the folder full up to the cap, and saving the last moments of whatever the game showed (<a href="threat-model.html#row-h16">H16</a>).</li>
+<li>Other windows in a clip. On your session's X display without a compositing window manager, a clip can show windows that overlap the game (<a href="threat-model.html#row-h22">H22</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "A clip is named by an id the launcher made up, never by a path"}}
+{{REQUIRE docs/THREAT_MODEL.md "nothing else in the folder is ever touched"}}
+{{REQUIRE docs/THREAT_MODEL.md "Code in the game can delete every clip this feature made, keep the folder full up to the cap, and save the last moments of whatever the game showed."}}
+{{REQUIRE docs/THREAT_MODEL.md "On the session's X display without a compositing window manager, X returns what is on screen in the window's area, which can include other windows that overlap the game."}}
+</article>
+<article class="panel caution" id="realms">
+<p class="label">Realms</p>
+<h3>Brokered, and every join approved by you</h3>
+<p>Realms joins are refused unless you choose how they are approved (<code>[realms] approve</code>, off by default). Then the credential broker also answers for Realms, by a fixed table, and every join waits: the launcher shows the Realm, the server address and, in <code>code</code> mode, a six-digit code, in its own output and in the front end, and you type that code, or in <code>totp</code> mode your authenticator's, into the phone's Realms app. An approved join gets one connection, within two minutes, to exactly the server Realms named, made by the Realms dialer (<a href="threat-model.html#row-j21">J21</a>, <a href="threat-model.html#row-j22">J22</a>, <a href="threat-model.html#row-j23">J23</a>). It needs a signed-in account, the filtered network with the broker, and the phone: a launch without a phone refuses Realms approvals up front.</p>
+{{REQUIRE docs/THREAT_MODEL.md "With approve = \"off\" Realms is not brokered and its joins are refused"}}
+{{REQUIRE docs/THREAT_MODEL.md "the broker answers for Realms' hosts"}}
+{{REQUIRE docs/THREAT_MODEL.md "by a fixed table"}}
+{{REQUIRE docs/THREAT_MODEL.md "A join is held until you approve it outside the game"}}
+{{REQUIRE docs/THREAT_MODEL.md "one connection, within 120 s, which the relay connects to exactly the address Realms named (public addresses only)"}}
+{{REQUIRE docs/THREAT_MODEL.md "A launch without a phone to type the code into — a vanilla instance, the companion not added, phone = false — refuses Realms approvals up front"}}
+{{REQUIRE docs/THREAT_MODEL.md "only in a signed-in launch on the filtered network with the broker, never in demo mode or a burner session, and only where the launch has the phone to type the approval into"}}
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Owner operations: configuring, resetting or deleting a Realm, uploading, downloading or restoring worlds, inviting, opping or removing players. They are refused before they leave the machine (<a href="threat-model.html#row-j21">J21</a>).</li>
+<li>A join you did not approve. Until you do, the game gets nothing but “try again”, and the pass address leads nowhere (<a href="threat-model.html#row-j22">J22</a>).</li>
+<li>The token reaching the game through Realms. The broker rebuilds the session cookie around the real token and drops every other cookie and header (<a href="threat-model.html#row-j21">J21</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Code in the game accepting an invitation someone sent you, redeeming an invite code it knows, agreeing to the Realms terms in your name, and reading your Realms list (<a href="threat-model.html#row-j21">J21</a>).</li>
+<li>In <code>totp</code> mode, a code spent on another prompt. The code is not bound to the prompt it was typed for, so code in the game that reads what you type can spend it on another of your Realms; <code>code</code> mode binds the code to its prompt (<a href="threat-model.html#row-j22">J22</a>).</li>
+<li>An approval is only as good as your reading of the prompt, and whoever can read your terminal or the front end can read the code (<a href="threat-model.html#row-j22">J22</a>).</li>
+<li>None of it has run: no launch with approvals on, nothing against the real Realms service (<a href="threat-model.html#row-j22">J22</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "every owner operation (configure, switch or reset a world, upload, download or restore backups, invite, op or remove players, open, close, delete, create) is answered 403 here, flagged [SECURITY], and never leaves the machine"}}
+{{REQUIRE docs/THREAT_MODEL.md "Until then the game gets 503 with Retry-After: 3 and nothing else, and the pass address leads nowhere"}}
+{{REQUIRE docs/THREAT_MODEL.md "the broker writes sid=token:<real token>:<profile>"}}
+{{REQUIRE docs/THREAT_MODEL.md "every other cookie and header is dropped"}}
+{{REQUIRE docs/THREAT_MODEL.md "code in the game can accept a pending invitation (from someone who invited you), redeem an invite code it knows, agree to the Realms terms in your name and read your Realms list"}}
+{{REQUIRE docs/THREAT_MODEL.md "In totp mode a code is not bound to a prompt"}}
+{{REQUIRE docs/THREAT_MODEL.md "The approval is only as good as your reading of the prompt"}}
+{{REQUIRE docs/THREAT_MODEL.md "The code is on your terminal and in the front end; whoever can read those can approve one join"}}
+{{REQUIRE docs/THREAT_MODEL.md "A launch with approvals on was never run (it needs an account; demo mode turns Realms off), nor a join against the real Realms service."}}
+</article>
+<article class="panel">
+<p class="label">Settings sync</p>
+<h3>Your settings, in step across instances</h3>
+<p>On by default: video, sound volumes, mouse and controls, key bindings, language, chat and accessibility follow you from instance to instance, translated between Minecraft versions as Minecraft itself translates them. A burner session takes no part.</p>
+<p class="label">Stops</p>
+<ul class="defended">
+<li>Anything but a listed setting, or a value of another shape, crossing to your other instances: never free text, a resource pack, a server, anything about one world or one server, privacy choices or this machine's devices (<a href="threat-model.html#row-j24">J24</a>).</li>
+</ul>
+<p class="label">Does not stop</p>
+<ul class="not-defended">
+<li>Code in the game of one instance changing, through its <code>options.txt</code>, the listed settings of your other instances: binding a key, changing a volume, the field of view or the language (<a href="threat-model.html#row-j24">J24</a>).</li>
+</ul>
+{{REQUIRE docs/THREAT_MODEL.md "Only settings on an explicit list cross (sync::keys: video, sound volumes, mouse and controls, key bindings, language, chat, accessibility"}}
+{{REQUIRE docs/THREAT_MODEL.md "Never free text, a resource pack, a server, anything about one world or one server, privacy choices or this machine's devices."}}
+{{REQUIRE docs/THREAT_MODEL.md "A burner session neither reads nor writes it"}}
+{{REQUIRE docs/THREAT_MODEL.md "Code in the game of one instance can bind a key in your other instances, change a volume, the field of view or the language."}}
+</article>
+</div>
+<p>Spotify, the browser and clips are prepared only when there is a phone to serve. Everything on the phone was run against stand-ins: none of the services that need an account of yours, the Spotify Web API, a signed-in Discord and Realms, has run against the real service (<a href="#not-verified">what has not been verified</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "Spotify, clips and the browser are prepared only when there is a phone to serve"}}
+{{REQUIRE README.md "Neither has anything of the fourth round that needs an account of yours: the Spotify Web API, a signed-in Discord in the phone's browser, Realms."}}
+<p><a href="threat-model.html#47-the-in-game-phone-and-its-services">Threat model 4.7, rows H1 to H23</a> · <a href="phone.html">The phone</a> · <a href="companion.html">The companion mod</a></p>
+</section>
+
+<section class="section" id="not-defended">
+<h2>What is not defended</h2>
+<p>These are the sixteen points of section 5 of the threat model, in the same order and in plainer words. The <a href="threat-model.html#5-not-defended--read-this-before-relying-on-it">list in the threat model</a> is the authoritative one.</p>
+<div class="panel danger">
+<ol>
+<li><strong>Other software running as you.</strong> Anything else under your account can read the game's memory, read the refresh token from the kernel keyring of the same login session, replace the launcher binary in your <code>PATH</code>, or edit <code>config.toml</code>. That includes the age vault: a hardware-backed identity makes a copy of the vault file useless without the device, but such software can ask the connected device to decrypt, and it can add a recipient to a recipients file of your own, so that the next stored token is encrypted to it as well. Only a root-owned <code>/etc/bastion-mc/age-recipients</code> takes the recipients out of its reach, and that closes this quiet variant and nothing more: software that puts itself between you and the launcher has the token the moment you launch. A launcher that runs as you cannot defend you from yourself; a dedicated UNIX account for gaming can (<a href="threat-model.html#row-p7">P7</a>, <a href="dedicated-account.html">the guide</a>).</li>
+<li><strong>An X11 session without gamescope, once <code>allow_x11</code> is set.</strong> The game is then a client of your session's X server. With gamescope it is on a display of its own (<a href="threat-model.html#row-d1">D1</a>).</li>
+<li><strong>The session token inside the game when the broker is not in use:</strong> <code>open</code> network mode, or <code>network.broker.enabled = false</code>. With the broker, what remains is that code in the game can request what is switched on: reads of the account, and one join per game connection it opens, which is good for a login on any server, not only the one the connection goes to (<a href="threat-model.html#row-j13">J13</a>).</li>
+<li><strong>The microphone, while Pulse audio is enabled.</strong> The game can record, and where a server rule names a voice port, recorded sound can also leave as datagrams to that server. Loading modules through the same socket is closed: the launcher refuses the socket unless the server denies module loading (<a href="threat-model.html#row-d3">D3</a>, <a href="threat-model.html#row-j20">J20</a>).</li>
+<li><strong>Vulnerabilities in the kernel and in graphics drivers</strong> that can be reached through the system calls and device calls the game is allowed to make (<a href="threat-model.html#row-j4">J4</a>, <a href="threat-model.html#row-d4">D4</a>).</li>
+<li><strong>Denial of service, partly.</strong> Memory, swap and the number of tasks are limited, and CPU time can be; the limits are read back from the kernel once the game runs, and <code>sandbox.cgroup = "require"</code> stops a launch whose limits are not in force. A hostile mod can still fill <code>saves/</code> and the scratch directory up to the free space of those file systems, and use all CPUs unless a quota is set. On the launcher's side, its logs, its connections and what it holds in memory for the game are bounded; the companion channel, the phone with its services and the voice relay have bounds of their own; and the phone's helpers have resource limits of their own where the game's are in use, the browser's read back from the kernel and the clip recorder's only asked for.</li>
+<li><strong>Realms and UDP.</strong> Realms joins are refused unless you set <code>[realms] approve</code>, which is off by default. Then Realms is brokered, and every join needs an approval given outside the game: a code shown by the launcher, or your authenticator's, typed into the phone; a launch without a phone refuses Realms approvals up front. None of it was tried against the real Realms service, and a Realm with a resource pack probably fails to join. Apart from name lookups, which the launcher's own DNS responder answers inside the sandbox, UDP exists only as datagrams relayed to the ports that a server rule names, for voice chat, which gives point 8 a datagram form; LAN discovery and everything else over UDP do not exist in the sandbox (<a href="threat-model.html#row-j21">J21</a>, <a href="threat-model.html#row-j22">J22</a>, <a href="threat-model.html#row-j20">J20</a>, <a href="threat-model.html#row-j10">J10</a>).</li>
+<li><strong>Covert channels to an allowlisted server.</strong> Whatever the game may send to a server you allowlisted can carry data out. The relay sees an encrypted stream and cannot tell (<a href="threat-model.html#row-j10">J10</a>).</li>
+<li><strong>Hardware fingerprinting.</strong> Host name, machine id and network interfaces are synthetic or absent, but the graphics card's renderer string, the CPU model in <code>/proc/cpuinfo</code> and the amount of memory are the real ones.</li>
+<li><strong>The account at Microsoft.</strong> Nothing here revokes a session or secures the Microsoft account. What the launcher offers is about <a href="#account">noticing and reacting</a>.</li>
+<li><strong>The companion mod is not a defence.</strong> Any other mod in the same game can change it, imitate it or switch it off, and any program running as you that can edit <code>config.toml</code> can change its settings. Nothing in the threat model relies on it, and nothing it shows in the game can be trusted more than the game itself, the phone included (<a href="threat-model.html#row-j19">J19</a>, <a href="companion.html">the companion mod</a>).</li>
+<li><strong>Server rules.</strong> Fullbright, off by default, is forbidden on some servers, and the launcher knows nothing about any server's rules; a server may have rules about zoom and the HUD read-out too. The mod sends nothing to a server and leaves no trace in the protocol, which also means that a server cannot be shown that it is harmless.</li>
+<li><strong>A mod that is malicious as published.</strong> <code>profile add</code> and <code>profile check</code> say what the registry lists, not what a jar does, and <code>profile audit</code> says what a jar's classes name, not what they will do. The decision to run a jar is your signature; what contains it is the sandbox (<a href="threat-model.html#row-c8">C8</a> to <a href="threat-model.html#row-c12">C12</a>, <a href="threat-model.html#42-malicious-mod--in-jvm-code-execution-adversaries-m-s">section 4.2</a>).</li>
+<li><strong>The in-game phone is interface only.</strong> What it shows and what you type into it is visible to every mod in the game, and any code in the game can do whatever the phone can do; type nothing secret into it. Its clock shows the game's time zone, which is UTC unless you set <code>[sandbox] expose_timezone = true</code> (<a href="threat-model.html#row-h2">H2</a> to <a href="threat-model.html#row-h5">H5</a>).</li>
+<li><strong>The phone's browser while it runs.</strong> Whatever can drive the phone can act as you in a page where you are signed in; the launcher keeps the browser to the sites you listed and within their budgets, not to what you meant to do there. The sign-in window of <code>bastion-mc browser login &lt;site&gt;</code> is an ordinary client of an X11 display. The browser is off by default (<a href="threat-model.html#row-h8">H8</a>, <a href="threat-model.html#row-h13">H13</a>).</li>
+<li><strong>Versions within a family that were not started.</strong> The companion mod assumes that every Minecraft version of a family behaves like the one version of it that was run: their stand-ins are identical by construction, their behaviour was not observed (<a href="companion.html">the companion mod</a>).</li>
+</ol>
+</div>
+{{REQUIRE docs/THREAT_MODEL.md "read this before relying on it Other software running as you (U). It can read the game's memory (P7), read the refresh token from the kernel keyring (same login session), replace the launcher binary in $PATH, or edit config.toml."}}
+{{REQUIRE docs/THREAT_MODEL.md "That includes the age vault: a hardware-backed identity makes a copy of the vault file useless without the device, but it does not stop such software from asking the connected device to decrypt"}}
+{{REQUIRE docs/THREAT_MODEL.md "a recipients file of your own can be extended, and the token stored at the next launch is then encrypted to the added recipient too, without any touch. Only a root-owned /etc/bastion-mc/age-recipients takes the recipients (and the choice of store) out of its reach"}}
+{{REQUIRE docs/THREAT_MODEL.md "That file closes the quiet, lasting variant — one line added once — and nothing more: software that puts itself between you and the launcher (another bastion-mc earlier in $PATH, a wrapper, a preloaded library) has the token in the moment you launch"}}
+{{REQUIRE docs/THREAT_MODEL.md "A user-level launcher cannot defend the user from themself; a dedicated UNIX account for gaming can (MC_VAULT_ACCOUNT.md). X11 sessions without gamescope once allow_x11 is set (D1). With gamescope the game is on a display of its own."}}
+{{REQUIRE docs/THREAT_MODEL.md "on a display of its own. The session token inside the JVM when the broker is not in use: open network mode or network.broker.enabled = false (J13). With the broker, what remains is that code in the game can request what is switched on: account reads, and one join per game connection it opens — a join that is good for a login on any server, not only the one the connection goes to (J13)."}}
+{{REQUIRE docs/THREAT_MODEL.md "not only the one the connection goes to (J13). Microphone with Pulse audio enabled (D3); where a server rule names a voice port, recorded sound can also leave as datagrams to that server (J20). (Module loading through the same socket is closed: the launcher refuses the socket unless the server denies it.)"}}
+{{REQUIRE docs/THREAT_MODEL.md "unless the server denies it.) Kernel and GPU-driver vulnerabilities reachable through allowed syscalls/ioctls."}}
+{{REQUIRE docs/THREAT_MODEL.md "syscalls/ioctls. Denial of service, partly: memory, swap and the number of tasks are limited by a systemd scope (the game is killed inside its own group; the limits are read back from the kernel once the game runs, and sandbox.cgroup = \"require\" stops a launch whose limits are not in force), and CPU time can be (cpu_quota_percent). A hostile mod can still fill saves/ and the scratch directory up to the free space of those file systems, and use all CPUs unless a quota is set."}}
+{{REQUIRE docs/THREAT_MODEL.md "The companion channel, the phone and its services, and the voice relay have bounds of their own (J19, H1, H8, H15, H16, J20). The phone's helpers have resource limits of their own where the game's are in use (the browser's read back from the kernel, the clip recorder's only asked for). Realms and UDP: Realms joins are refused unless [realms] approve is set (it is \"off\" by default); then Realms is brokered (J21) and every join needs an approval given outside the game — a code shown by the launcher, or your authenticator's, typed into the phone (J22); a launch without a phone refuses Realms approvals up front."}}
+{{REQUIRE docs/THREAT_MODEL.md "None of it was tried against the real Realms service, and a Realm with a resource pack probably fails to join (the pack's address is not reachable from the sandbox). UDP exists only as relayed datagrams to the UDP ports that a server rule names (voice chat, J20) — which gives item 8 a datagram form —; LAN discovery and everything else over UDP does not exist in the sandbox. Covert channels to an allowlisted server. Whatever the game may send to a server you allowlisted can carry data out; the relay sees an encrypted stream and cannot tell."}}
+{{REQUIRE docs/THREAT_MODEL.md "(Landlock ABI 10) UDP only to the launcher's DNS port"}}
+{{REQUIRE docs/THREAT_MODEL.md "and cannot tell. Hardware fingerprinting. Host name, machine id and network interfaces are synthetic or absent, but the GPU's renderer string, the CPU model in /proc/cpuinfo and the amount of memory are the real ones."}}
+{{REQUIRE docs/THREAT_MODEL.md "are the real ones. The account at Microsoft. Nothing here revokes a session or secures the Microsoft account; §4.6 is about noticing and reacting. The companion mod is not a defence."}}
+{{REQUIRE docs/THREAT_MODEL.md "The companion mod is not a defence. It can be changed, imitated or switched off by any other mod in the same JVM, and its settings by any program running as you that can edit config.toml (item 1). Nothing in this document relies on it, and nothing it shows in the game can be trusted more than the game itself (J19, COMPANION.md). That includes the phone (item 14). Server rules. Fullbright (off by default) is forbidden on some servers, and the launcher knows nothing about any server's rules."}}
+{{REQUIRE docs/THREAT_MODEL.md "a server may have rules about those too"}}
+{{REQUIRE docs/THREAT_MODEL.md "so it sends nothing to a server and leaves no trace in the protocol — which also means that a server cannot be shown that it is harmless. A mod that is malicious as published. profile add and profile check say what the registry lists, not what a jar does (C8–C12); profile audit says what a jar's classes name, not what they will do. The decision to run a jar is your signature; what contains it is §4.2. The in-game phone is interface only."}}
+{{REQUIRE docs/THREAT_MODEL.md "The in-game phone is interface only. What it shows and what you type into it is visible to every mod in the game, and any code in the game can do whatever the phone can do (H2–H5); type nothing secret into it. Its clock shows the game's time zone, which is UTC unless [sandbox] expose_timezone = true. The phone's browser while it runs. Whatever can drive the phone can act in a page where you are signed in, as you (H8); the launcher keeps the browser to the sites you listed and within their budgets, not to what you meant to do there. The sign-in window of bastion-mc browser login is an ordinary client of an X11 display (H13). Off by default. Versions within a family that were not started."}}
+{{REQUIRE docs/THREAT_MODEL.md "Versions within a family that were not started. The companion assumes that every version of a family behaves like the representative that was run: their stand-ins are identical by construction, their behaviour was not observed (COMPANION.md). 6. Where the implementation deviates"}}
+</section>
+
+<section class="section" id="not-verified">
+<h2>What has not been verified</h2>
+<p>Some of what is described above exists as code with tests, but has not been exercised against the real services or on the hardware in question. The list is the threat model's own, word for word:</p>
+<blockquote>
+{{PARAGRAPH docs/THREAT_MODEL.md "Not exercised:"}}
+</blockquote>
+<p>It closes <a href="threat-model.html#7-experiments-behind-the-claims-development-machine">section 7 of the threat model</a>, which lists the experiments that were run. The <a href="manual.html#status">status table in the manual</a> says for each area how it was tested.</p>
+</section>
+
+<section class="section" id="account">
+<h2>If the account is compromised anyway</h2>
+<p>An account is more often lost somewhere else than on this machine: a phished password, a “verification” app that was given consent. The launcher cannot prevent that. It can notice it and make the response quick (<a href="threat-model.html#46-the-account-itself-after-a-compromise-elsewhere">threat model, section 4.6</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "The launcher cannot prevent that; it can notice it and make the response quick."}}
+<div class="grid three">
+<article class="panel">
+<p class="label">Notice</p>
+<h3>The profile canary</h3>
+<p>The launcher pins what the account looks like (name, skin, cape) and compares it at every sign-in, before the token is used for anything. By default a change that was not made through the launcher stops the launch until you accept it with <code>bastion-mc canary accept</code>.</p>
+<p>Its limits: it is a tripwire for visible tampering only, and an intruder who just plays trips nothing. The pin is a file of yours, so it guards against the account changing elsewhere, not against software on this machine (<a href="threat-model.html#row-a1">A1</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "The profile Mojang returns at every sign-in is compared with the pinned one before the token is used for anything."}}
+{{REQUIRE docs/THREAT_MODEL.md "stops the launch (auth.canary = \"enforce\", the default) until bastion-mc canary accept"}}
+{{REQUIRE docs/THREAT_MODEL.md "A tripwire for visible tampering only: an intruder who just plays trips nothing. The pin is a file of the user: it guards against the account changing elsewhere, not against software on this machine."}}
+</article>
+<article class="panel">
+<p class="label">React</p>
+<h3>Scram</h3>
+<p><code>bastion-mc scram</code> first stops whatever could still store a credential: running launches, with the phone's helpers, pending sign-ins and the Spotify token keeper. Then it removes the credentials: every refresh token in the kernel keyring and every vault file, and in a full run also the Spotify refresh token and the Realms TOTP secret. Every run deletes the phone browser's profile with its record of sign-ins, unless a <code>bastion-mc browser login &lt;site&gt;</code> window still holds it. What it could not do or confirm is a line starting <code>COULD NOT</code>, and its exit status is then 1. It needs no network.</p>
+<p>Its limits: it revokes nothing at Microsoft or Mojang, and deleted files are not securely wiped; its output says both every time. A token that was copied earlier works until you sign out everywhere, and a session token that was already issued lives for up to about 24 hours. Nothing is revoked at Spotify or at the sites the browser was signed in to either: they keep the session until you sign out there. Removing the Spotify and TOTP keys was never run against a real keyring (<a href="threat-model.html#row-a2">A2</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "First it stops everything that could still write a credential: running launches (which takes the game, its display server, the phone's helpers and the in-memory session token with it) and pending sign-ins (spotify login too), the Spotify token keeper"}}
+{{REQUIRE docs/THREAT_MODEL.md "Then the credentials: every refresh token in the kernel keyring (the kernel's own list is read before and after) and every age vault file"}}
+{{REQUIRE docs/THREAT_MODEL.md "A full run — one not limited to named accounts — also removes the Spotify refresh token and the Realms TOTP secret from the keyring"}}
+{{REQUIRE docs/THREAT_MODEL.md "every run deletes the in-game browser's profile and its record of sign-ins, unless a browser still holds the profile (a browser login window, which nothing here stops)"}}
+{{REQUIRE docs/THREAT_MODEL.md "Whatever could not be done or confirmed is a line starting COULD NOT, and the exit status is then 1"}}
+{{REQUIRE docs/THREAT_MODEL.md "No network needed."}}
+{{REQUIRE docs/THREAT_MODEL.md "Revokes nothing at Microsoft or Mojang, and deleted files are not securely wiped — its output says both every time. A token copied earlier works until \"sign out everywhere\"; an issued session token lives up to ~24 h."}}
+{{REQUIRE docs/THREAT_MODEL.md "Nothing is revoked at Spotify (your Spotify account settings, \"Manage apps\") or at the sites the browser was signed in to (they keep the session until you sign out there)."}}
+{{REQUIRE docs/THREAT_MODEL.md "The removal of the Spotify and TOTP keys was never run against the real keyring"}}
+</article>
+<article class="panel">
+<p class="label">Recover</p>
+<h3>The runbook</h3>
+<p>The steps for securing the Microsoft account, with the exact addresses, are built into the launcher (<code>bastion-mc wiki scram</code>) so that you do not have to search the web for them under pressure.</p>
+<p>Its limits: the links were checked on the date in the file and can go stale; Minecraft's help centre could not be read by a program, so of its request form only the existence was checked; and a compromised machine can show a different text (<a href="threat-model.html#row-a3">A3</a>).</p>
+{{REQUIRE docs/THREAT_MODEL.md "Links were checked on the date in the file and can go stale"}}
+{{REQUIRE docs/THREAT_MODEL.md "Minecraft's help centre could not be read by a program, so only the existence of its request form was checked."}}
+{{REQUIRE docs/THREAT_MODEL.md "A compromised machine can show a different text."}}
+</article>
+</div>
+<p class="actions"><a class="button" href="emergency.html">Open the emergency runbook</a></p>
+</section>
+
+<section class="section" id="further">
+<h2>Read further</h2>
+<div class="grid three">
+<div class="panel quiet">
+<h3><a href="threat-model.html">Threat model</a></h3>
+<p>Every attack with its defence and what remains, and for most rows the test behind the claim; the experiments; what was built and what was not.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="token-injection.html">Token path</a></h3>
+<p>How the access token, or by default a placeholder for it, gets into the game, and where that guarantee ends.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="dedicated-account.html">Dedicated account</a></h3>
+<p>What to do about other software running as you: <code>ptrace_scope</code> and a separate UNIX account.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="phone.html">The phone</a></h3>
+<p>Each app of the in-game phone, its settings and limits, what leaves the machine and what the game can see.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="companion.html">Companion mod</a></h3>
+<p>The launcher's own Fabric mod: when it is added, its channel to the launcher, how it is built and what was verified.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="mods.html">Mods</a></h3>
+<p>Signed profiles, mods from Modrinth with verified hashes, what Modrinth learns, and voice chat on a server.</p>
+</div>
+</div>
+</section>

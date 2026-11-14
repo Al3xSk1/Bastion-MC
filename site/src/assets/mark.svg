@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+<title>bastion-mc</title>
+<path fill="#0a0d10" d="M10 0h54v54L54 64H0V10z"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="4.5" stroke-linejoin="round" d="M32 19 54 10 45 32 54 54 32 45 10 54 19 32 10 10z"/>
+<path fill="#3fd9e6" d="M26 26h12v12H26z"/>
+</svg>

@@ -1,0 +1,106 @@
+# Builds the project website with site/build.py and publishes it with GitHub Pages.
+#
+# Before the first run: repository Settings -> Pages -> "Build and deployment" -> Source:
+# "GitHub Actions". Until then the "Configure Pages" step fails: it reads the site's
+# address from the Pages settings and does not switch Pages on.
+#
+# Every action is pinned to the commit of a release, with the release's tag in a comment:
+# a tag can be moved, a commit cannot. To update one, find the commit of its newest release,
+# read what changed, and replace the commit and the comment together:
+#
+#   curl -s https://api.github.com/repos/actions/checkout/releases/latest     # "tag_name"
+#   curl -s https://api.github.com/repos/actions/checkout/git/ref/tags/TAG    # "object"
+#
+# If the object's "type" is "commit", its "sha" is the commit. If it is "tag" (an annotated
+# tag), the commit is the "object" "sha" of .../git/tags/SHA.
+name: Website
+
+on:
+  # Every push to main, with no path filter. What the generator reads is not a fixed list
+  # of paths: besides the site's own sources, the documents it renders, the emergency links
+  # (crates/proto/src/runbook.rs) and the help text (src/cli.rs), it checks that every file
+  # a document links to exists, and a document may link to any file of the repository. A
+  # filter would leave a push that renames or deletes such a file unbuilt, and the published
+  # page would keep a link that GitHub no longer serves. A run on unchanged inputs builds
+  # the same pages and publishes them again.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The token starts with read access to the code and nothing else. Each job states what it
+# has; only the deploy job can write, and only to Pages.
+permissions:
+  contents: read
+
+# One run per branch at a time. A run that is deploying is never cancelled; of the runs
+# that wait behind it, only the newest is kept, so the last push is what ends up published.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and check
+    # A named image instead of "latest": its python3 is 3.14, the version the generator
+    # is developed and tested with. Nothing is installed.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: read # "Configure Pages" asks the API for the site's address
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The unit tests of the converter and the generator: what the converter refuses, and
+      # that nothing from a document can become markup. They need python3 and nothing else.
+      - name: Run the generator's tests
+        run: python3 -B -m unittest discover -s site -p "test_*.py"
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # The two addresses that no committed file contains. They reach the generator as
+      # arguments, by way of the environment: no expression is pasted into the script.
+      # An empty one stops the run here, with an annotation that says so; the generator
+      # refuses an empty address as well, and one that is not https.
+      - name: Build the site and check it
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          if [ -z "$REPO_URL" ] || [ -z "$SITE_URL" ]; then
+            echo "::error::the repository address or the site address is empty"
+            exit 1
+          fi
+          python3 --version
+          python3 site/build.py --repo-url "$REPO_URL" --site-url "$SITE_URL" --check
+
+      # This action leaves out dot files, so the marker file that the generator keeps in
+      # its output directory is not published.
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    # Only the default branch is ever published. Started by hand on another branch, the
+    # workflow builds and checks that branch and stops here.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      pages: write # create the deployment
+      id-token: write # prove to Pages which run and which branch it comes from
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

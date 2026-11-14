@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="{{CSP}}">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0d10">
+<title>{{TITLE}}</title>
+<meta name="description" content="{{DESCRIPTION}}">
+{{HEAD}}
+<link rel="icon" href="{{ROOT}}assets/mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{{ROOT}}assets/site.css">
+</head>
+<body class="{{BODY_CLASS}}">
+<a class="skip" href="#site-content">Skip to the content</a>
+<header class="site-header">
+<div class="bar">
+<p class="masthead"><a class="brand" href="{{ROOT}}index.html"><img src="{{ROOT}}assets/mark.svg" width="28" height="28" alt=""><span>bastion-mc</span></a> <span class="chip">pre-release</span></p>
+<nav class="site-nav" aria-label="Site">
+{{NAVIGATION}}
+</nav>
+</div>
+</header>
+<main id="site-content">
+{{CONTENT}}
+</main>
+{{FOOTER}}
+</body>
+</html>

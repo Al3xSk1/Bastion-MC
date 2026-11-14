@@ -1,0 +1,285 @@
+title: Get started | bastion-mc
+description: Requirements, building bastion-mc with cargo, registering your own sign-in application, and the first commands: doctor, an instance, a demo launch that needs no account, signing in, playing, a signed mod profile with the companion mod and its phone, and the graphical front end.
+nav: start
+---
+<p class="label">Get started</p>
+<h1>From the source to a first sandboxed launch</h1>
+<p class="lede">bastion-mc is pre-release software for Arch Linux. You build it from source, and you can try the sandbox in Mojang's demo mode before any account is involved. Signing in needs an application of your own at Microsoft, and its approval by Mojang can take days.</p>
+<div class="callout warning">
+<p class="label">What has been run, and what has not</p>
+{{PARAGRAPH README.md "Built and tested on Arch Linux"}}
+<p>The sign-in chain (Microsoft, Xbox, Minecraft) and everything that needs a signed-in account are implemented and tested against scripted replies and a stand-in for Mojang. They have not yet been run against the live services, and neither have the phone's services that need an account of yours: the Spotify Web API, a signed-in Discord, Realms. Not exercised on the development machine either, among other things: NVIDIA graphics, a real Wayland desktop session, launching game versions from the Java 8 era, the real <code>age</code> program with its hardware plugins, and coverage-guided fuzzing, which needs a nightly toolchain. The <a href="manual.html#status">status table in the manual</a> has the details, and the security overview has <a href="security.html#not-verified">the threat model's whole list</a>.</p>
+{{REQUIRE README.md "implemented and tested against scripted replies and a stand-in Mojang; not yet run against the live services"}}
+{{REQUIRE README.md "Neither has anything of the fourth round that needs an account of yours: the Spotify Web API, a signed-in Discord in the phone's browser, Realms."}}
+{{REQUIRE README.md "NVIDIA, Java 8-era versions end to end, real age binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) implemented, not exercised on the development machine"}}
+{{REQUIRE README.md "Not on a real Wayland desktop session, and playability inside gamescope is not assessed"}}
+</div>
+<nav class="toc" aria-label="On this page">
+<p class="label">On this page</p>
+<ol>
+<li><a href="#requirements">Requirements</a></li>
+<li><a href="#build">Build it</a></li>
+<li><a href="#display-and-sound">Before the first launch: display and sound</a></li>
+<li><a href="#oauth">Your own sign-in application</a></li>
+<li><a href="#first-commands">The first commands</a></li>
+<li><a href="#mods">Mods, the companion mod and the phone</a></li>
+<li><a href="#front-end">The graphical front end</a></li>
+<li><a href="#next">Where to go from here</a></li>
+</ol>
+</nav>
+
+<section class="section" id="requirements">
+<h2>Requirements</h2>
+<ul>
+<li>Arch Linux with kernel 6.12 or newer, <code>landlock</code> in the LSM list, and unprivileged user namespaces. Those are the Arch defaults. Newer kernels add more: the launcher's own confinement needs Landlock ABI 8 for its file and network part and ABI 9 for all of it (on an older kernel it is partial, and the launcher says so), and ABI 10, in Linux 7.2, adds rules for UDP.</li>
+<li>bubblewrap, and for each game version the Java release it declares. The launcher never downloads a Java runtime; it uses only root-owned ones under <code>/usr/lib/jvm</code>. For Java 17 and later it finds only a runtime installed from a jdk package (<code>jdk17-openjdk</code>, <code>jdk21-openjdk</code>, <code>jdk25-openjdk</code>), not from a jre package; for Java 8, <code>jre8-openjdk</code> will do. Minecraft 26.3 needs Java 25. With <code>match = "newer"</code> under <code>[java]</code> in <code>config.toml</code> the launcher takes the lowest installed release at or above the declared one instead. Its own refusal message still suggests the jre package, which does not help for Java 17 and later.</li>
+<li>On an X11 session: gamescope, which gives the game a display of its own.</li>
+<li>For the phone's services, if you want them: <code>xdg-dbus-proxy</code> for Spotify, Firefox for its browser, ffmpeg for clips.</li>
+<li>A systemd user session. It provides the resource limits.</li>
+<li>For building: <code>cargo</code>, a C compiler (the one Rust links with) and a JDK (<code>javac</code>) of release 17 or newer, because the companion mod is compiled with <code>--release 17</code>.</li>
+</ul>
+{{REQUIRE README.md "Kernel ≥ 6.12 with landlock in the LSM list and unprivileged user namespaces (the Arch defaults)."}}
+{{REQUIRE README.md "Newer kernels add more: the launcher's own confinement needs Landlock ABI 8 for its file and network part and ABI 9 for all of it (on older kernels it is partial, and said to be), ABI 10 (Linux 7.2) adds UDP rules"}}
+{{REQUIRE docs/THREAT_MODEL.md "Only root-owned runtimes under /usr/lib/jvm; nothing is ever downloaded."}}
+{{REQUIRE README.md "for Java 17 and later Arch puts that file only into the jdk packages (jdk17-openjdk, jdk21-openjdk, jdk25-openjdk, jdk-openjdk), not into the jre ones"}}
+{{REQUIRE README.md "a runtime installed from a jre package is not found. So install the jdk package of each Java release your game versions need; for Java 8, jre8-openjdk brings the file"}}
+{{REQUIRE README.md "Java 25 for Minecraft 26.3"}}
+{{REQUIRE README.md "with match = \"newer\" under [java] in config.toml (see below) it takes the lowest installed release at or above the declared one instead"}}
+{{REQUIRE README.md "The launcher's own refusal still suggests the jre package, which does not help for Java 17 and later"}}
+{{REQUIRE README.md "optional, for the phone: Spotify, its browser, clips"}}
+{{REQUIRE README.md "A systemd user session provides the resource limits."}}
+{{REQUIRE README.md "Building needs cargo, a C compiler (the one Rust links with) and a JDK (javac). That JDK must be 17 or newer: the companion mod is compiled with --release 17"}}
+<pre tabindex="0"><code>pacman -S bubblewrap jdk25-openjdk      # Java 25 for Minecraft 26.3: the jdk package, see above
+pacman -S gamescope                     # X11 sessions: gives the game a display of its own
+pacman -S xdg-dbus-proxy firefox ffmpeg # optional, for the phone: Spotify, its browser, clips</code></pre>
+</section>
+
+<section class="section" id="build">
+<h2>Build it</h2>
+<p>Get the source from <a href="{{REPO_URL}}" rel="noopener noreferrer">the repository</a> and build it with cargo.</p>
+<div class="grid two">
+<article class="panel">
+<p class="label">With cargo</p>
+<h3>Build in place</h3>
+<pre tabindex="0"><code>cargo build --release
+export PATH="$PWD/target/release:$PATH"
+bastion-mc --help</code></pre>
+<p>The launcher is then <code>target/release/bastion-mc</code>. The commands on this page call it by name, so put that directory on your <code>PATH</code>, as above, or call it by its path; <code>bastion-mc --help</code> lists every command and option. With <code>--workspace</code> the graphical front end is built as well.</p>
+{{REQUIRE README.md "cargo build --release leaves the program at target/release/bastion-mc. The commands in this file call it by name, so put that directory on your PATH (or call it by its path)"}}
+</article>
+<article class="panel caution">
+<p class="label">With makepkg</p>
+<h3>The Arch packages are a template</h3>
+<p><code>packaging/arch/PKGBUILD</code> makes two packages, <code>bastion-mc</code> and <code>bastion-mc-gui</code>. Until there is a release it is a template: it does not build your checkout, and <code>makepkg</code> builds whatever its <code>source=</code> line points to.</p>
+<p>On the development machine both packages were built from a tarball of the tree: their <code>check()</code> passes, and both binaries pass the hardening check.</p>
+{{REQUIRE README.md "packaging/arch/PKGBUILD does not build this checkout: until there is a release it is a template, and makepkg builds whatever its source= line points to."}}
+{{REQUIRE README.md "both build, their check() passes and both binaries pass the hardening check — run again on the merged tree of the third round, from a tarball of that tree"}}
+</article>
+</div>
+<p>Settings go in <code>~/.config/bastion-mc/config.toml</code>, which does not exist until you create it: <code>bastion-mc config example</code> prints a commented template of every key, and <code>bastion-mc config path</code> prints where the file goes.</p>
+{{REQUIRE README.md "Settings go in ~/.config/bastion-mc/config.toml, which does not exist until you create it: bastion-mc config example prints a commented template of every key, and bastion-mc config path prints where the file goes."}}
+</section>
+
+<section class="section" id="display-and-sound">
+<h2>Before the first launch: display and sound</h2>
+<p>A launch can be refused for two reasons that are decisions the launcher wants from you. <code>bastion-mc doctor</code> shows which kind of display isolation this machine offers.</p>
+<div class="grid two">
+<article class="panel caution">
+<p class="label">Display</p>
+<h3>Keeping the game off your session's display</h3>
+<p>X11 lets any client log keys, inject input into other windows and read the clipboard, so handing the game your session's X display would be a way out of the sandbox.</p>
+<p>On an <strong>X11</strong> session the launcher runs the game inside gamescope, a nested compositor, where the game has a display server of its own. Without gamescope the launch is refused, unless you set <code>allow_x11 = true</code> and accept that risk.</p>
+<p>On a <strong>Wayland</strong> session it asks the compositor for a socket that is marked as sandboxed. Where a compositor lacks the protocol for that, as on GNOME, the launcher says so and uses the session socket; <code>wayland_security_context = "require"</code> refuses instead.</p>
+<p>The manual lists the compositors and the options under <a href="manual.html#display-isolation">Display isolation</a>. Only sway was tested, and whether the game is playable inside gamescope (pointer capture, full screen) has not been assessed.</p>
+{{REQUIRE README.md "Without gamescope the launch is refused, unless you set allow_x11 = true and accept the risk."}}
+{{REQUIRE README.md "Where a compositor lacks it, the launcher says so and uses the session socket (wayland_security_context = \"require\" refuses instead)"}}
+{{REQUIRE README.md "Only sway was tested here."}}
+{{REQUIRE README.md "playability inside gamescope is not assessed"}}
+{{REQUIRE docs/THREAT_MODEL.md "Playability inside gamescope (pointer capture, full screen) is not assessed."}}
+</article>
+<article class="panel caution">
+<p class="label">Sound</p>
+<h3>For sound, your sound server has to refuse module loading</h3>
+<p>By default PulseAudio and pipewire-pulse let any client ask the server to load modules, and that leads out of the sandbox.</p>
+<p>With the default <code>audio = "pulse"</code>, the launcher asks your sound server before each launch, and refuses to hand the game the audio socket unless the server says no. To keep sound, switch module loading off once (PipeWire):</p>
+<pre tabindex="0"><code>mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
+echo 'pulse.properties = { pulse.allow-module-loading = false }' \
+    &gt; ~/.config/pipewire/pipewire-pulse.conf.d/90-no-module-loading.conf
+systemctl --user restart pipewire-pulse</code></pre>
+<p>After that, <code>pactl load-module</code> stops working for everything, which is the point. Otherwise set <code>audio = "none"</code>, or <code>allow_pulse_module_loading = true</code> to accept the risk. A third value, <code>audio = "alsa"</code>, hands the game the raw sound devices instead of a server's socket: playback and capture of every sound card, with no server to ask and no module-loading check, the most access of the three. With sound on, the game can record your microphone. The manual's section on <a href="manual.html#sound">sound</a> has the details.</p>
+{{REQUIRE README.md "refuses to hand the game the audio socket unless the server says no"}}
+{{REQUIRE README.md "Otherwise set audio = \"none\", or allow_pulse_module_loading = true to accept the risk."}}
+{{REQUIRE README.md "With audio on, the game can record your microphone (THREAT_MODEL D3). audio = \"alsa\" hands the game the raw sound devices (/dev/snd) instead of a server's socket: playback and capture of every sound card, with no server to ask and no module-loading check, the most access of the three."}}
+{{REQUIRE docs/THREAT_MODEL.md "only a clean \"access denied\" lets the launch continue"}}
+{{REQUIRE docs/THREAT_MODEL.md "Recording is possible with audio = \"pulse\""}}
+</article>
+</div>
+</section>
+
+<section class="section" id="oauth">
+<h2>Your own sign-in application</h2>
+<p>There is no shared OAuth client ID, by design. bastion-mc has no central anything: no built-in client ID, no telemetry, no update check. The launcher talks to Microsoft, Xbox Live and Mojang directly, with an Azure application that is yours. You register it once.</p>
+<ol class="steps">
+<li>
+<p>In the Azure portal, go to <em>Microsoft Entra ID</em>, then <em>App registrations</em>, then <em>New registration</em>. Supported account types: <strong>Personal Microsoft accounts only</strong>. Redirect URI: platform <strong>Public client/native (mobile &amp; desktop)</strong>, value <code>http://localhost</code>.</p>
+</li>
+<li>
+<p>Under <em>Authentication</em>, enable <strong>Allow public client flows</strong>. Signing in with a device code (<code>bastion-mc login --device</code>) needs it.</p>
+</li>
+<li>
+<p>Copy the <strong>Application (client) ID</strong> into <code>~/.config/bastion-mc/config.toml</code>:</p>
+<pre tabindex="0"><code>[auth]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"</code></pre>
+</li>
+<li>
+<p><strong>Ask Mojang to approve the ID.</strong> The Minecraft API refuses a new application ID (<code>Invalid app registration</code>) until it is approved: <a href="https://aka.ms/AppRegInfo" rel="noopener noreferrer">https://aka.ms/AppRegInfo</a>. This can take days. The demo launch below works in the meantime.</p>
+</li>
+</ol>
+<p><code>bastion-mc config example</code> prints a fully commented configuration file.</p>
+<div class="callout warning">
+<p>The sign-in has been tested against scripted replies only. It has not yet been run against the live Microsoft, Xbox and Mojang services.</p>
+</div>
+{{REQUIRE README.md "There is no shared client ID, by design."}}
+{{REQUIRE README.md "No built-in OAuth client ID, no telemetry, no update check."}}
+{{REQUIRE README.md "This can take days."}}
+{{REQUIRE docs/THREAT_MODEL.md "the chain is tested against scripted replies only"}}
+{{REQUIRE README.md "not yet run against the live services"}}
+</section>
+
+<section class="section" id="first-commands">
+<h2>The first commands</h2>
+<p>The first three steps need no account, and they work before Mojang has approved your application.</p>
+<ol class="steps">
+<li>
+<h3>Check the machine</h3>
+<pre tabindex="0"><code>bastion-mc doctor</code></pre>
+<p>It checks the kernel, the sandbox and the trust setup, and starts a real test sandbox. It says what this machine can and cannot enforce.</p>
+</li>
+<li>
+<h3>Create an instance</h3>
+<pre tabindex="0"><code>bastion-mc versions
+bastion-mc instance new main --minecraft 26.3</code></pre>
+<p>The first command lists the Minecraft versions in Mojang's manifest. The second creates a vanilla instance with the id <code>main</code>.</p>
+</li>
+<li>
+<h3>Launch it in demo mode</h3>
+<pre tabindex="0"><code>bastion-mc launch main --demo</code></pre>
+<p>This starts the client in Mojang's own demo mode, with no account; no token exists in that mode. It is a way to test the sandbox on your machine before your application is approved. The first launch fetches the client, its libraries and its assets from Mojang and checks each against the published hashes, and before anything the game prints is shown, the launch says what it set up and what it saw in force. Ctrl-C in the terminal stops the game. On the development machine the real Minecraft client has been run in the sandbox in demo mode, vanilla and as a signed Fabric profile; the <a href="manual.html#status">status table</a> names the version that was run.</p>
+</li>
+<li>
+<h3>Sign in</h3>
+<pre tabindex="0"><code>bastion-mc login
+bastion-mc status</code></pre>
+<p><code>login</code> uses the browser and a loopback redirect; <code>bastion-mc login --device</code> uses a device code instead. <code>status</code> shows who is signed in and which instances exist. This is the step that needs your client ID, approved by Mojang, and it is the step that has not yet been run against the live services.</p>
+</li>
+<li>
+<h3>Play</h3>
+<pre tabindex="0"><code>bastion-mc launch main
+bastion-mc launch main --join play.example.org</code></pre>
+<p>Multiplayer servers must be allowlisted: <code>servers = [...]</code> under <code>[network]</code> in <code>config.toml</code>, or in the instance's <code>instance.toml</code>. Everything else is unreachable. <code>--join</code> allowlists one server for this session. Joining a real multiplayer server needs a signed-in session and has not been exercised either; the relay is tested with a stand-in server and with live TLS to Mojang.</p>
+</li>
+</ol>
+{{REQUIRE README.md "works in the meantime (Mojang's demo mode, no account, no token)"}}
+{{REQUIRE README.md "The first launch fetches the client, its libraries and its assets from Mojang and checks each against the published hashes"}}
+{{REQUIRE README.md "Before anything the game prints is shown, the launch says what it set up and what it saw in force"}}
+{{REQUIRE README.md "Ctrl-C in the terminal stops the game"}}
+{{REQUIRE README.md "client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile"}}
+{{REQUIRE README.md "not yet run against the live services (needs your client ID)"}}
+{{REQUIRE README.md "Multiplayer servers must be allowlisted"}}
+{{REQUIRE docs/THREAT_MODEL.md "joining a real multiplayer server (needs a signed-in session; the relay is tested with a stand-in server and with live TLS to Mojang)"}}
+</section>
+
+<section class="section" id="mods">
+<h2>Mods, the companion mod and the phone</h2>
+<p>Mods run only in a signed profile: a Fabric (or Quilt) instance whose <code>mods/</code> directory is described by a manifest that you sign. The manual's sequence, from a signing key to a launch:</p>
+<pre tabindex="0"><code>mkdir -m 700 -p ~/secure                           # key generate does not create directories
+bastion-mc key generate ~/secure/bastion.key       # ideally kept off this machine
+bastion-mc key trust me ed25519:…                  # the public key it printed
+
+bastion-mc profile new perf --minecraft 26.3 --fabric
+bastion-mc profile add perf sodium lithium modmenu     # from Modrinth, dependencies included
+bastion-mc profile check perf                          # what Modrinth knows about each jar
+$EDITOR ~/.local/share/bastion-mc/instances/perf/profile.json    # review it
+bastion-mc profile sign perf --key ~/secure/bastion.key
+bastion-mc launch perf                 # add --demo until your client ID is approved</code></pre>
+<p><code>profile add</code> takes, for each mod, the newest release that Modrinth lists for the profile's Minecraft version and loader, with what it requires, and checks size and hashes before anything reaches <code>mods/</code>. Nothing is signed: the manifest lists the new jars, and you sign it after you have reviewed it. At launch the signature and every jar are verified, and one extra, missing or modified file aborts the launch. A voice-chat mod needs a rule that names the server's voice port, or it stays silent; the <a href="mods.html">mods page</a> has the rule and every other detail.</p>
+{{REQUIRE README.md "For each mod it takes the newest release that Modrinth lists for the profile's Minecraft version and loader, resolves what that build marks as required"}}
+{{REQUIRE README.md "Nothing is signed."}}
+{{REQUIRE README.md "one extra, missing or modified file aborts the launch"}}
+{{REQUIRE README.md "In the default network mode the game has no UDP at all, so such a mod loads but stays silent. To let it talk, name the server's voice port in that server's rule"}}
+<p>To a Fabric profile of one of the ten Minecraft versions it was run with, the launcher adds its own companion mod by itself, for that session; <code>force = true</code> under <code>[companion]</code> adds it to the other versions from 1.20.1 to 26.3. In the game, press <kbd>R</kbd>, in a world or on the title screen, and the phone slides up with the apps the launcher set up for this launch. Out of the box the Spotify desktop app over D-Bus, its album art and settings sync are on; the browser, the Spotify Web API, clips and Realms approval are off until you switch them on in <code>config.toml</code>, as the <a href="phone.html">phone page</a> describes. Sign in to the browser's sites outside the game, with <code>bastion-mc browser login &lt;site&gt;</code>, and type no password into the phone: every mod in the game can read what you type there.</p>
+{{REQUIRE README.md "The launcher adds the mod by itself to Fabric profiles of the ten Minecraft versions it was run with (Minecraft versions; force = true adds it to the other versions from 1.20.1 to 26.3)"}}
+{{REQUIRE README.md "press R — in a world or on the home screen — and a phone slides up at the right of the screen"}}
+{{REQUIRE README.md "The phone shows only the apps the launcher set up for this launch"}}
+{{REQUIRE README.md "Their defaults: Spotify over MPRIS, album art and settings sync on; the browser, the Spotify Web API (no client ID), clips and Realms approval off."}}
+{{REQUIRE README.md "Type no password into the phone: sign in to sites with bastion-mc browser login <site>, outside the game."}}
+</section>
+
+<section class="section" id="front-end">
+<h2>The graphical front end</h2>
+<p><code>bastion-mc-gui</code> is an optional window around the same launcher. A rail on its left leads to five pages: the launch, where you pick the instance, start the game, follow the download and, once the game has started, see which protections that launch runs with; the accounts, where you pick an account and sign in; the instances, where you create one; a console with the launcher's, the relay's and the game's output; and the security page with the emergency functions: scram, the runbook and its links. While a Realms join waits for your approval, the launch page shows its prompt, in <code>code</code> mode with the code. The phone's own commands, <code>browser login</code>, <code>spotify …</code> and <code>realms totp-setup</code>, are run in a terminal: the window offers none of them.</p>
+{{REQUIRE README.md "A navigation rail on the left leads to five pages"}}
+{{REQUIRE README.md "While a Realms join waits for your approval, the page shows the prompt: the Realm, the server address the game would connect to, in code mode the six-digit code"}}
+{{REQUIRE README.md "It offers none of the fourth round's commands (browser login, spotify …, realms totp-setup): they are run in a terminal."}}
+<pre tabindex="0"><code>cargo build --release --workspace
+target/release/bastion-mc-gui</code></pre>
+<p>The first command builds both programs. The front end looks for <code>bastion-mc</code> next to itself, and otherwise in <code>/usr/bin</code>. Building it needs nothing beyond the Rust toolchain; its system libraries are loaded at run time:</p>
+<pre tabindex="0"><code>pacman -S --needed libxkbcommon ttf-dejavu           # keyboard handling, any TTF font
+pacman -S --needed wayland                           # on Wayland
+pacman -S --needed libx11 libxcursor libxi libxkbcommon-x11   # on X11
+pacman -S --needed vulkan-icd-loader vulkan-radeon   # GPU rendering (or vulkan-intel / nvidia-utils)
+pacman -S --needed xdg-utils                         # the "Open link" button</code></pre>
+<p>Without a usable Vulkan or OpenGL driver it renders in software; <code>ICED_BACKEND=tiny-skia</code> forces that.</p>
+<p>It is a separate program on purpose, not a mode of the launcher:</p>
+<ul>
+<li>Tokens stay in the launcher process. The protocol between the two programs has no field that could carry one, and the launcher binary links none of the front end's dependencies.</li>
+<li>The window never waits on the network, the disk or the game. Every launcher command runs in a child process, and progress arrives as messages.</li>
+<li>If the window is closed, or the front end dies, the launcher notices its control pipe closing and shuts the game down properly. A scram is the exception: the front end never ends the launcher while it removes credentials.</li>
+</ul>
+{{REQUIRE README.md "A scram is the exception: the front end never ends the launcher that is removing credentials."}}
+<p>What the separation does not cover: the window can still be made to click, for instance to start a launch, to sign out or to trigger scram; and other software running as you, or on X11 any other client, can read the sign-in code off the window, and a Realms approval code while a join waits. The security overview has both under <a href="security.html#the-launcher">the launcher</a>.</p>
+<p>One limit of use: an <code>age</code> vault whose identity asks for a PIN on the terminal cannot be unlocked from the window. Sign in and launch from the command line in that setup.</p>
+<p>How it was tested: its tests run without a display, drawn in software and in iced's emulator against a stand-in launcher; a real demo launch was driven through its backend and through the window's own controls; and the real window was started and closed on a private X11 display. Nobody has clicked in a real window, it has not been run on Wayland, and its Realms prompt has never been shown for a real join.</p>
+{{REQUIRE README.md "finds bastion-mc next to itself, else /usr/bin"}}
+{{REQUIRE docs/THREAT_MODEL.md "The GUI process can still be made to click (start a launch, sign out)"}}
+{{REQUIRE docs/THREAT_MODEL.md "Scram can be triggered by anything that can click in the window (G1)"}}
+{{REQUIRE docs/THREAT_MODEL.md "U, or any other X11 client, reads the device code or the sign-in link off the window, or injects clicks"}}
+{{REQUIRE docs/THREAT_MODEL.md "A Realms approval code read off the window (the Launch page shows it while a join waits) is not useless"}}
+{{REQUIRE README.md "cannot be unlocked from the window"}}
+{{REQUIRE README.md "tests of the whole application against a stand-in launcher, run by iced's emulator without a display"}}
+{{REQUIRE README.md "a real demo launch driven through its backend worker and through the application's own controls"}}
+{{REQUIRE README.md "the real window started and closed on a private X11 display"}}
+{{REQUIRE README.md "No click in a real window; not run on Wayland; the Realms prompt never shown for a real join"}}
+</section>
+
+<section class="section" id="next">
+<h2>Where to go from here</h2>
+<div class="grid three">
+<div class="panel quiet">
+<h3><a href="security.html">Security overview</a></h3>
+<p>What each layer of the sandbox stops, what the credential broker changes, what the phone can and cannot do, and what is not defended.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="manual.html">Manual</a></h3>
+<p>Each layer of protection with its limits, accounts, skins and capes, sessions for content you do not trust, where the refresh token rests, Realms, settings sync, the configuration, the tests.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="emergency.html">Emergency runbook</a></h3>
+<p>For the day you think the account is compromised. <code>bastion-mc scram</code> removes every credential the launcher keeps from this machine and revokes nothing at Microsoft, which is why the runbook is the second step.</p>
+{{REQUIRE README.md "revokes nothing at Microsoft"}}
+{{REQUIRE README.md "to remove every credential the launcher keeps from the machine in one step"}}
+</div>
+<div class="panel quiet">
+<h3><a href="phone.html">The phone</a></h3>
+<p>How to switch each of the phone's services on, its settings and limits, and what the game can see through it.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="companion.html">Companion mod</a></h3>
+<p>When the launcher adds its mod, its keys and settings, and on which Minecraft versions it was run.</p>
+</div>
+<div class="panel quiet">
+<h3><a href="mods.html">Mods</a></h3>
+<p>Signed profiles in practice, <code>profile add</code> and <code>profile check</code>, the aliases, ViaFabric and voice chat on a server.</p>
+</div>
+</div>
+</section>

@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 606" width="960" height="606">
+<title>The trust boundaries of bastion-mc</title>
+<desc>On the host, under your user: the launcher, which is the trusted part and holds the tokens and the only sockets that lead out; and the game, treated as hostile, inside a systemd scope, namespaces, Landlock and a seccomp filter. Three deliberate holes lead from the game to the desktop: one display socket, one audio socket (with audio = "pulse") and the graphics device.</desc>
+<rect width="960" height="606" fill="#05080a"/>
+<!-- the network, outside the host: reached through the launcher only -->
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M70.5 78V19"/>
+<path fill="#3fd9e6" d="M70.5 10l-3.85 7h7.7z"/>
+<circle cx="70.5" cy="78.5" r="3.5" fill="#3fd9e6"/>
+<!-- the host, your UID -->
+<path fill="#070a0c" stroke="#33485a" d="M26.5 46.5H949.5V579.5L933.5 595.5H10.5V62.5Z"/>
+<!-- the launcher: the trusted computing base -->
+<path fill="#10161b" stroke="#2a8790" d="M42.5 78.5H410.5V478.5L398.5 490.5H30.5V90.5Z"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="2" d="M30.5 110.5V90.5L42.5 78.5H62.5"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="2" d="M410.5 478.5L398.5 490.5"/>
+<path fill="none" stroke="#1f2b35" d="M46 134.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 186.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 238.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 290.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 342.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 394.5H394"/>
+<path fill="none" stroke="#1f2b35" d="M46 446.5H394"/>
+<!-- the sandbox: a systemd scope, namespaces, Landlock, seccomp; the three holes are gaps in every edge -->
+<path fill="#070b0e" d="M482.5 78.5H929.5V478.5L917.5 490.5H470.5V90.5Z"/>
+<path fill="none" stroke="#2a8790" stroke-width="1.25" d="M470.5 490.5V90.5L482.5 78.5H929.5V478.5L917.5 490.5M470.5 490.5H553M567 490.5H697M711 490.5H839M853 490.5H917.5"/>
+<path fill="#090e12" d="M490.5 106.5H919.5V470.5L909.5 480.5H480.5V116.5Z"/>
+<path fill="none" stroke="#2a8790" stroke-width="1.25" d="M480.5 480.5V116.5L490.5 106.5H919.5V470.5L909.5 480.5M480.5 480.5H553M567 480.5H697M711 480.5H839M853 480.5H909.5"/>
+<path fill="#0b1116" d="M498.5 134.5H909.5V462.5L901.5 470.5H490.5V142.5Z"/>
+<path fill="none" stroke="#2a8790" stroke-width="1.25" d="M490.5 470.5V142.5L498.5 134.5H909.5V462.5L901.5 470.5M490.5 470.5H553M567 470.5H697M711 470.5H839M853 470.5H901.5"/>
+<path fill="#0d141a" d="M506.5 162.5H899.5V454.5L893.5 460.5H500.5V168.5Z"/>
+<path fill="none" stroke="#2a8790" stroke-width="1.25" d="M500.5 460.5V168.5L506.5 162.5H899.5V454.5L893.5 460.5M500.5 460.5H553M567 460.5H697M711 460.5H839M853 460.5H893.5"/>
+<!-- the game: hostile from its first instruction -->
+<path fill="#1e1416" d="M522.5 192.5H887.5V438.5L877.5 448.5H512.5V202.5Z"/>
+<path fill="none" stroke="#c24a44" stroke-width="1.25" d="M512.5 448.5V202.5L522.5 192.5H887.5V438.5L877.5 448.5M512.5 448.5H553M567 448.5H697M711 448.5H839M853 448.5H877.5"/>
+<path fill="none" stroke="#ff5f56" stroke-width="2" d="M512.5 218.5V202.5L522.5 192.5H538.5"/>
+<path fill="none" stroke="#ff5f56" stroke-width="2" d="M887.5 438.5L877.5 448.5"/>
+<path fill="none" stroke="#3a2226" d="M528 270.5H872"/>
+<!-- what crosses between the launcher and the game: each line belongs to the part it starts at -->
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M410.5 212H512.5"/>
+<path fill="#3fd9e6" d="M511 212l-7 -3.85v7.7z"/>
+<circle cx="410.5" cy="212" r="3" fill="#3fd9e6"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M410.5 264H512.5"/>
+<path fill="#3fd9e6" d="M511 264l-7 -3.85v7.7z"/>
+<path fill="#3fd9e6" d="M412 264l7 -3.85v7.7z"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M410.5 316H512.5"/>
+<path fill="#3fd9e6" d="M511 316l-7 -3.85v7.7z"/>
+<path fill="#3fd9e6" d="M412 316l7 -3.85v7.7z"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M410.5 368H512.5"/>
+<path fill="#3fd9e6" d="M412 368l7 -3.85v7.7z"/>
+<circle cx="512.5" cy="368" r="3" fill="#3fd9e6"/>
+<path fill="none" stroke="#3fd9e6" stroke-width="1.5" d="M410.5 420H512.5"/>
+<path fill="#3fd9e6" d="M511 420l-7 -3.85v7.7z"/>
+<circle cx="410.5" cy="420" r="3" fill="#3fd9e6"/>
+<!-- the deliberate holes: from the game through every layer to the desktop -->
+<circle cx="560" cy="432" r="3.5" fill="#1e1416" stroke="#f5b041" stroke-width="1.5"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M560 435.5V512"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M560 512h10M560 512h-10"/>
+<circle cx="704" cy="432" r="3.5" fill="#1e1416" stroke="#f5b041" stroke-width="1.5"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M704 435.5V512"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M704 512h10M704 512h-10"/>
+<circle cx="846" cy="432" r="3.5" fill="#1e1416" stroke="#f5b041" stroke-width="1.5"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M846 435.5V512"/>
+<path fill="none" stroke="#f5b041" stroke-width="2" d="M846 512h10M846 512h-10"/>
+<!-- the graphical front end: not part of the trusted base -->
+<path fill="none" stroke="#556c7e" stroke-dasharray="3 3" d="M70.5 490.5V520.5"/>
+<path fill="#05080a" stroke="#33485a" d="M38.5 520.5H300.5V572.5L292.5 580.5H30.5V528.5Z"/>
+<!-- labels and sentences, in the sans stack -->
+<g font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Liberation Sans', 'Helvetica Neue', Arial, sans-serif">
+<g font-size="11" fill="#9bb0bd" letter-spacing="1.4" font-weight="600">
+<text x="88" y="22">NETWORK</text>
+<text x="932" y="67" text-anchor="end">HOST · YOUR UID</text>
+</g>
+<g font-size="12" fill="#9bb0bd">
+<text x="88" y="37">the game has no route to it: the launcher holds the only sockets that lead out</text>
+<text x="46" y="174">tokens in locked, self-wiping memory</text>
+<text x="46" y="226">every file hashed, bound in by that descriptor</text>
+<text x="46" y="278">hold the only sockets that lead out</text>
+<text x="46" y="330">holds the access token outside the game</text>
+<text x="46" y="382">sanitises every byte from the sandbox</text>
+<text x="46" y="434">over fd 0, an AF_UNIX socketpair</text>
+<text x="528" y="258">by default: a placeholder, not the access token</text>
+</g>
+<g font-size="11" fill="#3fd9e6" letter-spacing="1.4" font-weight="600">
+<text x="46" y="101">LAUNCHER · TRUSTED COMPUTING BASE</text>
+<text x="482.5" y="97">SYSTEMD SCOPE</text>
+<text x="492.5" y="125">NAMESPACES</text>
+<text x="502.5" y="153">LANDLOCK</text>
+<text x="512.5" y="181">SECCOMP</text>
+</g>
+<g font-size="12" fill="#dbe6ec">
+<text x="46" y="465">before it reads anything from the game, it confines itself</text>
+</g>
+<g font-size="11" fill="#ff5f56" letter-spacing="1.4" font-weight="600">
+<text x="528" y="215">THE GAME · JVM</text>
+</g>
+<g font-size="13" fill="#f2f7f9">
+<text x="528" y="239">Treated as hostile from its first instruction</text>
+</g>
+<g font-size="10.5" fill="#9bb0bd" letter-spacing="1.3" font-weight="600">
+<text x="528" y="292">ROOT</text>
+<text x="528" y="331">WRITABLE</text>
+<text x="528" y="370">READ-ONLY</text>
+<text x="528" y="409">NETWORK</text>
+<text x="44" y="539">FRONT END</text>
+</g>
+<g font-size="11" fill="#f5b041" letter-spacing="1.4" font-weight="600">
+<text x="456" y="527" text-anchor="end">DELIBERATE</text>
+<text x="456" y="542" text-anchor="end">HOLES</text>
+<text x="560" y="531" text-anchor="middle">1 DISPLAY SOCKET</text>
+<text x="704" y="531" text-anchor="middle">1 AUDIO SOCKET</text>
+</g>
+<g font-size="11.5" fill="#9bb0bd">
+<text x="560" y="548" text-anchor="middle">the game's own:</text>
+<text x="560" y="563" text-anchor="middle">security context</text>
+<text x="560" y="578" text-anchor="middle">or nested compositor</text>
+<text x="704" y="548" text-anchor="middle">with audio = "pulse"</text>
+<text x="846" y="548" text-anchor="middle">and its sysfs directory</text>
+<text x="44" y="555">a separate process: starts the launcher,</text>
+<text x="44" y="570">reads its events, holds no token</text>
+</g>
+</g>
+<!-- values, in the monospace stack -->
+<g font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', 'JetBrains Mono', 'Adwaita Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', Menlo, Consolas, monospace">
+<g font-size="12" fill="#9bb0bd">
+<text x="46" y="121">non-dumpable · no_new_privs · RLIMIT_CORE=1</text>
+</g>
+<g font-size="13" fill="#f2f7f9">
+<text x="46" y="156">auth</text>
+<text x="46" y="208">verified store</text>
+<text x="46" y="260">egress relay + DNS responder</text>
+<text x="46" y="312">credential broker</text>
+<text x="46" y="364">log relay</text>
+<text x="46" y="416">launch frame</text>
+</g>
+<g font-size="11.5" fill="#9bb0bd">
+<text x="394" y="156" text-anchor="end">MSA → XBL → XSTS → MC</text>
+<text x="46" y="481">(Landlock + seccomp, all threads)</text>
+<text x="917.5" y="97" text-anchor="end">memory · no swap · task limit</text>
+<text x="907.5" y="125" text-anchor="end">user → user → pid ipc uts cgroup mount net</text>
+<text x="897.5" y="153" text-anchor="end">only the listed trees</text>
+<text x="887.5" y="181" text-anchor="end">allowlist + tripwire</text>
+<text x="872" y="215" text-anchor="end">bwrap → init stage → JVM</text>
+<text x="287" y="539" text-anchor="end">optional</text>
+</g>
+<g font-size="12" fill="#dbe6ec">
+<text x="624" y="292">empty tmpfs "/" · /usr read-only</text>
+<text x="624" y="309">synthetic /etc, fresh /proc /dev</text>
+<text x="624" y="331">/game (scratch) + saves/ logs/</text>
+<text x="624" y="348">config/ of ONE instance</text>
+<text x="624" y="370">mods/ resourcepacks/ shaderpacks/</text>
+<text x="624" y="387">verified files, sealed tmpfs</text>
+<text x="624" y="409">no route</text>
+</g>
+<g font-size="12.5" fill="#f5b041">
+<text x="846" y="531" text-anchor="middle">/dev/dri</text>
+</g>
+</g>
+</svg>
