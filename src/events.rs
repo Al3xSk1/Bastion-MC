@@ -386,16 +386,25 @@ fn sign_in_text(page: &SignInPage) -> String {
             "\n== Bedrock: the game asks you to sign in to your Microsoft account ==\n\
              {retry}   Open this page in your web browser (it is Microsoft's own sign-in page, on login.live.com):\n\n\
              {url}\n\n   \
+             {handback}\
              The sign-in ends on an address your browser cannot open and does not show ({end}?code=…).\n   \
-             Before the last step, open the browser's developer tools (F12) on the Network tab; afterwards select\n   \
-             the last request (it failed, status 302), copy the Location header of its response, paste it here\n   \
-             and press Enter. `cancel` refuses the sign-in. ({mins} min, {left} attempt(s); only that address goes\n   \
-             to the game, never your password; if a Realms join waits too, start the line with `signin `)\n",
+             {fallback}open the browser's developer tools (F12) on the Network tab before the last step; afterwards\n   \
+             select the last request (it failed, status 302), copy the Location header of its response, paste it\n   \
+             here and press Enter. `cancel` refuses the sign-in. ({mins} min, {left} attempt(s); only that address\n   \
+             goes to the game, never your password; if a Realms join waits too, start the line with `signin `)\n",
             retry = match &page.note {
                 Some(n) => format!("   That was not accepted: {n}.\n"),
                 None => String::new(),
             },
             url = page.url,
+            handback = if page.handback {
+                "When you have signed in, your browser hands the result back to bastion-mc by itself, where\n   \
+                 bastion-mc's handler for these links is registered (the Arch package registers it; your browser may\n   \
+                 ask once whether to open such links with bastion-mc: allow it).\n   "
+            } else {
+                ""
+            },
+            fallback = if page.handback { "If nothing happens: " } else { "To get it: " },
             end = page.end,
             mins = page.expires_in.div_ceil(60),
             left = page.attempts_left,
@@ -605,11 +614,18 @@ mod tests {
             attempts_left: 10,
             state: SignInState::Waiting,
             note: None,
+            handback: false,
         };
         let text = sign_in_text(&page);
         assert!(text.lines().any(|l| l == page.url), "the address alone on its line, to be copied whole: {text}");
         assert!(text.contains("Network tab") && text.contains("Location header") && text.contains("`cancel`"));
         assert!(text.contains("(15 min, 10 attempt(s);"), "{text}");
+        assert!(text.contains("To get it:") && !text.contains("hands the result back"), "{text}");
+        // Where the session holds the desktop's handler, the browser hands the address back by
+        // itself; pasting is what to do if nothing happens.
+        let handed = sign_in_text(&SignInPage { handback: true, ..page.clone() });
+        assert!(handed.contains("your browser hands the result back to bastion-mc by itself"), "{handed}");
+        assert!(handed.contains("If nothing happens:") && handed.contains("Location header"), "{handed}");
         let retry = sign_in_text(&SignInPage { note: Some("it holds no code".into()), ..page.clone() });
         assert!(retry.contains("That was not accepted: it holds no code."), "{retry}");
         let ended =

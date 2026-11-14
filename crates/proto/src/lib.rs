@@ -341,6 +341,7 @@ mod tests {
                 attempts_left: 10,
                 state: SignInState::Waiting,
                 note: Some("that address does not carry this sign-in's state".into()),
+                handback: true,
             }),
             Event::Answerable { kind: AnswerKind::Realms },
             Event::Exited { code: 130 },
@@ -402,12 +403,17 @@ mod tests {
             attempts_left: 3,
             state: SignInState::Done,
             note: None,
+            handback: false,
         });
-        assert_eq!(
-            event.to_line(),
-            "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?a=b\",\
-             \"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":60,\"attempts_left\":3,\"state\":\"done\"}\n"
-        );
+        let line = "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?a=b\",\
+                    \"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":60,\"attempts_left\":3,\"state\":\"done\"}\n";
+        assert_eq!(event.to_line(), line, "without the desktop's handler the line is what it was");
+        // With it, one field more; a line without the field (an older launcher's) reads as without.
+        let Event::SignInPage(page) = &event else { unreachable!() };
+        let handed = Event::SignInPage(SignInPage { handback: true, ..page.clone() });
+        assert_eq!(handed.to_line(), line.replace("\"state\":\"done\"}", "\"state\":\"done\",\"handback\":true}"));
+        assert_eq!(Event::parse_line(&handed.to_line()), Some(handed.clone()));
+        assert_eq!(Event::parse_line(line), Some(event.clone()));
         assert_eq!(
             Event::Answerable { kind: AnswerKind::SignIn }.to_line(),
             "{\"event\":\"answerable\",\"kind\":\"signin\"}\n"

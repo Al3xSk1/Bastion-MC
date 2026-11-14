@@ -117,6 +117,10 @@ USAGE: bastion-mc [--events] <command> [options]
   bedrock versions [--verify]         imported versions, and the ones mcpelauncher-ui has that are not imported
                                       (--verify: check every file against its SHA-256, as each launch does)
   bedrock remove <id>                 delete an imported version (refused while a launch uses it)
+  bedrock hand-back <address>         hand the address a Microsoft sign-in for Bedrock ended on
+                                      (ms-xal-0000000048183522://auth?…) to the running Bedrock session;
+                                      your browser runs this through the desktop's handler for that link
+                                      (one sentence, exit 0 if the game got it; it opens nothing)
 
   --help, --version
   --events    (first argument) report progress as JSON lines on standard output, for a front
@@ -797,7 +801,21 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
             // Minecraft: Bedrock Edition's client and version store (`bedrock::runtime`,
             // `bedrock::store`). Not offered with --events: the lines are printed here.
             use crate::bedrock::{runtime, store};
-            match args.positional("bedrock subcommand (`client`, `import`, `versions` or `remove`)")?.as_str() {
+            match args
+                .positional("bedrock subcommand (`client`, `import`, `versions`, `remove` or `hand-back`)")?
+                .as_str()
+            {
+                // The desktop's handler for the address a sign-in ends on (`signin::handback`):
+                // one sentence, exit 0 or 1, whatever happens; nothing is opened or written.
+                "hand-back" => {
+                    use crate::bedrock::signin::handback;
+                    let outcome = match args.positional("the address the sign-in ended on") {
+                        Ok(address) => handback::hand_back(paths.runtime.as_deref(), &address),
+                        Err(_) => handback::Outcome::Refused("no address was given".into()),
+                    };
+                    println!("{}", outcome.sentence());
+                    return Ok(outcome.exit_code());
+                }
                 "client" => {
                     args.flags(|_, _| Ok(false))?;
                     let cfg = Config::load(&paths)?;

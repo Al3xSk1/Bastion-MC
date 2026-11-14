@@ -206,6 +206,12 @@ pub struct SignInPage {
     /// few words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// This session takes the address from the desktop's handler by itself (bastion-mc's handler
+    /// for `ms-xal-0000000048183522` links, where it is registered): pasting it is the fallback.
+    /// False when another session holds the handler, or there is none. Absent from the line when
+    /// false, so front ends from before it read the event as they did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handback: bool,
 }
 
 #[cfg(test)]

@@ -8,10 +8,13 @@
 //! page, the password or the browser's cookies — only that final address, which the launcher
 //! checks again before handing it over.
 //!
-//! The address the page ends on cannot be opened by the browser (`ms-xal-…://auth?code=…` belongs
-//! to the game), and the browser does not show it either: Firefox stays on the page before (no
-//! address bar, no console message). Its developer tools' Network panel lists the failed
-//! redirect with the address in its `Location` header, which is where the panel sends the user.
+//! The address the page ends on belongs to the game (`ms-xal-…://auth?code=…`). Where bastion-mc's
+//! handler for that scheme is registered (the Arch package registers it) and this session holds
+//! it (`SignInPage::handback`), the browser hands the address back by itself and the panel says
+//! so. Otherwise — and as the fallback if nothing happens — the user pastes it: the browser does
+//! not show it (Firefox stays on the page before, with nothing in the address bar or the
+//! console); its developer tools' Network panel lists the failed redirect with the address in its
+//! `Location` header, which is where the panel sends the user.
 
 use std::time::Instant;
 
@@ -30,6 +33,14 @@ use crate::{
 
 /// The paste field's identity: focused when a prompt opens.
 pub const ANSWER_INPUT: &str = "signin-answer";
+
+/// The caption of the control that opens the page in the user's browser.
+pub const OPEN_PAGE: &str = "Open the sign-in page";
+
+/// What the panel says when the session takes the address from the desktop's handler.
+pub const HANDS_BACK: &str = "When you have signed in, the page hands the result back to bastion-mc by itself, where \
+                              bastion-mc's handler for these links is registered (the Arch package registers it; your \
+                              browser may ask once whether to open such links with bastion-mc: allow it).";
 
 /// The prompt as the window keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +92,7 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
     let mut buttons = row![].spacing(theme::S2);
     // Only a Microsoft sign-in page gets a control that opens it.
     if is_sign_in_link(&event.url) {
-        buttons =
-            buttons.push(kit::solid("Open sign-in page", Tone::Accent, Some(Message::OpenLink(event.url.clone()))));
+        buttons = buttons.push(kit::solid(OPEN_PAGE, Tone::Accent, Some(Message::OpenLink(event.url.clone()))));
     }
     buttons = buttons.push(kit::action("Copy link", Tone::Neutral, Some(Message::Copy(event.url.clone()))));
     let field = text_input("ms-xal-0000000048183522://auth?code=…", &prompt.draft)
@@ -94,18 +104,29 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
         .padding([7, 10])
         .style(theme::input)
         .width(Fill);
+    let steps = "Before the last step, open the browser's developer tools (F12) on the Network tab; afterwards \
+                 select the last request (it failed, status 302), copy the Location header of its response, and paste \
+                 it here.";
     let mut parts = column![
         kit::body(
             "The game asks you to sign in to your Microsoft account. The page is Microsoft's own, on \
              login.live.com, and opens in your browser: the game never sees your password."
         ),
         buttons.wrap().vertical_spacing(theme::S2),
-        kit::small(
+    ]
+    .spacing(theme::S3);
+    parts = if event.handback {
+        parts.push(kit::body(HANDS_BACK)).push(kit::small(format!(
+            "If nothing happens, paste the address the sign-in ended on (ms-xal-0000000048183522://auth?code=…); \
+             your browser does not show it. {steps}"
+        )))
+    } else {
+        parts.push(kit::small(format!(
             "The sign-in ends on an address your browser cannot open and does not show \
-             (ms-xal-0000000048183522://auth?code=…). Before the last step, open the browser's developer tools \
-             (F12) on the Network tab; afterwards select the last request (it failed, status 302), copy the \
-             Location header of its response, and paste it here."
-        ),
+             (ms-xal-0000000048183522://auth?code=…). {steps}"
+        )))
+    };
+    let mut parts = parts.push(
         row![
             field,
             kit::action("Send", Tone::Accent, prompt.can_send().then_some(Message::SendSignInAnswer)),
@@ -113,8 +134,7 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
         ]
         .spacing(theme::S2)
         .align_y(Center),
-    ]
-    .spacing(theme::S3);
+    );
     if let Some(problem) = prompt.draft_problem() {
         parts = parts.push(kit::small(problem).color(theme::RED));
     } else if prompt.sent {
@@ -124,7 +144,7 @@ pub fn prompt(app: &App) -> Option<Element<'_, Message>> {
     }
     let left = kit::clock(prompt.expires_at.saturating_duration_since(app.now).as_secs());
     let parts = parts.push(kit::small(format!(
-        "{left} left, {} attempt(s). Only the address you paste goes to the game. If you did not ask to sign in, \
+        "{left} left, {} attempt(s). Only the address the sign-in ended on goes to the game. If you did not ask to sign in, \
          press Cancel.",
         event.attempts_left
     )));
@@ -149,6 +169,7 @@ mod tests {
                 attempts_left: 10,
                 state: SignInState::Waiting,
                 note: None,
+                handback: false,
             },
             expires_at: Instant::now(),
             draft: draft.into(),

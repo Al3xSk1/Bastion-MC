@@ -741,7 +741,12 @@ fn a_bedrock_sign_in_offers_its_page_a_field_for_the_final_address_and_a_way_out
     feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
     let url = "https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s";
     assert!(shows(&app, &caps("Microsoft sign-in for Bedrock")));
-    assert!(matches!(clicked(&app, &caps("Open sign-in page")).as_slice(), [Message::OpenLink(to)] if to == url));
+    assert!(matches!(clicked(&app, &caps("Open the sign-in page")).as_slice(), [Message::OpenLink(to)] if to == url));
+    // Without the desktop's handler (another session holds it, or there is none): paste it.
+    assert!(!shows(&app, crate::view::signin::HANDS_BACK));
+    assert!(
+        texts(&app, SMALL).iter().any(|t| t.starts_with("The sign-in ends on an address your browser cannot open"))
+    );
     assert!(matches!(clicked(&app, &caps("Copy link")).as_slice(), [Message::Copy(to)] if to == url));
     assert!(matches!(clicked(&app, &caps("Cancel")).as_slice(), [Message::CancelSignIn]));
     assert!(clicked(&app, &caps("Send")).is_empty(), "nothing to send yet");
@@ -756,11 +761,26 @@ fn a_bedrock_sign_in_offers_its_page_a_field_for_the_final_address_and_a_way_out
     assert!(shows(&app, "Not accepted: its state is not this sign-in's."));
     // An ended prompt leaves the page; the words under the launch control say how it ended.
     feed(&mut app, events([sign_in_page(SignInState::Done, 9, None)]));
-    assert!(!shows(&app, &caps("Microsoft sign-in for Bedrock")) && !shows(&app, &caps("Open sign-in page")));
+    assert!(!shows(&app, &caps("Microsoft sign-in for Bedrock")) && !shows(&app, &caps("Open the sign-in page")));
     assert!(shows(&app, "Sign-in: handed to the game, which finishes it."));
     feed(&mut app, events([sign_in_page(SignInState::Waiting, 10, None)]));
     feed(&mut app, events([sign_in_page(SignInState::Cancelled, 9, Some("the game stopped waiting for the sign-in"))]));
     assert!(shows(&app, "Sign-in cancelled (the game stopped waiting for the sign-in)."));
+}
+
+/// Where this session holds the desktop's handler, the panel says that the page hands the result
+/// back by itself, and keeps pasting as what to do if nothing happens.
+#[test]
+fn a_bedrock_sign_in_says_the_page_hands_the_result_back_where_the_handler_is_registered() {
+    use bastion_mc_proto::SignInState;
+    let mut app = ready(true);
+    let _lines = answering_launch(&mut app);
+    let Event::SignInPage(page) = sign_in_page(SignInState::Waiting, 10, None) else { unreachable!() };
+    feed(&mut app, events([Event::SignInPage(bastion_mc_proto::SignInPage { handback: true, ..page })]));
+    assert!(shows(&app, &caps("Open the sign-in page")));
+    assert!(shows(&app, crate::view::signin::HANDS_BACK), "{:?}", texts(&app, SMALL));
+    assert!(texts(&app, SMALL).iter().any(|t| t.starts_with("If nothing happens, paste the address")));
+    assert!(shows(&app, &caps("Send")) && shows(&app, &caps("Cancel")), "the paste field stays");
 }
 
 #[test]
@@ -783,9 +803,10 @@ fn a_sign_in_page_whose_address_is_not_microsofts_gets_no_open_button() {
                 attempts_left: 10,
                 state: SignInState::Waiting,
                 note: None,
+                handback: true,
             })]),
         );
-        assert!(!shows(&app, &caps("Open sign-in page")));
+        assert!(!shows(&app, &caps("Open the sign-in page")));
         assert!(shows(&app, &caps("Copy link")), "it can still be copied and looked at");
     }
 }
@@ -832,8 +853,8 @@ fn an_untrusted_link_gets_no_open_button() {
 }
 
 /// Every caption of a control that hands an address to the desktop.
-fn open_captions() -> [String; 3] {
-    [caps("Open"), caps("Open link"), caps("Open sign-in page")]
+fn open_captions() -> [String; 4] {
+    [caps("Open"), caps("Open link"), caps("Open sign-in page"), caps("Open the sign-in page")]
 }
 
 #[test]
@@ -1428,6 +1449,11 @@ fn states() -> Vec<(&'static str, App)> {
     let _ = answering_launch(&mut bedrock);
     feed(&mut bedrock, events([sign_in_page(SignInState::Waiting, 10, None)]));
     add("launch-bedrock-sign-in", bedrock);
+    let mut handed = ready(true);
+    let _ = answering_launch(&mut handed);
+    let Event::SignInPage(page) = sign_in_page(SignInState::Waiting, 10, None) else { unreachable!() };
+    feed(&mut handed, events([Event::SignInPage(bastion_mc_proto::SignInPage { handback: true, ..page })]));
+    add("launch-bedrock-sign-in-handback", handed);
     let mut retry = ready(true);
     let _ = answering_launch(&mut retry);
     feed(
@@ -1696,6 +1722,7 @@ fn unbroken_states() -> Vec<(&'static str, App)> {
                 attempts_left: u32::MAX,
                 state: bastion_mc_proto::SignInState::Waiting,
                 note: None,
+                handback: true,
             }),
             Event::SignInPage(bastion_mc_proto::SignInPage {
                 url: format!("https://login.live.com/{long}"),
@@ -1704,6 +1731,7 @@ fn unbroken_states() -> Vec<(&'static str, App)> {
                 attempts_left: u32::MAX,
                 state: bastion_mc_proto::SignInState::Waiting,
                 note: Some(long.clone()),
+                handback: false,
             }),
         ]),
     );

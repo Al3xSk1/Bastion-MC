@@ -1715,6 +1715,7 @@ pub(crate) mod testing {
             attempts_left,
             state,
             note: note.map(str::to_string),
+            handback: false,
         })
     }
 

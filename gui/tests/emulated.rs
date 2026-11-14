@@ -56,7 +56,7 @@ case "$1" in
       echo '{"event":"protection","items":[{"aspect":"display","shield":"on","detail":"no display"},{"aspect":"network","shield":"on","detail":"filtered: only allowlisted Bedrock hosts, by name, through the launcher"},{"aspect":"credential","shield":"partial","detail":"the game signs in to Xbox itself"},{"aspect":"sign-in","shield":"on","detail":"shown outside the game"},{"aspect":"limits","shield":"on","detail":"limits"},{"aspect":"launcher","shield":"on","detail":"confined"}]}'
       echo '{"event":"phase","phase":"running"}'
       page() {
-        echo "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s\",\"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":900,\"attempts_left\":$1,\"state\":\"$2\"$3}"
+        echo "{\"event\":\"sign_in_page\",\"url\":\"https://login.live.com/oauth20_authorize.srf?client_id=0000000048183522&state=s\",\"end\":\"ms-xal-0000000048183522://auth\",\"expires_in\":900,\"attempts_left\":$1,\"state\":\"$2\",\"handback\":true$3}"
       }
       page 10 waiting ""
       read -r line; echo "$line" >> "$0.calls"
@@ -277,8 +277,11 @@ fn a_bedrock_sign_in_and_a_realms_join_are_answered_on_the_launchers_input_end_t
     ui.idle();
     ui.click(&caps("Play"));
     ui.eventually(&caps("Microsoft sign-in for Bedrock"));
-    // The sixth aspect of a Bedrock launch is on the page.
+    // The sixth aspect of a Bedrock launch is on the page; the page is offered, and since this
+    // session holds the desktop's handler, the panel says the result comes back by itself.
     assert!(ui.shows(&caps("sign-in")));
+    assert!(ui.shows(&caps("Open the sign-in page")));
+    assert!(ui.shows(bastion_mc_gui::view::signin::HANDS_BACK));
     // The field for the address has the keyboard as soon as the prompt is up.
     let address = "ms-xal-0000000048183522://auth?code=M.C507_BL2.2.U.0e5b2bbb&state=s";
     ui.type_text(address);

@@ -446,7 +446,9 @@ pub async fn launch_with(
             reporter.warn(warning);
         }
     }
-    log.line(Source::Launcher, &signin.describe());
+    for line in signin.describe() {
+        log.line(Source::Launcher, &line);
+    }
 
     // The nested compositor (X11 sessions), started last, as for Java.
     let mut nested_limits = None;
@@ -843,11 +845,20 @@ fn trust_store(anchor: Option<(&str, &[u8])>, extra_pem: &[u8]) -> Result<TrustS
 /// the host, removed as soon as the sandbox holds it, so that no other program of the user can
 /// reach the bridge; and from step 10, after the launcher confined itself, the server
 /// ([`signin::serve`]), which only accepts on that listener. Offline there is no bridge.
+///
+/// With it, the desktop's handler for the address the sign-in ends on
+/// (`signin::handback`): a socket in the user's runtime directory, bound now as well, that
+/// `bastion-mc bedrock hand-back` (run by the browser) delivers the address to — when this
+/// session holds the handler; a second Bedrock session running at the same time takes pasted
+/// addresses only, and says so.
 struct SignIn {
     bridge: Option<signin::Bridge>,
     dir: Option<PathBuf>,
     /// The socket's name is still on the host (the program in the sandbox was not identified).
     name_kept: bool,
+    handback: Option<signin::handback::Handback>,
+    /// For the launch log: where the handler delivers to, or why this session has none.
+    handback_line: Option<String>,
     serving: Option<signin::Serving>,
     /// Why the server could not be started, if it could not.
     failed: Option<String>,
@@ -855,12 +866,44 @@ struct SignIn {
 
 impl SignIn {
     fn prepare(paths: &Paths, mode: NetworkMode) -> Result<SignIn> {
-        let mut signin = SignIn { bridge: None, dir: None, name_kept: false, serving: None, failed: None };
+        let mut signin = SignIn {
+            bridge: None,
+            dir: None,
+            name_kept: false,
+            handback: None,
+            handback_line: None,
+            serving: None,
+            failed: None,
+        };
         if mode == NetworkMode::Filtered {
             let dir = profile::bridge_dir(paths)?;
             signin.bridge = Some(signin::Bridge::prepare(&dir)?);
             signin.dir = Some(dir);
             signin.name_kept = true;
+            use signin::handback::{self, Taken};
+            let paste = "in this session paste the address the sign-in ends on instead (the prompt says how)";
+            signin.handback_line = Some(match handback::take(paths.runtime.as_deref()) {
+                Ok(Taken::Bound(handback)) => {
+                    let line = format!(
+                        "sign-in: the address your browser hands back (bastion-mc's handler for {} links) reaches this \
+                         session through {}; pasting it stays possible",
+                        signin::REDIRECT_URI.split("://").next().unwrap_or("ms-xal"),
+                        handback.socket().display()
+                    );
+                    signin.handback = Some(handback);
+                    line
+                }
+                Ok(Taken::Elsewhere) => format!(
+                    "sign-in: another running Bedrock session takes the addresses your browser hands back (the \
+                     desktop's handler); {paste}"
+                ),
+                Ok(Taken::NoRuntimeDir) => {
+                    format!(
+                        "sign-in: XDG_RUNTIME_DIR is not set, so the desktop's handler cannot reach this session; {paste}"
+                    )
+                }
+                Err(e) => format!("sign-in: the desktop's handler cannot reach this session ({e}); {paste}"),
+            });
         }
         Ok(signin)
     }
@@ -881,26 +924,29 @@ impl SignIn {
         self.name_kept = false;
     }
 
-    /// The launch log's line about the bridge, before the sandbox starts.
-    fn describe(&self) -> String {
+    /// The launch log's lines about the bridge and the handler, before the sandbox starts.
+    fn describe(&self) -> Vec<String> {
         if self.bridge.is_some() {
-            format!(
+            let mut lines = vec![format!(
                 "sign-in: the game's sign-in window is bastion-mc's stub; its requests come over the bridge at {} and \
                  are served once the launcher has confined itself: Microsoft's page is shown outside the game, and \
-                 only this terminal or the front end answers it",
+                 only this terminal, the front end or your browser's hand-back answers it",
                 signin::SANDBOX_SOCKET
-            )
+            )];
+            lines.extend(self.handback_line.clone());
+            lines
         } else {
-            "sign-in: none (offline): the stub has no bridge to reach".into()
+            vec!["sign-in: none (offline): the stub has no bridge to reach".into()]
         }
     }
 
-    /// Step 10: serve the bridge for the rest of the session.
+    /// Step 10: serve the bridge (and the desktop's handler, when this session holds it) for the
+    /// rest of the session.
     fn serve(&mut self, reporter: &Reporter, log: &Arc<Log>) {
         let Some(bridge) = self.bridge.take() else { return };
         let sink = log.clone();
         let line: signin::server::Log = Arc::new(move |text: &str| sink.line(Source::Launcher, text));
-        match signin::serve(bridge, reporter, line) {
+        match signin::serve(bridge, self.handback.take(), reporter, line) {
             Ok(serving) => self.serving = Some(serving),
             Err(e) => {
                 let warning = format!(
@@ -1085,6 +1131,41 @@ mod tests {
         );
         assert!(!keep.write.iter().any(|w| paths.data.starts_with(w) || w.starts_with(&paths.data)), "not the data");
         assert_eq!(keep.tcp_connect, [53, 9050], "name lookups and the proxy; nothing else offline");
+    }
+
+    /// The desktop's handler goes to one session: a second Bedrock session running at the same
+    /// time takes pasted addresses only, and its launch log says so; without a runtime
+    /// directory there is no handler at all; offline there is no bridge.
+    #[test]
+    fn a_second_bedrock_session_falls_back_to_pasting_and_says_so() {
+        use crate::bedrock::signin::handback::{Taken, take};
+        let root = std::env::temp_dir()
+            .join(format!("bmc-2s-{}", crate::util::hex_encode(&crate::util::random_bytes::<4>().unwrap())));
+        let runtime = root.join("rt");
+        crate::util::create_private_dir_all(&runtime).unwrap();
+        let paths = |runtime: Option<PathBuf>| Paths {
+            config: root.join("config"),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            state: root.join("state"),
+            runtime,
+        };
+        let with = paths(Some(runtime.clone()));
+        with.ensure().unwrap();
+        let first = SignIn::prepare(&with, NetworkMode::Filtered).unwrap();
+        assert!(first.handback.is_some(), "the first session takes the handler");
+        assert!(first.describe().iter().any(|l| l.contains("reaches this session through")), "{:?}", first.describe());
+        let second = SignIn::prepare(&with, NetworkMode::Filtered).unwrap();
+        assert!(second.handback.is_none());
+        let said = second.describe().join("\n");
+        assert!(said.contains("another running Bedrock session") && said.contains("paste"), "{said}");
+        drop((first, second));
+        assert!(matches!(take(Some(&runtime)).unwrap(), Taken::Bound(_)), "free again once the first is over");
+        let without = SignIn::prepare(&paths(None), NetworkMode::Filtered).unwrap();
+        assert!(without.handback.is_none() && without.describe().join("\n").contains("XDG_RUNTIME_DIR is not set"));
+        let offline = SignIn::prepare(&with, NetworkMode::None).unwrap();
+        assert!(offline.bridge.is_none() && offline.handback.is_none());
+        let _ = crate::tree::remove(&root, None);
     }
 
     #[test]

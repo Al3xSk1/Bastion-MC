@@ -28,9 +28,11 @@
 //!
 //! **Who answers** ([`server`]): the page is offered to the user outside the game — an event
 //! for the front end (which opens it in the user's browser) and a printed URL on a terminal
-//! launch — and the final URL comes back only from trusted input (`events::input`: the front
-//! end's control pipe or the terminal), never from the game. One prompt at a time, a few per
-//! session, each for at most 15 minutes.
+//! launch — and the final URL comes back only from outside the game: from the desktop's handler
+//! for its scheme ([`handback`]: the browser runs `bastion-mc bedrock hand-back <address>`, which
+//! delivers it to the session that holds the handler), or pasted into trusted input
+//! (`events::input`: the front end's control pipe or the terminal) — never from the game. One
+//! prompt at a time, a few per session, each for at most 15 minutes.
 
 /// The program name the client looks for.
 pub const STUB_NAME: &str = "mcpelauncher-webview";
@@ -57,6 +59,7 @@ pub const START_PREFIX: &str = "https://login.live.com/oauth20_authorize.srf?";
 pub const MAX_FRAME: usize = 16 * 1024;
 
 pub mod check;
+pub mod handback;
 pub mod server;
 pub mod stub;
 pub mod wire;

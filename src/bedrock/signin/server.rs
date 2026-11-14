@@ -27,7 +27,11 @@
 //!   code and the state. It is never logged and never sent as an event.
 //!
 //! Answers come from [`Reporter::answers`] (kind `signin`): the front end's control pipe or
-//! the terminal, never the game.
+//! the terminal, never the game — and, when this session holds it, from the desktop's handler
+//! for the address's scheme (`handback`): an address the browser was sent to, delivered by
+//! `bastion-mc bedrock hand-back` on a socket bound before the launcher confined itself. It is
+//! checked exactly as a pasted answer is and has the same outcome; only a refused one does not
+//! use up one of the prompt's answers (see `handback`).
 
 use std::{
     collections::BTreeMap,
@@ -40,7 +44,7 @@ use std::{
 };
 
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     sync::{Semaphore, mpsc, oneshot},
 };
@@ -48,6 +52,7 @@ use tokio::{
 use super::{
     Bridge, REDIRECT_URI,
     check::{self, Checked},
+    handback::{self, Handback, Held},
     wire::{self, Reply},
 };
 use crate::{
@@ -106,6 +111,9 @@ pub struct Serving {
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
     signed_in: Arc<AtomicBool>,
+    /// The desktop's handler, when this session holds it: released (its name removed, if the
+    /// launcher may still do that, then its lock) once the server has stopped.
+    handback: Option<Held>,
 }
 
 impl Serving {
@@ -114,6 +122,7 @@ impl Serving {
     pub async fn shutdown(mut self) -> bool {
         drop(self.stop.take());
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut self.task).await;
+        drop(self.handback.take());
         self.signed_in.load(Ordering::SeqCst)
     }
 }
@@ -125,16 +134,38 @@ impl Drop for Serving {
     }
 }
 
-/// Serve the bridge for the rest of the launch. Call it inside the launch's runtime, after
+/// Serve the bridge — and the desktop's handler, when this session took it
+/// (`handback::take`) — for the rest of the launch. Call it inside the launch's runtime, after
 /// the launcher has confined itself (it binds nothing and opens nothing; it only accepts).
-pub fn serve(bridge: Bridge, reporter: &Reporter, log: Log) -> Result<Serving> {
-    serve_with(bridge.into_listener(), reporter, log, Options::default())
+pub fn serve(bridge: Bridge, handback: Option<Handback>, reporter: &Reporter, log: Log) -> Result<Serving> {
+    serve_with_handback(bridge.into_listener(), handback, reporter, log, Options::default())
 }
 
-/// [`serve`] with a listener and limits of the caller's choosing (tests).
+/// [`serve`] with a listener and limits of the caller's choosing, and no handler (tests).
 pub fn serve_with(listener: StdUnixListener, reporter: &Reporter, log: Log, options: Options) -> Result<Serving> {
-    listener.set_nonblocking(true).map_err(|e| Error::io("preparing the sign-in bridge", e))?;
-    let listener = UnixListener::from_std(listener).map_err(|e| Error::io("preparing the sign-in bridge", e))?;
+    serve_with_handback(listener, None, reporter, log, options)
+}
+
+/// [`serve`] with a listener, the handler and limits of the caller's choosing (tests).
+pub fn serve_with_handback(
+    listener: StdUnixListener,
+    handback: Option<Handback>,
+    reporter: &Reporter,
+    log: Log,
+    options: Options,
+) -> Result<Serving> {
+    let tokio_listener = |listener: StdUnixListener, what: &str| -> Result<UnixListener> {
+        listener.set_nonblocking(true).map_err(|e| Error::io(format!("preparing {what}"), e))?;
+        UnixListener::from_std(listener).map_err(|e| Error::io(format!("preparing {what}"), e))
+    };
+    let listener = tokio_listener(listener, "the sign-in bridge")?;
+    let (handback_listener, held) = match handback {
+        Some(handback) => {
+            let (listener, held) = handback.into_parts();
+            (Some(tokio_listener(listener, "the desktop's handler for sign-in addresses")?), Some(held))
+        }
+        None => (None, None),
+    };
     let answers = reporter.answers(AnswerKind::SignIn)?;
     let (stop, stopped) = oneshot::channel();
     let signed_in = Arc::new(AtomicBool::new(false));
@@ -148,9 +179,11 @@ pub fn serve_with(listener: StdUnixListener, reporter: &Reporter, log: Log, opti
         next_allowed: None,
         refusals: BTreeMap::new(),
         signed_in: signed_in.clone(),
+        handback: handback_listener.is_some(),
+        handback_refusals: BTreeMap::new(),
     };
-    let task = tokio::spawn(session.run(listener, stopped));
-    Ok(Serving { stop: Some(stop), task, signed_in })
+    let task = tokio::spawn(session.run(listener, handback_listener, stopped));
+    Ok(Serving { stop: Some(stop), task, signed_in, handback: held })
 }
 
 /// A prompt that waits.
@@ -173,6 +206,48 @@ struct Session {
     refusals: BTreeMap<&'static str, u32>,
     /// Set once an address was handed to the game.
     signed_in: Arc<AtomicBool>,
+    /// This session holds the desktop's handler (the prompt says so).
+    handback: bool,
+    /// Addresses from the handler that were refused, per reason (logged once each).
+    handback_refusals: BTreeMap<&'static str, u32>,
+}
+
+/// An address from the desktop's handler, read from a connection, or why none could be.
+type Handed = (UnixStream, std::result::Result<String, &'static str>);
+
+/// Read the one line `bastion-mc bedrock hand-back` sends: the address, bounded, printable.
+async fn read_handed(mut stream: UnixStream, timeout: Duration, to: mpsc::Sender<Handed>) {
+    let ours = stream.peer_cred().is_ok_and(|cred| cred.uid() == nix::unistd::getuid().as_raw());
+    let line = if !ours {
+        Err("the program that delivered it is not the user's")
+    } else {
+        match tokio::time::timeout(timeout, read_line(&mut stream)).await {
+            Err(_) => Err("no address arrived in time"),
+            Ok(line) => line,
+        }
+    };
+    let _ = to.send((stream, line)).await;
+}
+
+async fn read_line(stream: &mut UnixStream) -> std::result::Result<String, &'static str> {
+    let mut line = Vec::with_capacity(256);
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = stream.read(&mut chunk).await.map_err(|_| "the connection failed")?;
+        if n == 0 {
+            return Err("the connection ended before a whole line");
+        }
+        line.extend_from_slice(&chunk[..n]);
+        if let Some(end) = line.iter().position(|b| *b == b'\n') {
+            line.truncate(end);
+            let text = String::from_utf8(line).map_err(|_| "the address is not text")?;
+            bastion_mc_proto::answer::check_answer_text(&text)?;
+            return Ok(text);
+        }
+        if line.len() >= handback::MAX_LINE {
+            return Err("the address is too long");
+        }
+    }
 }
 
 /// A request read from a connection, or why none could be.
@@ -225,17 +300,46 @@ impl Pace {
 }
 
 impl Session {
-    async fn run(mut self, listener: UnixListener, mut stopped: oneshot::Receiver<()>) {
+    async fn run(mut self, listener: UnixListener, handback: Option<UnixListener>, mut stopped: oneshot::Receiver<()>) {
         let (to_session, mut requests) = mpsc::channel::<Incoming>(MAX_READERS);
         let readers = Arc::new(Semaphore::new(MAX_READERS));
         let mut pace = Pace { tokens: ACCEPT_BURST, at: Instant::now() };
         // While set, no connection is taken (the pace, or a failing accept).
         let mut accept_after: Option<tokio::time::Instant> = None;
         let mut answers_open = true;
+        // The desktop's handler: paced and bounded like the bridge, on its own budget.
+        let (to_handed, mut handed) = mpsc::channel::<Handed>(MAX_READERS);
+        let handback_readers = Arc::new(Semaphore::new(MAX_READERS));
+        let mut handback_pace = Pace { tokens: ACCEPT_BURST, at: Instant::now() };
+        let mut handback_after: Option<tokio::time::Instant> = None;
         loop {
             let waiting = self.pending.as_ref().map(|p| (&p.stream, tokio::time::Instant::from_std(p.expires)));
             tokio::select! {
                 _ = &mut stopped => break,
+                accepted = async { handback.as_ref().expect("guarded").accept().await },
+                    if handback.is_some() && handback_after.is_none() => {
+                    let wait = handback_pace.take();
+                    match accepted {
+                        Ok((stream, _)) => match handback_readers.clone().try_acquire_owned() {
+                            Ok(permit) => {
+                                let (to, timeout) = (to_handed.clone(), self.options.read_timeout);
+                                tokio::spawn(async move {
+                                    read_handed(stream, timeout, to).await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(_) => self.refused_handback("too many deliveries at once"),
+                        },
+                        Err(_) => handback_after = Some(tokio::time::Instant::now() + Duration::from_millis(100)),
+                    }
+                    if !wait.is_zero() {
+                        handback_after = Some(handback_after.unwrap_or_else(tokio::time::Instant::now) + wait);
+                    }
+                }
+                _ = async { tokio::time::sleep_until(handback_after.expect("guarded")).await }, if handback_after.is_some() => {
+                    handback_after = None;
+                }
+                Some((stream, line)) = handed.recv() => self.handed(stream, line).await,
                 accepted = listener.accept(), if accept_after.is_none() => {
                     let wait = pace.take();
                     match accepted {
@@ -279,6 +383,69 @@ impl Session {
         if total > 0 {
             let reasons: Vec<String> = self.refusals.iter().map(|(why, n)| format!("{why} ({n}×)")).collect();
             (self.log)(&format!("signin: {total} request(s) refused in this session: {}", reasons.join("; ")));
+        }
+        let total: u32 = self.handback_refusals.values().sum();
+        if total > 0 {
+            let reasons: Vec<String> = self.handback_refusals.iter().map(|(why, n)| format!("{why} ({n}×)")).collect();
+            (self.log)(&format!(
+                "signin: {total} address(es) from the desktop's handler refused in this session: {}",
+                reasons.join("; ")
+            ));
+        }
+    }
+
+    /// Count a refused delivery of the desktop's handler; log its reason the first time.
+    fn refused_handback(&mut self, why: &'static str) {
+        let count = self.handback_refusals.entry(why).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            (self.log)(&format!("signin: refused an address from the desktop's handler: {why}"));
+        }
+    }
+
+    /// An address from the desktop's handler: checked as a pasted answer is, and answered on the
+    /// handler's connection with the verdict (`ok …` or `no …`, one line).
+    async fn handed(&mut self, mut stream: UnixStream, line: std::result::Result<String, &'static str>) {
+        let (accepted, said) = match line {
+            Err(why) => {
+                self.refused_handback(why);
+                (false, why.to_string())
+            }
+            Ok(text) => self.handed_address(&text).await,
+        };
+        let verdict = handback::verdict_line(accepted, &said);
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(verdict.as_bytes())).await;
+    }
+
+    async fn handed_address(&mut self, text: &str) -> (bool, String) {
+        let Some(pending) = self.pending.as_mut() else {
+            self.refused_handback("no sign-in was waiting");
+            return (false, "no Bedrock sign-in is waiting in the running session".into());
+        };
+        match check::check_final(text, &pending.request) {
+            Ok(url) => {
+                if reply(&mut pending.stream, &Reply::Url(url)).await {
+                    (self.log)(
+                        "signin: the address the sign-in ended on came from the desktop's handler and was handed to \
+                         the game",
+                    );
+                    self.signed_in.store(true, Ordering::SeqCst);
+                    self.finish(SignInState::Done, None);
+                    (true, "handed to the game".into())
+                } else {
+                    self.end(SignInState::Cancelled, "the game stopped waiting before the address arrived").await;
+                    (false, "the game stopped waiting for this sign-in".into())
+                }
+            }
+            Err(why) => {
+                // The prompt stays, and keeps its answers: any web page can make the browser call
+                // the handler, and none can make an address of this sign-in.
+                self.refused_handback(why);
+                let note = format!("an address your browser handed back was refused: {why}");
+                let page = self.page(self.pending.as_ref().expect("checked"), SignInState::Waiting, Some(&note));
+                self.reporter.emit(Event::SignInPage(page));
+                (false, format!("the running Bedrock session refused it: {why}"))
+            }
         }
     }
 
@@ -347,6 +514,7 @@ impl Session {
             attempts_left: pending.answers_left,
             state,
             note: note.map(str::to_string),
+            handback: self.handback,
         }
     }
 

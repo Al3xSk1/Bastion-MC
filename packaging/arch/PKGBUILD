@@ -167,6 +167,7 @@ package_bastion-mc() {
     'firefox: the browser of the in-game phone ([browser])'
     'xdg-dbus-proxy: Spotify desktop app control from the phone ([spotify])'
     'ffmpeg: clips of the game ([clips])'
+    'desktop-file-utils: its pacman hook registers the handler that hands a Bedrock sign-in back (docs/BEDROCK.md)'
   )
   cd "$_srcdir"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/$(_target)/release/bastion-mc"
@@ -174,10 +175,16 @@ package_bastion-mc() {
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/" docs/README.md docs/THREAT_MODEL.md \
     docs/TOKEN_INJECTION.md docs/SCRAM_RUNBOOK.md docs/MC_VAULT_ACCOUNT.md docs/COMPANION.md docs/MODS.md \
-    docs/PHONE.md
+    docs/PHONE.md docs/BEDROCK.md
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/docs/images/" docs/images/*.png
   install -Dm0644 examples/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The desktop's handler for the address a Bedrock sign-in ends on
+  # (x-scheme-handler/ms-xal-0000000048183522, NoDisplay): the browser runs
+  # `bastion-mc bedrock hand-back <address>`, which hands it to the running session and opens
+  # nothing. Installing it into usr/share/applications fires desktop-file-utils' pacman hook
+  # (update-desktop-database.hook), which updates the MIME cache: nothing to do here.
+  install -Dm0644 -t "$pkgdir/usr/share/applications/" packaging/arch/bastion-mc-bedrock-signin.desktop
   # Root-owned trust anchors for profile signatures. When this directory contains *.pub
   # keys, per-user keys are ignored: code running as the user cannot add a signer.
   install -dm0755 "$pkgdir/etc/bastion-mc/trusted-keys.d"

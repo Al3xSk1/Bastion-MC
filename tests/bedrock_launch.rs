@@ -13,7 +13,9 @@
 //! 2. `[network] mode = "none"`, after a crashed session was simulated: the leftover is
 //!    deleted before the start, the world and settings are still there, the tokens are not;
 //! 3. filtered again, with the launcher confining itself — which confines this test process
-//!    too, so this is the only test in the file and the last thing it does.
+//!    too, so this is the only test in the file and the last thing it does. Its sign-in is
+//!    answered the way the desktop's handler answers it: `bastion-mc bedrock hand-back
+//!    <address>`, run (by a helper started before the confinement) as the browser would run it.
 //!
 //! Needs bubblewrap, unprivileged user namespaces and Landlock (ABI ≥ 6), like
 //! `tests/sandbox.rs`. No display (the desktop is given as empty), no systemd scope
@@ -75,6 +77,38 @@ enum AtTheInput {
     SignIn,
     /// Refuses the sign-in.
     Cancel,
+    /// Lets the browser hand the address back: `bastion-mc bedrock hand-back` with a foreign
+    /// address, with one of another sign-in, then with the right one.
+    HandBack,
+}
+
+/// A helper, started before the session (and so before the launcher confines itself and this
+/// process with it), that runs `bastion-mc bedrock hand-back` as the desktop's handler would:
+/// once for each `ask-<n>` file the test writes, its output and exit status into `said-<n>`.
+fn hand_back_helper(dir: &Path, runtime: &Path, root: &Path) -> std::process::Child {
+    std::fs::create_dir_all(dir).unwrap();
+    let script = r#"for n in 1 2 3; do
+  i=0
+  while [ ! -e "$1/ask-$n" ]; do i=$((i+1)); [ "$i" -gt 2400 ] && exit 3; sleep 0.05; done
+  "$2" bedrock hand-back "$(cat "$1/ask-$n")" > "$1/said-$n.tmp" 2>&1
+  echo "exit=$?" >> "$1/said-$n.tmp"
+  mv "$1/said-$n.tmp" "$1/said-$n"
+done"#;
+    let xdg = root.join("helper-xdg");
+    std::process::Command::new("/bin/sh")
+        .args(["-c", script, "hand-back-helper"])
+        .arg(dir)
+        .arg(env!("CARGO_BIN_EXE_bastion-mc"))
+        .env_clear()
+        .env("PATH", "/usr/bin")
+        .env("HOME", root.join("helper-home"))
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .env("XDG_STATE_HOME", xdg.join("state"))
+        .spawn()
+        .expect("starting the hand-back helper")
 }
 
 /// The stand-in client, compiled once per source text.
@@ -200,6 +234,10 @@ impl World {
             format!("host_path={}", self.paths.state.display()),
             format!("host_path={}", self.paths.data.join("vault").display()),
             format!("host_path={}", self.root.join("instance-dir-marker").display()),
+            format!(
+                "host_path={}",
+                self.paths.runtime.as_deref().expect("runtime").join("bastion-mc/bedrock-signin.sock").display()
+            ),
             format!("https=https://{HOST}/standin"),
             "denied=https://api.minecraftservices.com/minecraft/profile".to_string(),
         ]
@@ -218,7 +256,12 @@ impl World {
     async fn session_with(&self, version: OpenedVersion, confine: ConfineMode, input: AtTheInput) -> Session {
         let reporter = Reporter::capture();
         let typed: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-        let person = tokio::spawn(at_the_input(reporter.clone(), self.paths.clone(), input, typed.clone()));
+        // Under the cache: still writable once the launcher (this process) has confined itself.
+        let asks = self.paths.cache.join("hand-back");
+        let mut helper = (input == AtTheInput::HandBack)
+            .then(|| hand_back_helper(&asks, self.paths.runtime.as_deref().expect("a runtime directory"), &self.root));
+        let person =
+            tokio::spawn(at_the_input(reporter.clone(), self.paths.clone(), input, asks.clone(), typed.clone()));
         let opts = LaunchOptions {
             instance: INSTANCE.into(),
             account: "default".into(),
@@ -244,6 +287,10 @@ impl World {
         .expect("the session did not end");
         // What was done at the input is written down to the end (the session's events are all in).
         let _ = tokio::time::timeout(Duration::from_secs(10), person).await;
+        if let Some(helper) = helper.as_mut() {
+            let _ = helper.kill();
+            let _ = helper.wait();
+        }
         let typed = typed.lock().unwrap().clone();
         let events = reporter.captured();
         let mut game = BTreeMap::new();
@@ -278,7 +325,13 @@ struct Session {
 /// The person at the trusted input (the front end's `answer signin` line, or the terminal):
 /// waits for the sign-in prompt the game's request raised, then acts as `input` says. Writes
 /// down what it did and what the launcher answered.
-async fn at_the_input(reporter: Reporter, paths: Paths, input: AtTheInput, typed: Arc<std::sync::Mutex<Vec<String>>>) {
+async fn at_the_input(
+    reporter: Reporter,
+    paths: Paths,
+    input: AtTheInput,
+    asks: PathBuf,
+    typed: Arc<std::sync::Mutex<Vec<String>>>,
+) {
     use bastion_mc::events::{Answer, AnswerKind, SignInState};
     let note = |text: String| typed.lock().unwrap().push(text);
     let pages = |reporter: &Reporter| -> Vec<bastion_mc_proto::SignInPage> {
@@ -306,9 +359,25 @@ async fn at_the_input(reporter: Reporter, paths: Paths, input: AtTheInput, typed
             pages(&reporter)
         }
     };
+    // The helper's answer to the `n`-th address it was asked to hand back.
+    let asked = |n: u32, address: String| {
+        let asks = asks.clone();
+        async move {
+            std::fs::write(asks.join(format!("ask-{n}.tmp")), address).unwrap();
+            std::fs::rename(asks.join(format!("ask-{n}.tmp")), asks.join(format!("ask-{n}"))).unwrap();
+            for _ in 0..1200 {
+                if let Ok(said) = std::fs::read_to_string(asks.join(format!("said-{n}"))) {
+                    return said.trim().replace('\n', " | ");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            "no answer from the helper".to_string()
+        }
+    };
     let first = waited(1).await;
     let Some(page) = first.first() else { return note("no sign-in prompt appeared".into()) };
     note(format!("prompt: {:?} {} attempts, page {}", page.state, page.attempts_left, page.url));
+    note(format!("hand-back offered: {}", page.handback));
     if page.state != SignInState::Waiting {
         return;
     }
@@ -328,6 +397,14 @@ async fn at_the_input(reporter: Reporter, paths: Paths, input: AtTheInput, typed
             let said = verdict.get(1).map(|p| (p.state, p.note.clone()));
             note(format!("verdict on the other: {said:?}"));
             note(format!("final: {:?}", reporter.answer_for_test(AnswerKind::SignIn, Answer::Text(FINAL.into()))));
+        }
+        AtTheInput::HandBack => {
+            note(format!("foreign: {}", asked(1, "https://example.org/sign-in-done?code=x".into()).await));
+            note(format!("other: {}", asked(2, FINAL.replace(STATE, "another-sign-in")).await));
+            let verdict = waited(2).await;
+            let said = verdict.get(1).map(|p| (p.state, p.attempts_left, p.note.clone()));
+            note(format!("verdict on the other: {said:?}"));
+            note(format!("final: {}", asked(3, FINAL.into()).await));
         }
     }
     let ended = waited(if input == AtTheInput::Cancel { 2 } else { 3 }).await;
@@ -506,6 +583,7 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
         "{}",
         one.dump()
     );
+    assert!(typed.contains("hand-back offered: true"), "this session holds the desktop's handler\n{}", one.dump());
     assert!(
         typed.contains("other: Delivered") && typed.contains("verdict on the other: Some((Waiting, Some("),
         "{}",
@@ -527,8 +605,15 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert_eq!(one.protection()["sign-in"].0, Shield::On, "{:?}", one.protection());
     // Nothing of the host, no keyring, no namespaces.
     one.refused("home");
-    for path in [&paths.data, &paths.config, &paths.state, &paths.data.join("vault"), &root.join("instance-dir-marker")]
-    {
+    let handler_socket = runtime.join("bastion-mc/bedrock-signin.sock");
+    for path in [
+        &paths.data,
+        &paths.config,
+        &paths.state,
+        &paths.data.join("vault"),
+        &root.join("instance-dir-marker"),
+        &handler_socket,
+    ] {
         one.expect(&format!("host_path[{}]", path.display()), "errno2");
     }
     one.refused("session_bus");
@@ -605,9 +690,23 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert_eq!(shields["network"], (Shield::On, "offline: no network at all".to_string()));
     assert_eq!(shields["credential"].0, Shield::On, "{shields:?}");
     std::fs::write(&toml, original).unwrap();
+    // No session runs now: the desktop's handler has nobody to hand the address to, and says so.
+    let nobody = std::process::Command::new(env!("CARGO_BIN_EXE_bastion-mc"))
+        .args(["bedrock", "hand-back", FINAL])
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("HOME", root.join("helper-home"))
+        .env("XDG_CONFIG_HOME", root.join("helper-xdg/config"))
+        .env("XDG_DATA_HOME", root.join("helper-xdg/data"))
+        .env("XDG_CACHE_HOME", root.join("helper-xdg/cache"))
+        .env("XDG_STATE_HOME", root.join("helper-xdg/state"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&nobody.stdout);
+    assert_eq!(nobody.status.code(), Some(1), "{said}");
+    assert_eq!(said.trim(), "bastion-mc: nothing was done: no Bedrock session that takes sign-in addresses is running");
 
     // ---------------------------------------------------------------- session 3 (confines this process)
-    let three = world.session(3, ConfineMode::Auto, AtTheInput::Cancel).await;
+    let three = world.session(3, ConfineMode::Auto, AtTheInput::HandBack).await;
     assert_eq!(three.outcome, Ok(0), "{}", three.dump());
     // `[bedrock] telemetry = false`: the client's own switch is set, and the launch says so.
     three.expect("env.disable_telemetry", "1");
@@ -624,13 +723,50 @@ async fn a_bedrock_session_keeps_its_worlds_loses_its_tokens_and_reaches_only_wh
     assert_eq!(shields["network"].0, Shield::On, "{shields:?}");
     assert!(shields["network"].1.starts_with("filtered"), "{shields:?}");
     assert_eq!(shields["sign-in"].0, Shield::On, "the bridge is served after the confinement: {shields:?}");
-    // The bridge works with the launcher confined: the prompt appeared; it was refused at the
-    // trusted input, and the stub got nothing on its standard output.
+    // The desktop's handler, with the launcher confined: its socket was bound before step 9 and
+    // is accepted on after it. The command refused a foreign address itself; the session refused
+    // the address of another sign-in (the prompt stayed, with its answers) and took this one;
+    // the stub got it, rebuilt.
     let typed = three.typed.join("\n");
-    assert!(typed.contains("prompt: Waiting") && typed.contains("ended: Some(Cancelled)"), "{}", three.dump());
-    three.expect("webview.exit", "1");
-    three.expect("webview.answer", "");
-    assert!(!three.said("Capes:"), "{}", three.dump());
+    assert!(
+        typed.contains("prompt: Waiting 10 attempts") && typed.contains("hand-back offered: true"),
+        "{}",
+        three.dump()
+    );
+    assert!(
+        typed.contains(
+            "foreign: bastion-mc: the address was not handed to the game: it is not the address a Microsoft \
+                        sign-in for Minecraft Bedrock ends on"
+        ) && typed.contains("| exit=1"),
+        "{}",
+        three.dump()
+    );
+    assert!(
+        typed.contains(
+            "other: bastion-mc: the address was not handed to the game: the running Bedrock session refused \
+                        it: its state is not this sign-in's"
+        ),
+        "{}",
+        three.dump()
+    );
+    assert!(
+        typed.contains("verdict on the other: Some((Waiting, 10, Some(\"an address your browser handed back"),
+        "{}",
+        three.dump()
+    );
+    assert!(
+        typed.contains(
+            "final: bastion-mc: the sign-in address was handed to the Bedrock game; go back to the game | exit=0"
+        ),
+        "{}",
+        three.dump()
+    );
+    assert!(typed.contains("ended: Some(Done)"), "{}", three.dump());
+    three.expect("webview.exit", "0");
+    three.expect("webview.answer", REBUILT);
+    assert!(three.said("Capes: a cape earned in this session"), "{}", three.dump());
+    let launchers = |l: &&String| !l.starts_with("input") && !l.starts_with("game");
+    assert!(!three.lines.iter().filter(launchers).any(|l| l.contains("standin-code")), "{}", three.dump());
     assert_ne!(shields["launcher"].0, Shield::Off, "the launcher confined itself: {shields:?}");
     assert!(three.said("launcher: confined itself") || three.said("only PARTLY confined"), "{}", three.dump());
     for line in three.lines.iter().filter(|l| l.contains("launcher:") || l.contains("data:")) {

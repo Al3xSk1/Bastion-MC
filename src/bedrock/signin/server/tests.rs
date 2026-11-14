@@ -346,3 +346,75 @@ fn a_socket_directory_path_stays_short() {
     // The sockets above live in the temporary directory; a long one would not bind.
     assert!(Dir::new("len").socket().as_os_str().len() < 100, "{}", Path::new(&std::env::temp_dir()).display());
 }
+
+// ---------------------------------------------------------------- the desktop's handler
+
+/// A runtime directory of its own for the handler's socket (short, private).
+fn handback_runtime(tag: &str) -> Dir {
+    let dir = Dir::new(&format!("hb{tag}"));
+    std::fs::set_permissions(&dir.0, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    dir
+}
+
+/// The server with the desktop's handler taken in `runtime`.
+fn with_handback(tag: &str, runtime: &Path) -> Harness {
+    use super::super::handback::{Taken, take};
+    let dir = Dir::new(tag);
+    let listener = StdUnixListener::bind(dir.socket()).unwrap();
+    let Taken::Bound(handback) = take(Some(runtime)).unwrap() else { panic!("the handler is free") };
+    let reporter = Reporter::capture();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let sink = log.clone();
+    let logger: Log = Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string()));
+    let serving = super::serve_with_handback(listener, Some(handback), &reporter, logger, Options::default()).unwrap();
+    Harness { dir, reporter, log, serving: Some(serving) }
+}
+
+/// `bastion-mc bedrock hand-back <address>`, as the browser runs it (in-process here).
+async fn hand_back(runtime: &Path, address: String) -> super::super::handback::Outcome {
+    let runtime = runtime.to_path_buf();
+    tokio::task::spawn_blocking(move || super::super::handback::hand_back(Some(&runtime), &address)).await.unwrap()
+}
+
+/// What the browser hands back is checked as a pasted answer is: an address of another sign-in
+/// is refused — the prompt stays and keeps its answers (a web page can make the browser call the
+/// handler) — and this sign-in's goes to the game, rebuilt.
+#[tokio::test]
+async fn an_address_the_browser_hands_back_is_checked_like_a_pasted_one_and_handed_to_the_game() {
+    use super::super::handback::Outcome;
+    let runtime = handback_runtime("ok");
+    let h = with_handback("hbok", &runtime.0);
+    // Nothing waits yet.
+    let early = hand_back(&runtime.0, final_url("st4te")).await;
+    assert!(matches!(&early, Outcome::Refused(why) if why.contains("no Bedrock sign-in is waiting")), "{early:?}");
+    let mut stream = h.request(&start_url("st4te"), REDIRECT_URI).await;
+    let page = h.page(1).await;
+    assert!(page.handback && page.state == SignInState::Waiting, "the prompt says the handler is this session's");
+    // Another sign-in's address: refused with the reason, the prompt stays, its answers are kept.
+    let other = hand_back(&runtime.0, final_url("another")).await;
+    assert!(matches!(&other, Outcome::Refused(why) if why.contains("state")), "{other:?}");
+    let still = h.page(2).await;
+    assert_eq!(still.state, SignInState::Waiting);
+    assert_eq!(still.attempts_left, 10, "a refused hand-back does not use up an answer");
+    assert!(still.note.as_deref().is_some_and(|n| n.contains("your browser handed back")), "{still:?}");
+    // This sign-in's: handed to the game, rebuilt from code and state.
+    assert_eq!(hand_back(&runtime.0, final_url("st4te")).await, Outcome::Accepted);
+    assert_eq!(reply(&mut stream).await, Reply::Url(format!("{REDIRECT_URI}?code={CODE}&state=st4te")));
+    assert_eq!(h.page(3).await.state, SignInState::Done);
+    let log = h.log().join("\n");
+    assert!(log.contains("came from the desktop's handler and was handed to the game"), "{log}");
+    assert!(!log.contains(CODE) && !format!("{:?}", h.reporter.captured()).contains(CODE), "the code is never shown");
+    let mut h = h;
+    assert!(h.serving.take().unwrap().shutdown().await, "a sign-in was handed to the game");
+    // The session is over: its handler is gone with it.
+    let after = hand_back(&runtime.0, final_url("st4te")).await;
+    assert!(matches!(&after, Outcome::NoSession(_)), "{after:?}");
+}
+
+/// A server without the handler says so in its prompts; one that holds it releases it at its end.
+#[tokio::test]
+async fn a_prompt_says_whether_the_browser_hands_the_result_back() {
+    let h = Harness::start("nohb", Options::default());
+    let _stream = h.request(&start_url("s"), REDIRECT_URI).await;
+    assert!(!h.page(1).await.handback, "no handler in this session: the prompt asks for a paste");
+}
