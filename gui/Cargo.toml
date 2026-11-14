@@ -12,7 +12,10 @@ bastion-mc-proto = { path = "../crates/proto" }
 # wgpu with a software (tiny-skia) fallback, both display servers, tokio as the executor.
 # Not enabled on purpose: `linux-theme-detection` (the theme is always dark, and it would add
 # a D-Bus client), `thread-pool` (tokio runs the tasks), image/svg/markdown widgets.
-iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "tokio", "x11", "wayland"] }
+# `canvas` draws the gauge, frames and marks (adds the lyon crates); `advanced` only makes the
+# toolkit's widget interface public, for the one widget of our own (`view/tiles.rs`), and adds
+# no crate.
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "tokio", "x11", "wayland", "canvas", "advanced"] }
 tokio = { version = "1.54", default-features = false, features = ["process", "io-util", "sync", "time", "macros", "rt"] }
 
 [dev-dependencies]

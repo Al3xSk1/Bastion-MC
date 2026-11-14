@@ -16,6 +16,11 @@
 //!
 //! If the UI goes away (window closed, crash) the channel closes, the task closes the
 //! child's standard input, and the launcher shuts the game down on its own.
+//!
+//! The emergency stop ([`scram`]) is the one command that is handled the other way round:
+//! nothing this program does — a stop, a closed window, a time limit — ever ends the
+//! launcher that is removing credentials. It is started, listened to, and otherwise left
+//! alone.
 
 use std::{
     path::{Path, PathBuf},
@@ -41,6 +46,11 @@ const STOP_GRACE: Duration = Duration::from_secs(30);
 /// with it; this only matters if some stray descendant still holds one open.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const MAX_STRAY_CHARS: usize = 2000;
+/// How long the window waits for a scram before it says "still running" and stops waiting.
+/// Reaching it ends nothing: the launcher is left to finish. A scram normally takes a
+/// second or two; the slow part is deleting what killed games left behind, which is
+/// bounded by the size of that data, not by a clock.
+pub const SCRAM_WAIT_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 /// Everything the UI can ask of the launcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,59 +150,145 @@ pub enum Outcome {
 /// same effect as calling [`Handle::stop`].
 #[derive(Debug, Clone)]
 pub struct Handle {
-    stop: mpsc::Sender<()>,
+    /// Each request carries the time the launcher gets before it is killed.
+    stop: mpsc::Sender<Duration>,
 }
 
 impl Handle {
     pub fn stop(&self) {
+        self.stop_within(STOP_GRACE);
+    }
+
+    /// Like [`Handle::stop`], with `grace` instead of the default before the launcher is
+    /// killed. Of several requests the earliest deadline counts: asking again can shorten
+    /// the wait, never lengthen it.
+    pub fn stop_within(&self, grace: Duration) {
         // Full or closed both mean a stop is already under way.
-        let _ = self.stop.try_send(());
+        let _ = self.stop.try_send(grace);
     }
 }
 
 /// A handle wired to a channel the caller holds, for tests of the UI logic.
 #[doc(hidden)]
-pub fn test_handle(stop: mpsc::Sender<()>) -> Handle {
+pub fn test_handle(stop: mpsc::Sender<Duration>) -> Handle {
     Handle { stop }
+}
+
+/// What the launcher running a scram says, as it says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScramUpdate {
+    /// The launcher is running: from here on it does its work whatever becomes of this
+    /// program. The first update, unless the launcher could not be started.
+    Started,
+    /// One line of its report, cleaned of control characters. May be empty (the report has
+    /// paragraphs).
+    Line(String),
+    /// Its own error message.
+    Error(String),
+    /// Always the last update.
+    Finished(ScramEnd),
+}
+
+/// How a scram ended, as far as this program can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScramEnd {
+    /// The launcher's exit status. Its contract: 0 only if everything was removed, 1 (and
+    /// lines starting "COULD NOT") if something is still there.
+    Exited(i32),
+    /// Ended by a signal — not one from this program, which never sends a scram any.
+    Killed,
+    FailedToStart(String),
+    /// [`SCRAM_WAIT_LIMIT`] passed. The launcher was left running.
+    StillRunning,
+}
+
+/// Run `bastion-mc --events scram --yes` and report what it says, line by line, then how it
+/// ended. Must be called inside a tokio runtime.
+///
+/// This is deliberately not a [`Request`]: it must work while another command (a running
+/// game) holds the one job slot — stopping that game is part of what it does.
+///
+/// **Nothing here ever ends the launcher.** Removing credentials has to be allowed to
+/// finish: there is no stop channel, no kill when the receiver or this task is dropped
+/// (closing the window mid-scram leaves the launcher to complete on its own), and the time
+/// limit only ends the *waiting* ([`ScramEnd::StillRunning`]). Its standard error goes to
+/// `/dev/null` rather than a pipe for the same reason: a pipe whose reader has gone away
+/// makes the writer fail, and a launcher that fails to print must not thereby fail to
+/// remove. And it is put into a process group of its own, so that a signal aimed at this
+/// program's group — Ctrl-C in the terminal the window was started from — is not aimed at
+/// it as well.
+pub fn scram(launcher: &Path) -> mpsc::Receiver<ScramUpdate> {
+    let mut command = Command::new(launcher);
+    command.arg(EVENTS_FLAG).args(["scram", "--yes"]);
+    scram_with(command, SCRAM_WAIT_LIMIT)
+}
+
+fn scram_with(mut command: Command, limit: Duration) -> mpsc::Receiver<ScramUpdate> {
+    let (updates, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(false).process_group(0);
+    tokio::spawn(watch_scram(command, updates, limit));
+    receiver
+}
+
+async fn watch_scram(mut command: Command, updates: mpsc::Sender<ScramUpdate>, limit: Duration) {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = updates.send(ScramUpdate::Finished(ScramEnd::FailedToStart(error.to_string()))).await;
+            return;
+        }
+    };
+    let _ = updates.send(ScramUpdate::Started).await;
+    let (lines, mut output) = mpsc::channel(CHANNEL_CAPACITY);
+    // If this function returns first (the time limit), the reader ends with it and the
+    // pipe closes. The launcher is built for that — it is what a front end that exits
+    // looks like: its event writer notes the broken pipe and stops writing, and the
+    // command carries on.
+    let reader = tokio::spawn(forward(child.stdout.take().expect("piped stdout"), lines, true));
+
+    // A send that fails means nobody is watching any more. That changes nothing for the
+    // launcher: it is still waited for, its output still read.
+    let relay = async |update: Update| {
+        let update = match update {
+            Update::Event(Event::Status { text }) => ScramUpdate::Line(clean(&text)),
+            Update::Event(Event::Error { message, .. }) => ScramUpdate::Error(clean(&message)),
+            Update::Stray(text) => ScramUpdate::Line(text),
+            _ => return,
+        };
+        let _ = updates.send(update).await;
+    };
+    let deadline = Instant::now() + limit;
+    let mut output_open = true;
+    let end = loop {
+        tokio::select! {
+            line = output.recv(), if output_open => match line {
+                Some(update) => relay(update).await,
+                None => output_open = false,
+            },
+            status = child.wait() => break match status {
+                Ok(status) => status.code().map_or(ScramEnd::Killed, ScramEnd::Exited),
+                Err(error) => ScramEnd::FailedToStart(error.to_string()),
+            },
+            _ = tokio::time::sleep_until(deadline) => break ScramEnd::StillRunning,
+        }
+    };
+    if end != ScramEnd::StillRunning {
+        // Everything it wrote before it exited is delivered before `Finished`.
+        let drained = async {
+            while let Some(update) = output.recv().await {
+                relay(update).await;
+            }
+        };
+        if tokio::time::timeout(DRAIN_GRACE, drained).await.is_err() {
+            reader.abort();
+        }
+    }
+    let _ = updates.send(ScramUpdate::Finished(end)).await;
 }
 
 /// Where the launcher binary is: next to this program (true both for `/usr/bin` and for a
 /// cargo target directory), else the packaged location. `$PATH` is deliberately not
 /// searched.
-/// Run `bastion-mc --events scram --yes` to its end and return what it reported, one line
-/// per entry. This is deliberately not a [`Request`]: it must work while another command
-/// (a running game) holds the one job slot — stopping that game is part of what it does.
-pub async fn scram(launcher: PathBuf) -> Result<Vec<String>, String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(60),
-        Command::new(&launcher)
-            .arg(EVENTS_FLAG)
-            .args(["scram", "--yes"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "the launcher did not finish within a minute".to_string())?
-    .map_err(|e| format!("cannot run {}: {e}", launcher.display()))?;
-    let mut lines = Vec::new();
-    let mut failure = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        match Event::parse_line(line) {
-            Some(Event::Status { text }) => lines.push(text),
-            Some(Event::Error { message, .. }) => failure = Some(message),
-            _ => {}
-        }
-    }
-    match failure {
-        Some(message) => Err(message),
-        None if lines.is_empty() => Err(format!("the launcher reported nothing ({})", output.status)),
-        None => Ok(lines),
-    }
-}
-
 pub fn default_launcher() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -224,7 +320,7 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
             return;
         }
     };
-    let (stop, mut stop_requests) = mpsc::channel(1);
+    let (stop, mut stop_requests) = mpsc::channel(4);
     let _ = updates.send(Update::Started(Handle { stop })).await;
 
     let mut control = child.stdin.take();
@@ -232,23 +328,33 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
     let stderr = tokio::spawn(forward(child.stderr.take().expect("piped stderr"), updates.clone(), false));
 
     let mut kill_at: Option<Instant> = None;
+    let (mut handles_alive, mut listened_to, mut killed) = (true, true, false);
     let status = loop {
-        tokio::select! {
+        // An explicit stop, every handle dropped, or nobody listening any more: all of
+        // them end the command the same, orderly way. A further request can only bring
+        // the deadline forward.
+        let grace = tokio::select! {
             status = child.wait() => break status,
-            // An explicit stop, every handle dropped, or nobody listening any more: all of
-            // them end the command the same, orderly way.
-            _ = async { tokio::select! { _ = stop_requests.recv() => {}, _ = updates.closed() => {} } }, if control.is_some() => {
-                if let Some(mut pipe) = control.take() {
-                    let _ = pipe.write_all(format!("{STOP_COMMAND}\n").as_bytes()).await;
-                    let _ = pipe.shutdown().await;
-                }
-                kill_at = Some(Instant::now() + STOP_GRACE);
+            request = stop_requests.recv(), if handles_alive => {
+                handles_alive = request.is_some();
+                request.unwrap_or(STOP_GRACE)
             }
-            _ = tokio::time::sleep_until(kill_at.unwrap_or_else(Instant::now)), if kill_at.is_some() => {
+            _ = updates.closed(), if listened_to => {
+                listened_to = false;
+                STOP_GRACE
+            }
+            _ = tokio::time::sleep_until(kill_at.unwrap_or_else(Instant::now)), if kill_at.is_some() && !killed => {
                 let _ = child.start_kill();
-                kill_at = None;
+                killed = true;
+                continue;
             }
+        };
+        if let Some(mut pipe) = control.take() {
+            let _ = pipe.write_all(format!("{STOP_COMMAND}\n").as_bytes()).await;
+            let _ = pipe.shutdown().await;
         }
+        let deadline = Instant::now() + grace;
+        kill_at = Some(kill_at.map_or(deadline, |earlier| earlier.min(deadline)));
     };
     // Everything the launcher wrote before it exited is delivered before `Finished` — but a
     // pipe that never closes must not keep the UI waiting for that `Finished` forever.
@@ -271,16 +377,34 @@ async fn supervise(mut command: Command, updates: mpsc::Sender<Update>) {
 /// Printable text only, bounded. The launcher already sanitises what comes out of the
 /// sandbox; this covers everything else that can end up on its output.
 pub fn clean(text: &str) -> String {
-    let mut out: String = text
+    clean_to(text, MAX_STRAY_CHARS)
+}
+
+/// Characters that are not shown but change how the text around them is: line and
+/// paragraph separators, and the marks that reorder text (a label must not read
+/// differently from what it contains).
+fn is_layout_control(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// [`clean`] with the bound given: for the launcher's words that end up in a label.
+pub fn clean_to(text: &str, max_chars: usize) -> String {
+    let mut printable = text
         .chars()
-        .filter(|c| *c == '\t' || !c.is_control())
-        .map(|c| if c == '\t' { ' ' } else { c })
-        .take(MAX_STRAY_CHARS)
-        .collect();
-    if text.chars().count() > MAX_STRAY_CHARS {
+        .filter(|c| *c == '\t' || !(c.is_control() || is_layout_control(*c)))
+        .map(|c| if c == '\t' { ' ' } else { c });
+    let mut out: String = printable.by_ref().take(max_chars).collect();
+    if printable.next().is_some() {
         out.push('…');
     }
     out
+}
+
+/// `text` in at most `chars` characters, printable: all of it, or its beginning and the mark
+/// of the cut. For what has to fit on one line.
+pub fn fit(text: &str, chars: usize) -> String {
+    let all = clean_to(text, chars);
+    if all.chars().count() <= chars { all } else { clean_to(text, chars.saturating_sub(1)) }
 }
 
 /// Read `stream` line by line, with a hard bound on line length, and forward it.
@@ -483,5 +607,189 @@ echo '{"event":"exited","code":0}'"#;
         let long = clean(&"é".repeat(MAX_STRAY_CHARS + 10));
         assert_eq!(long.chars().count(), MAX_STRAY_CHARS + 1);
         assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn fitting_never_returns_more_characters_than_asked_for() {
+        assert_eq!(fit("vanilla", 7), "vanilla");
+        assert_eq!(fit("vanilla", 20), "vanilla");
+        assert_eq!(fit("vanilla-latest", 7), "vanill…");
+        assert_eq!(fit("van\u{1b}illa", 7), "vanilla", "what is not shown does not count");
+        for chars in 1..40 {
+            let fitted = fit(&"é".repeat(30), chars);
+            assert!(fitted.chars().count() <= chars, "{chars}: {fitted}");
+            assert_eq!(fitted.ends_with('…'), chars < 30, "{chars}: the cut is marked, and only a cut");
+        }
+        // No room at all still says that something was left out.
+        assert_eq!(fit("vanilla", 0), "…");
+        assert_eq!(fit("", 0), "");
+    }
+
+    // ------------------------------------------------------------------ the emergency stop
+    //
+    // Never against the real launcher: `scram --yes` removes real sign-ins from the kernel
+    // keyring, whatever directories a test points it at.
+
+    /// Run a stand-in for the launcher the way [`scram`] runs the real one.
+    fn scram_fake(script: &str, limit: Duration) -> mpsc::Receiver<ScramUpdate> {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script, "bastion-mc", EVENTS_FLAG, "scram", "--yes"]);
+        scram_with(command, limit)
+    }
+
+    async fn collect_scram(mut receiver: mpsc::Receiver<ScramUpdate>) -> Vec<ScramUpdate> {
+        let mut all = Vec::new();
+        while let Some(update) = tokio::time::timeout(Duration::from_secs(20), receiver.recv()).await.unwrap() {
+            all.push(update);
+        }
+        all
+    }
+
+    fn line(text: &str) -> ScramUpdate {
+        ScramUpdate::Line(text.into())
+    }
+
+    /// Wait until a stand-in has written its last word to `marker`: it was not killed.
+    fn finished(marker: &Path) -> bool {
+        for _ in 0..400 {
+            if std::fs::read_to_string(marker).is_ok_and(|said| said.trim() == "finished") {
+                let _ = std::fs::remove_file(marker);
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// A stand-in that, like the launcher (and every Rust program), does not die of a
+    /// closed pipe: it reports, takes `seconds`, reports again and then leaves its mark.
+    fn slow_scram(marker: &Path, seconds: &str) -> String {
+        let _ = std::fs::remove_file(marker);
+        [
+            "trap '' PIPE".to_string(),
+            r#"printf '%s\n' '{"event":"status","text":"started"}'"#.to_string(),
+            format!("sleep {seconds}"),
+            r#"printf '%s\n' '{"event":"status","text":"still removing"}'"#.to_string(),
+            format!("echo finished > '{}'", marker.display()),
+        ]
+        .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_scram_report_arrives_line_by_line_and_ends_with_the_launchers_exit_status() {
+        // What the launcher prints when something could not be removed, and its status 1.
+        let script = r#"[ "$1 $2 $3" = "--events scram --yes" ] || exit 99
+printf '%s\n' '{"event":"hello","protocol":1,"version":"0.0.0"}'
+printf '%s\n' '{"event":"status","text":"no launch was in progress"}'
+printf '%s\n' '{"event":"status","text":"COULD NOT delete the vault file /v/alt.age: Permission denied"}'
+printf '%s\n' '{"event":"status","text":""}'
+printf '%s\n' '{"event":"status","text":"an escape: \u001b[31mred"}'
+printf '%s\n' 'not an event'
+printf '%s\n' 'on standard error' >&2
+printf '%s\n' '{"event":"accounts","default":"default","accounts":[]}'
+exit 1"#;
+        let updates = collect_scram(scram_fake(script, SCRAM_WAIT_LIMIT)).await;
+        assert_eq!(
+            updates,
+            [
+                ScramUpdate::Started,
+                line("no launch was in progress"),
+                line("COULD NOT delete the vault file /v/alt.age: Permission denied"),
+                line(""),
+                line("an escape: [31mred"),
+                line("not an event"),
+                ScramUpdate::Finished(ScramEnd::Exited(1)),
+            ],
+            "the report in order, cleaned; the status is the launcher's, not turned into a success"
+        );
+
+        let clean = r#"printf '%s\n' '{"event":"status","text":"no launch was in progress"}'"#;
+        let updates = collect_scram(scram_fake(clean, SCRAM_WAIT_LIMIT)).await;
+        assert_eq!(
+            updates,
+            [ScramUpdate::Started, line("no launch was in progress"), ScramUpdate::Finished(ScramEnd::Exited(0))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scram_runs_in_a_process_group_of_its_own() {
+        // Field five of /proc/<pid>/stat is the process group: the stand-in leads its own,
+        // and that is not the group of the program that started it.
+        let script = r#"read -r _ _ _ _ group _ < /proc/$$/stat
+read -r _ _ _ _ parents _ < /proc/$PPID/stat
+[ "$group" = "$$" ] && [ "$group" != "$parents" ] && printf '%s\n' '{"event":"status","text":"a group of its own"}'
+exit 0"#;
+        let updates = collect_scram(scram_fake(script, SCRAM_WAIT_LIMIT)).await;
+        assert_eq!(
+            updates,
+            [ScramUpdate::Started, line("a group of its own"), ScramUpdate::Finished(ScramEnd::Exited(0))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scram_that_fails_is_killed_or_cannot_start_ends_as_exactly_that() {
+        let failing = r#"printf '%s\n' '{"event":"error","message":"cannot create /run/user/1000/x","code":3}'
+exit 3"#;
+        let updates = collect_scram(scram_fake(failing, SCRAM_WAIT_LIMIT)).await;
+        assert_eq!(
+            updates,
+            [
+                ScramUpdate::Started,
+                ScramUpdate::Error("cannot create /run/user/1000/x".into()),
+                ScramUpdate::Finished(ScramEnd::Exited(3))
+            ]
+        );
+
+        let updates = collect_scram(scram_fake("kill -9 $$", SCRAM_WAIT_LIMIT)).await;
+        assert_eq!(updates, [ScramUpdate::Started, ScramUpdate::Finished(ScramEnd::Killed)]);
+
+        // Nothing was started, and nothing says that something was.
+        let updates = collect_scram(scram(Path::new("/nonexistent/bastion-mc"))).await;
+        assert!(matches!(updates.as_slice(), [ScramUpdate::Finished(ScramEnd::FailedToStart(_))]), "{updates:?}");
+    }
+
+    #[tokio::test]
+    async fn a_scram_that_outlasts_the_wait_limit_is_reported_as_still_running_and_is_not_killed() {
+        let marker = scratch_file("scram-outlasts-the-limit");
+        let script = slow_scram(&marker, "3");
+        let updates = collect_scram(scram_fake(&script, Duration::from_millis(300))).await;
+        assert_eq!(
+            updates,
+            [ScramUpdate::Started, line("started"), ScramUpdate::Finished(ScramEnd::StillRunning)],
+            "the waiting ends at the limit, and what ended is said"
+        );
+        assert!(!marker.exists(), "the stand-in was still at work when the waiting ended");
+        assert!(
+            tokio::task::spawn_blocking(move || finished(&marker)).await.unwrap(),
+            "nothing killed it: it ran to its end, with nobody reading its output"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scram_nobody_listens_to_any_more_runs_to_its_end() {
+        let marker = scratch_file("scram-unwatched");
+        let mut receiver = scram_fake(&slow_scram(&marker, "0.5"), SCRAM_WAIT_LIMIT);
+        assert_eq!(receiver.recv().await, Some(ScramUpdate::Started));
+        assert_eq!(receiver.recv().await, Some(line("started")));
+        drop(receiver); // the window stopped listening
+        assert!(tokio::task::spawn_blocking(move || finished(&marker)).await.unwrap());
+    }
+
+    #[test]
+    fn a_scram_survives_the_front_end_going_away() {
+        let marker = scratch_file("scram-outlives-the-runtime");
+        let script = slow_scram(&marker, "1");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let first = runtime.block_on(async {
+            let mut receiver = scram_fake(&script, SCRAM_WAIT_LIMIT);
+            receiver.recv().await
+        });
+        // The earliest moment the window lets itself be closed during a scram (see
+        // `app`): the launcher exists, and has perhaps not said a word yet.
+        assert_eq!(first, Some(ScramUpdate::Started));
+        // Everything this program had running is gone, as when its window is closed: the
+        // task that watched the launcher, the handle to the child, the pipe it wrote to.
+        drop(runtime);
+        assert!(finished(&marker), "the launcher was neither killed nor stopped by its output going nowhere");
     }
 }

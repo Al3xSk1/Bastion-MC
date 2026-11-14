@@ -48,7 +48,6 @@ pub struct Console {
     /// Lines that scrolled out of the window since the last clear.
     discarded: u64,
     fold: Fold,
-    pub open: bool,
 }
 
 const EVENT_OPEN: &str = "<log4j:Event ";

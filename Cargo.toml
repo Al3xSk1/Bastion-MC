@@ -83,3 +83,21 @@ strip = "none"           # makepkg splits debug info itself
 
 [profile.dev]
 overflow-checks = true
+
+# The front end's fallback renderer and its headless tests draw every pixel in software.
+# Unoptimised, that makes the test run take a minute and the fallback renderer a slide show
+# in debug builds. These are the crates that do the drawing; none of them is linked into the
+# launcher.
+[profile.dev.package]
+tiny-skia = { opt-level = 3 }
+tiny-skia-path = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+swash = { opt-level = 3 }
+zeno = { opt-level = 3 }
+skrifa = { opt-level = 3 }
+read-fonts = { opt-level = 3 }
+harfrust = { opt-level = 3 }
+iced_tiny_skia = { opt-level = 3 }
+iced_graphics = { opt-level = 3 }
+png = { opt-level = 3 }
+fdeflate = { opt-level = 3 }

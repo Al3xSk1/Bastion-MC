@@ -14,6 +14,8 @@
 pub mod app;
 pub mod backend;
 pub mod console;
+pub mod hud;
+pub mod runbook;
 pub mod theme;
 pub mod view;
 
@@ -22,6 +24,13 @@ use std::path::PathBuf;
 use iced::{Size, window};
 
 pub use app::{App, Message};
+
+/// The size the window opens with: wide enough for the launch page to stand in three
+/// columns around its gauge.
+pub const WINDOW_SIZE: Size = Size::new(1180.0, 720.0);
+/// The smallest the window can be made. Every page is still usable at this size: the rail
+/// shrinks to its marks and the pages fold into one column or scroll.
+pub const WINDOW_MIN_SIZE: Size = Size::new(640.0, 520.0);
 
 pub struct Options {
     /// The `bastion-mc` binary to drive.
@@ -39,8 +48,8 @@ pub fn application(
         .theme(theme::theme())
         .subscription(App::subscription)
         .window(window::Settings {
-            size: Size::new(880.0, 720.0),
-            min_size: Some(Size::new(640.0, 520.0)),
+            size: WINDOW_SIZE,
+            min_size: Some(WINDOW_MIN_SIZE),
             platform_specific: window::settings::PlatformSpecific {
                 // Wayland app-id / X11 WM_CLASS; matches the desktop entry.
                 application_id: "bastion-mc-gui".into(),

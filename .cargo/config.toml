@@ -1,5 +1,7 @@
 [env]
-# The headless UI tests (gui/src/view.rs) render in software: the result does not depend on
-# the machine's GPU, and no GPU driver is loaded into the test process. This only affects
-# `iced_test`; the application itself picks its renderer at run time (see `ICED_BACKEND`).
+# The widget tests (gui/src/view/tests.rs) lay out and render in software: their result does
+# not depend on the machine's GPU, and that test binary creates no GPU context. This only
+# affects `iced_test`'s simulator. The emulator test (gui/tests/emulated.rs) and the
+# application itself pick their renderer at run time: the GPU one where it is usable (see
+# `ICED_BACKEND`), without a window in the emulator's case.
 ICED_TEST_BACKEND = "tiny-skia"
