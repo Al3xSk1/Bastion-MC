@@ -185,17 +185,19 @@ pub fn fuzz(data: &[u8]) {
 pub(crate) mod tests {
     use super::*;
 
-    /// A real JPEG, made by ffmpeg from a test pattern (`testsrc2`, 64×48, quality 5):
-    /// what both callers receive in practice.
+    /// A real JPEG of a test pattern: what both callers receive in practice. Made once by
+    /// ffmpeg 9.0.2 and kept in `testdata/`, so that these unit tests need no ffmpeg (CI's
+    /// container and a clean chroot running the PKGBUILD's `check()` have none):
+    ///
+    /// `ffmpeg -f lavfi -i testsrc2=size=WxH:rate=1 -frames:v 1 -q:v 5 -f mjpeg -`
     pub(crate) fn sample_jpeg(width: u32, height: u32) -> Vec<u8> {
-        let out = std::process::Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
-            .arg(format!("testsrc2=size={width}x{height}:rate=1"))
-            .args(["-frames:v", "1", "-q:v", "5", "-f", "mjpeg", "-"])
-            .output()
-            .expect("ffmpeg");
-        assert!(out.status.success() && out.stdout.starts_with(&[0xff, 0xd8]));
-        out.stdout
+        let jpeg: &[u8] = match (width, height) {
+            (640, 480) => include_bytes!("testdata/testsrc2-640x480.jpg"),
+            (64, 48) => include_bytes!("testdata/testsrc2-64x48.jpg"),
+            other => panic!("no sample JPEG of {other:?} in testdata/"),
+        };
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        jpeg.to_vec()
     }
 
     #[test]

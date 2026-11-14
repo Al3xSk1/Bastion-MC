@@ -179,13 +179,17 @@ libFuzzer targets themselves.
       like any other window; running it in the nested compositor, as the game, would
       isolate it, at the cost of a second compositor for a short task.
 - [ ] **Clips: hardware encoding** (media.md, Open): x264 only; VAAPI not done.
-- [ ] **CI on GitHub has not run yet** (`.github/workflows/ci.yml`, added 2026-11-14): every
-      step was run on the development machine from an empty build directory as a fresh user
-      (fmt, clippy, the launcher's 452 unit tests, the protocol's 7, the front end's 126,
-      the fuzz check, `cargo deny`, and `makepkg` from a `git archive` of the commit), but
-      not on GitHub's runners or inside the `archlinux` container (nothing can be pushed from
-      a session). After the first push, read the run: the container's `seccomp=unconfined`
-      option, the package names and the toolchain pin are where a difference would show.
+- [ ] **CI on GitHub: the first run** (run 43580491851, 2026-11-14, after the first push of
+      `.github/workflows/ci.yml`): formatting and lints, the fuzz check and `cargo deny`
+      passed; two jobs failed for what the local simulation on the development machine could
+      not show, both fixed in the commit after this one's first run: the package job's
+      `git archive` ran as root in the container on a checkout owned by the runner's user
+      ("dubious ownership"; now `git -c safe.directory=…` for that command, reproduced and
+      checked in a user namespace), and two unit tests of `src/spotify/picture.rs` ran
+      `ffmpeg`, which the container lacks (they now read two sample JPEGs from
+      `src/spotify/testdata/`; the PKGBUILD's `check()` in a clean chroot would have failed the
+      same way). Still to be seen on GitHub: the front end's, the protocol's and the
+      website's tests in the container, and the package job past `git archive`.
 - [ ] **The integration suites on a GitHub runner** (`.github/workflows/integration.yml`,
       started by hand): never run. The runner's kernel (7.0) lacks Landlock ABI 10, so the
       UDP-rule tests will skip; what else differs from the development machine (AppArmor's

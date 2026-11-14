@@ -209,7 +209,11 @@ jobs:
           useradd --create-home builder
           dir=/home/builder/package
           install -d -o builder "$dir"
-          git archive --prefix="$pkgbase/" -o "$dir/$pkgbase-$pkgver.tar.gz" HEAD
+          # This step runs as root in the container, and the checkout belongs to the runner's
+          # user: git refuses a repository owned by someone else ("dubious ownership") unless
+          # it is named as safe, and actions/checkout names it only for its own step. Named
+          # here for this one command, not in a configuration file.
+          git -c safe.directory="$GITHUB_WORKSPACE" archive --prefix="$pkgbase/" -o "$dir/$pkgbase-$pkgver.tar.gz" HEAD
           sed -e "s|^source=.*|source=(\"$pkgbase-$pkgver.tar.gz\")|" \
               -e "s|^b2sums=.*|b2sums=('SKIP')|" \
               packaging/arch/PKGBUILD > "$dir/PKGBUILD"
