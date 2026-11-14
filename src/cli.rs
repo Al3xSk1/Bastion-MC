@@ -558,8 +558,10 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
                 }
                 eprintln!(
                     "This stops every running game started by this launcher and removes all stored sign-ins\n\
-                     (refresh tokens in the kernel keyring, age vault files, remembered players) for every account.\n\
-                     You will have to sign in again. Nothing is revoked at Microsoft by this.\n\
+                     (refresh tokens in the kernel keyring, age vault files, remembered players) for every account,\n\
+                     the Spotify token, the TOTP secret of the Realms approval, and the in-game browser's profile\n\
+                     (its site sessions). You will have to sign in again. Nothing is revoked at Microsoft, Spotify\n\
+                     or any site by this.\n\
                      Type SCRAM and press Enter to continue; anything else cancels:"
                 );
                 let mut answer = String::new();

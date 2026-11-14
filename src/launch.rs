@@ -572,13 +572,21 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     // 6. Network, display, audio, GPU.
     let join: Option<ServerRule> = opts.join.as_deref().map(|j| parse_server(j, false)).transpose()?;
     let mode = if opts.burner { NetworkMode::None } else { inst.config.network.mode.unwrap_or(cfg.network.mode) };
+    // Whether this launch will have the phone: the companion added with its phone feature on
+    // (decided the way `companion::plan` decides, without its side effects).
+    let phone_possible = {
+        let companion_cfg = cfg.companion.merged(&inst.config.companion);
+        companion_cfg.phone && companion::decide(&companion_cfg, &inst.kind, &inst.minecraft, jvm.major).is_ok()
+    };
     // Realms (realms-sync): brokered only where the broker is, for an account, and only when
-    // the user chose how joins are approved. Otherwise it stays as it was (refused).
+    // the user chose how joins are approved — and only with a phone, because the approval is
+    // typed into it. Otherwise it stays as it was (refused).
     let realms_on = cfg.realms.approve != crate::realms::Approve::Off
         && matches!(mode, NetworkMode::Filtered)
         && cfg.network.broker.enabled
         && !demo
-        && !opts.burner;
+        && !opts.burner
+        && phone_possible;
     let (network, tcp, resolv, policy) = match mode {
         NetworkMode::Filtered => {
             let mut policy = egress::Policy::new(&cfg.network, &inst.config.network, join.clone())?;
@@ -1012,7 +1020,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
     let mut services: Vec<Box<dyn phone::Service>> = Vec::new();
     // (Or a test drives the apps without a phone: the clips' script, the browser's self-test;
     // neither can be set from a configuration file.)
-    let phone_wanted = companion.has_channel() || cfg.clips.script.is_some() || cfg.browser.self_test;
+    let phone_wanted =
+        (companion.has_channel() && companion.phone_on()) || cfg.clips.script.is_some() || cfg.browser.self_test;
     if companion.has_channel() {
         // The demo (fake state for every app) is a test switch, never a configuration key.
         if cfg.companion.demo_phone || std::env::var_os("BASTION_PHONE_DEMO").is_some_and(|v| v == "1") {
@@ -1220,7 +1229,10 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 realms_broker = Some(prepared);
                 service
             }
-            Ok(None) => crate::realms::RealmsService::off(cfg.realms.approve, realms_off_reason(cfg, mode, demo)),
+            Ok(None) => crate::realms::RealmsService::off(
+                cfg.realms.approve,
+                realms_off_reason(cfg, mode, demo, phone_possible),
+            ),
             Err(why) => {
                 let warning = format!("realms: Realms joins are refused in this session — {why}");
                 log.record(Source::Launcher, &warning);
@@ -1716,13 +1728,17 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
 }
 
 /// Why Realms joins are refused in this launch, when the configuration or the launch rules it out.
-fn realms_off_reason(cfg: &Config, mode: NetworkMode, demo: bool) -> String {
+fn realms_off_reason(cfg: &Config, mode: NetworkMode, demo: bool, phone_possible: bool) -> String {
     if cfg.realms.approve == crate::realms::Approve::Off {
         "[realms] approve = \"off\"".into()
     } else if demo {
         "demo mode: there is no account to join with".into()
     } else if !matches!(mode, NetworkMode::Filtered) || !cfg.network.broker.enabled {
         "Realms approval needs the filtered network and the credential broker".into()
+    } else if !phone_possible {
+        "the approval is typed into the in-game phone, and this launch has none (it needs the companion with its \
+         phone, in a Fabric instance of a supported Minecraft version)"
+            .into()
     } else {
         "not available in this session".into()
     }

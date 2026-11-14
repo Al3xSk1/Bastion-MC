@@ -400,6 +400,11 @@ impl Plan {
         self.outcome.is_ok()
     }
 
+    /// Whether the mod is added with its phone feature on (the phone's services are for it).
+    pub fn phone_on(&self) -> bool {
+        matches!(&self.outcome, Ok(injection) if injection.features.contains(&"phone"))
+    }
+
     /// Add the mod to the sandbox being assembled: two read-only files, one JVM option, and
     /// (with a channel) one socket the game may connect to.
     pub fn attach(&self, mounts: &mut Vec<Mount>, jvm_args: &mut Vec<String>, unix_sockets: &mut Vec<PathBuf>) {

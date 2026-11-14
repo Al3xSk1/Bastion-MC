@@ -26,7 +26,8 @@ pub const LIMITS: &[VerbLimit] = &[
     VerbLimit { verb: "mouse", per_minute: 1800, burst: 120 },
     VerbLimit { verb: "scroll", per_minute: 600, burst: 60 },
     VerbLimit { verb: "key", per_minute: 600, burst: 40 },
-    VerbLimit { verb: "text", per_minute: 60, burst: 10 },
+    // The phone sends what is typed every 0.1 s while typing goes on (BrowserApp.java).
+    VerbLimit { verb: "text", per_minute: 600, burst: 60 },
     VerbLimit { verb: "frames", per_minute: 60, burst: 10 },
 ];
 

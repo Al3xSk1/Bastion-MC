@@ -1,5 +1,5 @@
 //! The real system JVM under the full sandbox, started exactly the way the launcher starts
-//! Minecraft: `java <hardening flags> -cp … BastionBootstrap`, with the main class and the
+//! Minecraft: `java <hardening flags> -cp … bastion.boot.BastionBootstrap`, with the main class and the
 //! argument vector (including the access token) delivered over the fd-0 socket.
 
 use std::{io::Write, net::Shutdown, path::Path, process::Command, time::Duration};
