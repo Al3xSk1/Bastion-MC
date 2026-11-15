@@ -489,11 +489,14 @@ libFuzzer targets themselves.
       nothing was installed with pacman, so desktop-file-utils' hook was read, not run on it.
 
 ## Blocked on you (hardware, accounts, identity)
-- [ ] **Register bastion-mc's public Microsoft app**: an Azure app registration (personal
-      Microsoft accounts only, public client flows on, redirect `http://localhost`), then
-      Mojang's approval for the Minecraft API (<https://aka.ms/AppRegInfo>). Send the client
-      ID: it goes into `PUBLIC_CLIENT_ID` (`src/auth/client.rs`). Until then the public method
-      says it is not in this build, and signing in needs your own application.
+- [ ] **Register bastion-mc's public Microsoft app**: an Azure app registration named
+      "bastion-mc" (personal Microsoft accounts only, redirect `http://localhost` under *Mobile
+      and desktop applications*, **Allow public client flows off** — no device code, see
+      THREAT_MODEL N6), then Mojang's approval for the Minecraft API
+      (<https://aka.ms/AppRegInfo>). Send the client ID: it goes into `PUBLIC_CLIENT_ID`
+      (`src/auth/client.rs`), and the "not in this build" sentences go from README,
+      `examples/config.toml` and `site/src/pages/getting-started.html` (a unit test insists).
+      Until then signing in needs your own application.
 - [ ] **Live Microsoft → Xbox → Minecraft sign-in.** Needs your Azure client ID and
       Mojang's approval of it. First things to run then: `bastion-mc login`,
       `launch <id> --join <server>` in filtered mode.

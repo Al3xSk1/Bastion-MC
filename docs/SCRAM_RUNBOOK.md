@@ -89,9 +89,9 @@ Do these in order. Sign in only by typing the address yourself or by using the l
 3. **Remove apps you did not authorise.** Fake "verification" or "giveaway" apps that were
    granted access keep that access through a password change:
    https://www.microsoft.com/consent
-   Remove everything you do not recognise. (Your own launcher application is listed here
-   too, under the name you gave it in Azure. Removing it is harmless: you consent again at
-   the next sign-in.)
+   Remove everything you do not recognise. (The launcher's application is listed here too:
+   as "bastion-mc" when you sign in through bastion-mc's own app, or under the name you gave
+   your own in Azure. Removing it is harmless: you consent again at the next sign-in.)
 
 4. **Look at what happened.**
    https://account.live.com/Activity

@@ -674,6 +674,26 @@ fn the_accounts_page_says_which_app_sign_ins_go_to() {
 }
 
 #[test]
+fn the_public_app_offers_no_device_code_sign_in() {
+    let mut app = ready(true);
+    on(&mut app, Page::Accounts);
+    for (which, offered) in [(bastion_mc_proto::SignInApp::Public, false), (bastion_mc_proto::SignInApp::Own, true)] {
+        let _ = app.update(Message::Refresh);
+        feed(
+            &mut app,
+            events([Event::Account(Account {
+                app: Some(which),
+                client_id_configured: true,
+                device_flow: false,
+                ..account(false)
+            })]),
+        );
+        finish(&mut app, 0);
+        assert_eq!(shows(&app, &caps("Device code")), offered, "{which:?}");
+    }
+}
+
+#[test]
 fn an_account_is_added_by_its_label() {
     let mut app = ready(true);
     on(&mut app, Page::Accounts);

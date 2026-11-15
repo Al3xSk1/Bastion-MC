@@ -10,6 +10,7 @@
 //!    wait with a forged error.
 //!  * The callback response is a constant page; nothing from the request is reflected.
 
+use super::client::{Client, ClientKind};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -77,32 +78,28 @@ async fn token_request(api: &impl Api, form: &[(&str, &[u8])]) -> Result<std::re
     }
 }
 
-fn explain(e: &OAuthError) -> Error {
+fn explain(e: &OAuthError, kind: ClientKind) -> Error {
     let hint = match e.error.as_str() {
         "invalid_grant" => " — the stored sign-in has expired or was revoked; run `bastion-mc login`",
-        "invalid_client" | "unauthorized_client" => {
-            " — check the Azure app: it must allow personal Microsoft accounts and be a public client \
-             (\"Allow public client flows\" for device code; redirect URI http://localhost under \
-             \"Mobile and desktop applications\" for PKCE)"
-        }
+        "invalid_client" | "unauthorized_client" => super::client::refused_by_microsoft_hint(kind),
         _ => "",
     };
     Error::Auth(format!("Microsoft sign-in failed: {}{hint}", e.describe()))
 }
 
 /// Refresh-token grant.
-pub async fn refresh(api: &impl Api, client_id: &str, refresh_token: &Secret) -> Result<MsaTokens> {
+pub async fn refresh(api: &impl Api, client: Client<'_>, refresh_token: &Secret) -> Result<MsaTokens> {
     token_request(
         api,
         &[
-            ("client_id", client_id.as_bytes()),
+            ("client_id", client.id.as_bytes()),
             ("grant_type", b"refresh_token"),
             ("refresh_token", refresh_token.expose()),
             ("scope", SCOPE.as_bytes()),
         ],
     )
     .await?
-    .map_err(|e| explain(&e))
+    .map_err(|e| explain(&e, client.kind))
 }
 
 // ---------------------------------------------------------------- authorization code + PKCE
@@ -325,7 +322,7 @@ pub(crate) async fn read_head(stream: &mut TcpStream) -> Option<Vec<u8>> {
 
 async fn redeem_code(
     api: &impl Api,
-    client_id: &str,
+    client: Client<'_>,
     code: &Secret,
     redirect_uri: &str,
     verifier: &Secret,
@@ -333,7 +330,7 @@ async fn redeem_code(
     token_request(
         api,
         &[
-            ("client_id", client_id.as_bytes()),
+            ("client_id", client.id.as_bytes()),
             ("grant_type", b"authorization_code"),
             ("code", code.expose()),
             ("redirect_uri", redirect_uri.as_bytes()),
@@ -342,7 +339,7 @@ async fn redeem_code(
         ],
     )
     .await?
-    .map_err(|e| explain(&e))
+    .map_err(|e| explain(&e, client.kind))
 }
 
 // ---------------------------------------------------------------- device code
@@ -358,7 +355,8 @@ struct DeviceReply {
     interval: u64,
 }
 
-async fn device_flow(api: &impl Api, client_id: &str, reporter: &Reporter) -> Result<MsaTokens> {
+async fn device_flow(api: &impl Api, client: Client<'_>, reporter: &Reporter) -> Result<MsaTokens> {
+    let client_id = client.id;
     let url = format!("{AUTHORITY}/devicecode");
     let headers =
         vec![header("content-type", "application/x-www-form-urlencoded")?, header("accept", "application/json")?];
@@ -366,7 +364,7 @@ async fn device_flow(api: &impl Api, client_id: &str, reporter: &Reporter) -> Re
     let reply = api.call(ApiRequest { method: Method::POST, url: &url, headers, body: Some(body) }).await?;
     if reply.status != 200 {
         return Err(match serde_json::from_slice::<OAuthError>(reply.body.expose()) {
-            Ok(e) => explain(&e),
+            Ok(e) => explain(&e, client.kind),
             Err(_) => Error::Auth(format!("device code request failed: HTTP {}", reply.status)),
         });
     }
@@ -408,7 +406,7 @@ async fn device_flow(api: &impl Api, client_id: &str, reporter: &Reporter) -> Re
             Ok(tokens) => return Ok(tokens),
             Err(e) if e.error == "authorization_pending" => {}
             Err(e) if e.error == "slow_down" => interval += Duration::from_secs(5),
-            Err(e) => return Err(explain(&e)),
+            Err(e) => return Err(explain(&e, client.kind)),
         }
     }
 }
@@ -417,22 +415,23 @@ async fn device_flow(api: &impl Api, client_id: &str, reporter: &Reporter) -> Re
 /// to `reporter` as an event; a terminal prints it, a front end displays it.
 pub async fn interactive_login(
     api: &impl Api,
-    client_id: &str,
+    client: Client<'_>,
     flow: AuthFlow,
     reporter: &Reporter,
 ) -> Result<MsaTokens> {
+    super::client::check_flow(client, flow)?;
     match flow {
-        AuthFlow::Device => device_flow(api, client_id, reporter).await,
+        AuthFlow::Device => device_flow(api, client, reporter).await,
         AuthFlow::Pkce => {
             let loopback = Loopback::bind().await?;
             let pkce = pkce()?;
             let redirect = loopback.redirect_uri();
             reporter.emit(Event::BrowserLogin {
-                url: authorize_url(client_id, &redirect, &loopback.state, &pkce.challenge),
+                url: authorize_url(client.id, &redirect, &loopback.state, &pkce.challenge),
                 timeout_secs: LOGIN_TIMEOUT.as_secs(),
             });
             let code = loopback.wait(LOGIN_TIMEOUT).await?;
-            redeem_code(api, client_id, &code, &redirect, &pkce.verifier).await
+            redeem_code(api, client, &code, &redirect, &pkce.verifier).await
         }
     }
 }
@@ -563,7 +562,16 @@ mod tests {
             ("/token", 200, r#"{"access_token":"MSA-ACCESS","refresh_token":"MSA-REFRESH"}"#),
         ]);
         let reporter = Reporter::capture();
-        let tokens = device_flow(&api, "01234567-89ab-cdef-0123-456789abcdef", &reporter).await.unwrap();
+        let tokens = device_flow(
+            &api,
+            super::super::client::Client {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                kind: super::super::client::ClientKind::Own,
+            },
+            &reporter,
+        )
+        .await
+        .unwrap();
         assert_eq!(tokens.refresh_token.unwrap().expose(), b"MSA-REFRESH");
         assert_eq!(
             reporter.captured(),
@@ -592,7 +600,15 @@ mod tests {
             ),
             ("/token", 400, r#"{"error":"authorization_declined","error_description":"no"}"#),
         ]);
-        assert!(device_flow(&api, "c", &Reporter::capture()).await.is_err());
+        assert!(
+            device_flow(
+                &api,
+                super::super::client::Client { id: "c", kind: super::super::client::ClientKind::Own },
+                &Reporter::capture()
+            )
+            .await
+            .is_err()
+        );
         for (code, uri) in [
             ("USER-1", "http://evil.example/link"),           // not HTTPS
             ("\\u001b[2JFAKE", "https://microsoft.com/link"), // escape sequence in the code
@@ -601,7 +617,16 @@ mod tests {
             let body = format!(r#"{{"device_code":"D","user_code":"{code}","verification_uri":"{uri}"}}"#);
             let api = Scripted::new(vec![("/devicecode", 200, body.as_str())]);
             let reporter = Reporter::capture();
-            assert!(device_flow(&api, "c", &reporter).await.is_err(), "{code:?} {uri:?}");
+            assert!(
+                device_flow(
+                    &api,
+                    super::super::client::Client { id: "c", kind: super::super::client::ClientKind::Own },
+                    &reporter
+                )
+                .await
+                .is_err(),
+                "{code:?} {uri:?}"
+            );
             assert!(reporter.captured().is_empty(), "nothing may be shown for {code:?} {uri:?}");
         }
     }

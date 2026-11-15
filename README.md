@@ -46,9 +46,9 @@ xdg-dbus-proxy).
 
 | | |
 |---|---|
-| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod, the phone's channel and dispatcher, the phone's services (browser, Spotify, clips, Realms, settings sync), Bedrock's version store, sandbox profile, relay, sign-in bridge and scram | 996 tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker, JVM and Bedrock suites start the real sandbox, those of Spotify and Realms the D-Bus proxy and the Realms dialer in theirs; 9 confine a real multi-threaded process the way the launcher confines itself (4 in the confinement suite; the others read the companion channel, drive the Spotify proxy, save a clip, relay Bedrock's traffic and run a whole Bedrock session — its relay, sign-in bridge and hand-back — from inside that confinement), and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the voice relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 31 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
+| Sandbox, seccomp, Landlock, egress relay, credential broker, the launcher's own confinement, signing, store, TLS policy, event interface, sound-server check, settings sanitisers, account registry, canary, scram, packs, mod catalog, voice-chat relay, companion mod, the phone's channel and dispatcher, the phone's services (browser, Spotify, clips, Realms, settings sync), Bedrock's version store, sandbox profile, relay, sign-in bridge and scram | 1002 tests pass in the workspace (`cargo test --workspace`; what that number counts is below this table). Tests in the sandbox, voice, companion, egress, broker, JVM and Bedrock suites start the real sandbox, those of Spotify and Realms the D-Bus proxy and the Realms dialer in theirs; 9 confine a real multi-threaded process the way the launcher confines itself (4 in the confinement suite; the others read the companion channel, drive the Spotify proxy, save a clip, relay Bedrock's traffic and run a whole Bedrock session — its relay, sign-in bridge and hand-back — from inside that confinement), and one more opens, connects and uses a UDP socket in a process confined that way, as the voice relay does for each new flow (the voice relay's own code ran after confinement only inside a real launch, THREAT_MODEL §7 E22); 31 harnesses, one per parser of bytes the launcher does not control, feed generated and mutated input to those parsers |
 | Display isolation | Wayland security context: against a real headless sway (the game's socket is listed: 37 interfaces, none of the 16 known privileged ones). Nested compositor: against real gamescope 3.17 on a private X display, including the clipboard cut-off in all four directions and the control run without it. Both with real Minecraft 26.3 started through them. **Not** on a real Wayland desktop session, and playability inside gamescope is not assessed. Both suites were run again on the merged trees of the third and fourth rounds |
-| Graphical front end | 132 unit tests (38 of them lay out, click and render the widgets in software; since the fourth round also the Realms approval prompt, and since the fifth the Bedrock sign-in prompt and a Bedrock session's six protection aspects, laid out at four window sizes) and 5 tests of the whole application against a stand-in launcher (one of them plays a Bedrock instance), run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree of the third round); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland; the Realms prompt never shown for a real join, nor the Bedrock sign-in prompt for a real sign-in |
+| Graphical front end | 133 unit tests (39 of them lay out, click and render the widgets in software; since the fourth round also the Realms approval prompt, and since the fifth the Bedrock sign-in prompt and a Bedrock session's six protection aspects, laid out at four window sizes) and 5 tests of the whole application against a stand-in launcher (one of them plays a Bedrock instance), run by iced's emulator without a display; a real demo launch driven through its backend worker and through the application's own controls (an opt-in test, run on the front end's branch and again on the merged tree of the third round); the real window started and closed on a private X11 display, with the GPU and with the software renderer. **No** click in a real window; **not** run on Wayland; the Realms prompt never shown for a real join, nor the Bedrock sign-in prompt for a real sign-in |
 | Arch packages (`makepkg`) | both build, their `check()` passes and both binaries pass the hardening check — run again on the merged tree of the fifth round, from a `git archive` of that tree (the PKGBUILD's own `source` fetches the repository); the `bastion-mc` package also holds `docs/BEDROCK.md` and the desktop entry of the Bedrock sign-in handler. On GitHub the CI workflow builds them the same way; its second run there (2026-11-14, on the tree the fifth round started from) passed all five jobs. **Not**: the packages installed with pacman (the hook that registers the desktop entry was read, not run on them), the fifth round's tree on GitHub (simulated on the development machine) |
 | Real Minecraft 26.3 client in the sandbox (demo mode, no account), vanilla and as a signed Fabric profile | runs: hardware OpenGL, window, audio, HTTPS through the relay and the broker, mods loaded from the sealed mount; also as a `--burner` session. Run again after the review fixes (launcher confined before it reads anything from the game; THREAT_MODEL §7 E16), and on the merged trees of the third and fourth rounds, without sound: vanilla and Fabric through the nested compositor, with the companion mod, and with ViaFabric and Simple Voice Chat (whose native libraries load inside the sandbox) |
 | Companion mod: zoom, HUD read-out, fullbright (third round) | in the real game (Minecraft 26.3, Fabric Loader 0.20.1): it loads, reports to the launcher while the launcher is confined, and the effect of each feature was measured in a running demo world, on the nested-compositor, direct-X11 and Wayland display paths; on the X11 paths also with the zoom key pressed through XTEST on a private display. **Not**: a person at the keyboard, a multiplayer server; on the nine other families of versions these three switch themselves off (they are written for 26.3's classes) |
@@ -73,12 +73,12 @@ xdg-dbus-proxy).
 | Accounts of other services: the Spotify Web API, Discord signed in in the phone's browser | implemented and tested against stand-ins (rows above); **not run against the live services** (needs your Spotify client ID and account, Premium for playback control, and your Discord account) |
 | NVIDIA, Java 8-era versions end to end, real `age` binary and hardware plugins, coverage-guided fuzzing (needs a nightly toolchain) | implemented, **not exercised** on the development machine |
 
-**What "996 tests" counts.** A run of `cargo test --workspace --no-fail-fast` on the tree
+**What "1002 tests" counts.** A run of `cargo test --workspace --no-fail-fast` on the tree
 with public sign-in, made on 2026-11-15 (no display, no session bus, separate XDG
 directories), printed 44 `test result` lines — 41 test binaries and 3 doc-test runs; 4 of
-them hold no test, and the launcher's doc-test run only an ignored one — that add up to 996
-passed, 0 failed, 2 ignored: the launcher 842 (623 unit, 219 integration), the front end 139
-(132 unit, 5 emulator, 2 live) and the event protocol 15. The two ignored ones are a probe of the terminal reader that
+them hold no test, and the launcher's doc-test run only an ignored one — that add up to 1002
+passed, 0 failed, 2 ignored: the launcher 847 (628 unit, 219 integration), the front end 140
+(133 unit, 5 emulator, 2 live) and the event protocol 15. The two ignored ones are a probe of the terminal reader that
 needs a pseudo-terminal, and a usage example in the documentation of `src/realms/answers.rs`.
 Not every one of them tests something in such a run: 27 are opt-in and return at once
 without their environment variables (see [Tests](#tests)), 11 are halves that other tests
@@ -1362,8 +1362,10 @@ Microsoft to this machine only.
 
 Reasons to use your own: Microsoft or Mojang can block a shared application, and all its
 users with it (yours is unaffected); the sign-in page then names the application you
-registered; you control it. Changing from one application to the other means signing in
-again: a refresh token belongs to the application it was issued to.
+registered; you control it; and the device-code flow (`login --device`, a code typed on another
+device) works only with your own: bastion-mc's app does not allow it, so that its approved ID
+cannot be used to trick someone into typing a code. Changing from one application to the
+other means signing in again: a refresh token belongs to the application it was issued to.
 
 Your own application, once:
 
@@ -1384,8 +1386,13 @@ Your own application, once:
 
 `bastion-mc config example` prints a fully commented configuration file.
 
-For the project's owner, the same steps register bastion-mc's app; once Mojang has approved
-it, its client ID goes into `PUBLIC_CLIENT_ID` in `src/auth/client.rs`.
+For the project's owner, registering bastion-mc's app: the same registration (personal
+Microsoft accounts only, redirect `http://localhost` under *Mobile and desktop applications*,
+named "bastion-mc") but with **Allow public client flows left off** (no device code), then
+Mojang's approval. Its client ID then goes into `PUBLIC_CLIENT_ID` in `src/auth/client.rs`,
+and the sentences that say the app is not in this build go: in this README, in
+`examples/config.toml` and on the website's getting-started page (a unit test,
+`the_documents_say_whether_this_build_has_the_public_app`, fails until they do).
 
 ### Signing in and playing
 

@@ -219,7 +219,7 @@ fn card<'a>(app: &'a App, entry: &'a AccountEntry) -> Element<'a, Message> {
                 label,
                 kit::solid("Sign in", Tone::Accent, sign_in(account.device_flow)),
             ));
-            if !account.device_flow {
+            if !account.device_flow && account.app != Some(bastion_mc_proto::SignInApp::Public) {
                 session = session.push(tagged(
                     "device-code",
                     label,

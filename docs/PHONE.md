@@ -520,8 +520,8 @@ These need your accounts or your consent, and were not done for that reason:
   behaviour behind the phone is unobserved.
 * **A signed-in Discord**, or any signed-in site: `bastion-mc browser login <site>` with your
   account.
-* **Realms**: a signed-in account — which needs your Azure client ID and Mojang's approval
-  of it — and a Realm.
+* **Realms**: a signed-in account — through bastion-mc's app once a build carries it, or your
+  own Azure client ID and Mojang's approval of it — and a Realm.
 * **The token store**: the Spotify token and the Realms TOTP secret were never written to or
   read from a real kernel keyring or age vault (that would touch your entries).
 

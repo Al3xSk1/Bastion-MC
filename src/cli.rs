@@ -46,7 +46,7 @@ USAGE: bastion-mc [--events] <command> [options]
   doctor                              check kernel, sandbox and trust setup (starts a test sandbox)
   config path | example               show the config file location / print a commented example
 
-  login  [--device] [--account NAME]  sign in with your own Azure client ID
+  login  [--device] [--account NAME]  sign in (bastion-mc's app, or your own; --device needs your own)
   logout [--account NAME]             forget the stored refresh token
   account list                        every local account and its sign-in state
   account default [NAME]              show or set the account used when --account is not given
@@ -909,13 +909,14 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
 async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, reporter: &Reporter) -> Result<()> {
     let client = auth::client::effective(&cfg.auth)
         .ok_or_else(|| Error::Config(auth::client::none_message(&paths.config_file())))?;
+    auth::client::check_flow(client, flow)?;
     reporter.status(format!("Signing in through {}.", auth::client::describe(Some(client))));
     if client.kind == auth::client::ClientKind::Public {
         reporter.status("To use your own Azure application instead, set auth.client_id.");
     }
     let store = TokenStore::open(&cfg.auth, paths)?;
     let http = launch::http_client(cfg)?;
-    let tokens = msa::interactive_login(&http, client.id, flow, reporter).await?;
+    let tokens = msa::interactive_login(&http, client, flow, reporter).await?;
     let refresh = tokens.refresh_token.ok_or_else(|| {
         Error::Auth("Microsoft returned no refresh token; the app must be allowed the `offline_access` scope".into())
     })?;

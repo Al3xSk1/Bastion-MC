@@ -52,8 +52,8 @@ for the whole session.
 * **Your Microsoft account**: the one that owns your Java profile, if you want the capes on
   Java. You sign in to it in each Bedrock session.
 * **Your decision about the licence substitution**, below.
-* For capes on Java: bastion-mc's own Java sign-in (README, "Accounts"), which needs your Azure
-  application and Mojang's approval of it.
+* For capes on Java: bastion-mc's own Java sign-in (README, "Accounts"), through bastion-mc's
+  app once a build carries it, or through your own Azure application and Mojang's approval of it.
 * For the sign-in to come back from your browser by itself: bastion-mc installed from its Arch
   package (it brings the desktop entry) and desktop-file-utils (its pacman hook registers the
   entry; most desktops have it). Without them you paste the address by hand

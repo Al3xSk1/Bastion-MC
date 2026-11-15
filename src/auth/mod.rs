@@ -1,8 +1,9 @@
-//! Bring-your-own-OAuth authentication.
+//! Microsoft → Xbox Live → Minecraft authentication.
 //!
-//! There is no client ID in this program. The user registers their own Azure application and
-//! puts its ID in `config.toml`; every request below goes directly from this machine to
-//! Microsoft, Xbox Live and Mojang. No intermediary, no telemetry.
+//! A sign-in goes to the user's own Azure application (`[auth] client_id`) or, without one, to
+//! bastion-mc's public application (`client`, empty until it is approved); every request below
+//! goes directly from this machine to Microsoft, Xbox Live and Mojang. No intermediary, no
+//! telemetry.
 //!
 //! Chain: Microsoft OAuth 2.0 (Authorization Code + PKCE on a loopback port, or Device Code)
 //! → Xbox Live user token → XSTS token → Minecraft access token → entitlement check → profile.
@@ -102,7 +103,7 @@ pub async fn authenticate(
     refresh_token: &Secret,
     allow_game_pass: bool,
 ) -> Result<(Session, Secret)> {
-    let msa = msa::refresh(api, client.id, refresh_token).await?;
+    let msa = msa::refresh(api, client, refresh_token).await?;
     let next_refresh = match msa.refresh_token {
         Some(t) => t,
         None => refresh_token.try_clone()?,
@@ -287,15 +288,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unapproved_public_app_is_named_as_bastion_mcs_not_yours() {
-        let mut api = happy();
-        api.replies[3].1 = 403;
-        api.replies[3].2 = r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#.to_string();
-        let refresh = Secret::from_slice(b"R").unwrap();
+    async fn a_refusal_by_microsoft_or_mojang_names_whose_app_it_was() {
         let public = Client { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", kind: ClientKind::Public };
-        let err = authenticate(&api, public, &refresh, false).await.unwrap_err().to_string();
-        assert!(err.contains("bastion-mc's application"), "{err}");
-        assert!(!err.contains("your Azure application"), "{err}");
+        // Mojang (step 3): "Invalid app registration".
+        for (client, expect, never) in [
+            (OWN, "your Azure application", "bastion-mc's application"),
+            (public, "bastion-mc's application", "your Azure application"),
+        ] {
+            let mut api = happy();
+            api.replies[3].1 = 403;
+            api.replies[3].2 = r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#.to_string();
+            let refresh = Secret::from_slice(b"R").unwrap();
+            let err = authenticate(&api, client, &refresh, false).await.unwrap_err().to_string();
+            assert!(err.contains(expect) && !err.contains(never), "{client:?}: {err}");
+        }
+        // Microsoft (step 0): the application refused, e.g. disabled.
+        for (client, expect, never) in [
+            (OWN, "check the Azure app", "bastion-mc's application"),
+            (public, "bastion-mc's application", "check the Azure app"),
+        ] {
+            let mut api = happy();
+            api.replies[0].1 = 400;
+            api.replies[0].2 =
+                r#"{"error":"unauthorized_client","error_description":"AADSTS700016: application disabled"}"#
+                    .to_string();
+            let refresh = Secret::from_slice(b"R").unwrap();
+            let err = authenticate(&api, client, &refresh, false).await.unwrap_err().to_string();
+            assert!(err.contains(expect) && !err.contains(never), "{client:?}: {err}");
+        }
     }
 
     #[tokio::test]
