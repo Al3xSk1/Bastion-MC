@@ -1,6 +1,8 @@
 # Bastion OS: an image-based Arch install that runs only bastion-mc
 
-Status: design, 2026-11-14. Not built.
+Status: design, 2026-11-14, approved; updated with the owner's changes on 2026-11-15.
+Implementation plans: `docs/superpowers/plans/2026-11-15-bastion-os.md` and its package plans.
+Not built.
 
 ## Intent
 
@@ -110,8 +112,9 @@ exist on a machine whose only compositor is ours to configure.
   or newer (kernel 7.0+) for the launcher's self-confinement.
 - **The live ISO's writable space is small** (a RAM overlay): the image is built on the
   target disk, after partitioning, not in the live environment's RAM.
-- **Tools on the ISO**: archinstall is there; `mkosi`, `systemd-ukify` and friends are
-  installed into the live environment with pacman (signed packages) at the start.
+- **Tools on the ISO**: `mkosi` is installed into the live environment with pacman (a signed
+  package) at the start; its tools tree brings `systemd-ukify`, `sbsigntools`, `erofs-utils`
+  and the rest, also as signed packages.
 - **bastion-mc's sandbox and confinement stay exactly as they are**: the OS adds layers
   around them, never weakens one (no setuid helpers, user namespaces stay on).
 - **Prior art**: ParticleOS (systemd's image-based OS built with mkosi, Arch supported) — its
@@ -143,8 +146,7 @@ exist on a machine whose only compositor is ours to configure.
 
 ### Install (`packaging/os/install.sh`)
 
-1. **Checks**, each refusing with the reason: booted by UEFI on x86_64; the archinstall
-   version; network; Secure Boot in setup mode (otherwise: how to reset the firmware's keys);
+1. **Checks**, each refusing with the reason: booted by UEFI on x86_64; network; Secure Boot in setup mode (otherwise: how to reset the firmware's keys);
    a TPM2 (required: a machine without one is refused).
 2. **Choices** through the installer's menus: the target disk (whole disk; the confirmation
    names its model and size), keyboard layout, time zone, locale, host name, the player
@@ -326,8 +328,8 @@ builder measures). No setuid binaries beyond what the base system cannot work wi
 ### Repository layout
 
 - `packaging/os/` — the mkosi recipe (configuration, the partition definitions for
-  systemd-repart, the units, the nftables policy, the polkit rule, the session), the
-  archinstall script, and the bootstrap.
+  systemd-repart, the units, the nftables policy, the polkit rule, the session) and the
+  installer (`install.sh` and its `install/lib/`).
 - `tests/os/` — the VM tests (below).
 - `docs/OS.md` — the user guide; rows for `docs/THREAT_MODEL.md`.
 
@@ -349,8 +351,7 @@ account. Never run against a real disk.
 The exact mkosi options and partition sizes; EROFS or squashfs for `/usr`; ext4 or btrfs for
 the state partition; gamescope's flags; greetd or a systemd unit for the automatic login;
 the front end's new controls (within its rules); how the VM
-test drives the installer (archinstall's `--silent` with a configuration file, or its own
-options).
+test drives the installer (an answers file given to `install.sh`).
 
 ## Decided with the owner after the first draft
 
