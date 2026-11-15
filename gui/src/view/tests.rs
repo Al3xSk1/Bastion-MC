@@ -648,6 +648,32 @@ fn a_configured_device_flow_is_the_sign_in_and_no_client_means_no_sign_in() {
 }
 
 #[test]
+fn the_accounts_page_says_which_app_sign_ins_go_to() {
+    let mut app = ready(true);
+    on(&mut app, Page::Accounts);
+    let cases = [
+        (
+            Account { app: Some(bastion_mc_proto::SignInApp::Public), client_id_configured: true, ..account(false) },
+            "Sign-ins go to bastion-mc's app.",
+        ),
+        (
+            Account { app: Some(bastion_mc_proto::SignInApp::Own), client_id_configured: true, ..account(false) },
+            "Sign-ins go to your own app.",
+        ),
+        (
+            Account { client_id_configured: false, ..account(false) },
+            "This build has no public bastion-mc app yet. Set auth.client_id in config.toml to your own Azure application to sign in; demo mode works without.",
+        ),
+    ];
+    for (summary, expected) in cases {
+        let _ = app.update(Message::Refresh);
+        feed(&mut app, events([Event::Account(summary)]));
+        finish(&mut app, 0);
+        assert!(shows(&app, expected), "{expected}");
+    }
+}
+
+#[test]
 fn an_account_is_added_by_its_label() {
     let mut app = ready(true);
     on(&mut app, Page::Accounts);

@@ -47,10 +47,18 @@ pub fn page(app: &App, layout: Layout) -> Element<'_, Message> {
             kit::label_in("No OAuth client ID is configured", theme::AMBER),
             None,
             kit::small(
-                "Set auth.client_id in config.toml to your own Azure application to sign in. \
-                 Demo mode works without an account.",
+                "This build has no public bastion-mc app yet. Set auth.client_id in config.toml to your own \
+                 Azure application to sign in; demo mode works without.",
             ),
         ));
+    }
+    // Which application a sign-in goes to: also one setting for all accounts.
+    let sign_in_app = app.accounts.iter().filter_map(|entry| entry.summary.as_ref()).find_map(|a| a.app);
+    if let Some(which) = sign_in_app {
+        content = content.push(kit::small(match which {
+            bastion_mc_proto::SignInApp::Public => "Sign-ins go to bastion-mc's app.",
+            bastion_mc_proto::SignInApp::Own => "Sign-ins go to your own app.",
+        }));
     }
     if app.job_kind() == Some(JobKind::SignIn) {
         content = content.push(sign_in(app));
