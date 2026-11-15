@@ -110,6 +110,7 @@ fn status_reports_account_and_instances_without_touching_a_token() {
             store: account.store.clone(),
             client_id_configured: false,
             device_flow: false,
+            app: None,
         }
     );
     assert!(instances.is_empty());

@@ -175,10 +175,25 @@ pub struct Account {
     pub player: Option<String>,
     /// Where the refresh token rests ("kernel keyring …").
     pub store: String,
-    /// `auth.client_id` is set. Without it only demo mode works.
+    /// There is an application to sign in through (your own or bastion-mc's). Without one only
+    /// demo mode works.
     pub client_id_configured: bool,
     /// The configured default sign-in flow is the device-code flow.
     pub device_flow: bool,
+    /// Which Microsoft application a sign-in goes to; absent from launchers older than this
+    /// field and when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<SignInApp>,
+}
+
+/// Whose Microsoft application a sign-in goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInApp {
+    /// The application named by the user's `[auth] client_id`.
+    Own,
+    /// bastion-mc's public application.
+    Public,
 }
 
 /// How well one aspect of a launch is protected.
@@ -287,6 +302,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_account_without_app_still_parses() {
+        let a: Account = serde_json::from_str(
+            r#"{"account":"default","signed_in":false,"store":"kernel keyring","client_id_configured":true,"device_flow":false}"#,
+        )
+        .unwrap();
+        assert_eq!(a.app, None);
+    }
+
+    #[test]
+    fn the_app_travels_as_a_lowercase_word() {
+        let a = Account { app: Some(SignInApp::Public), ..Account::default() };
+        assert!(serde_json::to_string(&a).unwrap().contains("\"app\":\"public\""));
+    }
+
+    #[test]
     fn events_round_trip_as_single_lines() {
         let events = vec![
             Event::Hello { protocol: PROTOCOL, version: "0.1.0".into() },
@@ -368,6 +398,7 @@ mod tests {
             store: "kernel keyring".into(),
             client_id_configured: false,
             device_flow: false,
+            app: None,
         });
         assert_eq!(
             account.to_line(),

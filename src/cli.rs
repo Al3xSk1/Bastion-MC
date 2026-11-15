@@ -264,6 +264,7 @@ fn account_summary(paths: &Paths, cfg: &Config, account: &str) -> events::Accoun
         store,
         client_id_configured: cfg.auth.client_id.is_some(),
         device_flow: cfg.auth.flow == AuthFlow::Device,
+        app: None,
     }
 }
 

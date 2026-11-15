@@ -1643,6 +1643,7 @@ pub(crate) mod testing {
             store: "kernel keyring (RAM only, cleared at reboot)".into(),
             client_id_configured: true,
             device_flow: false,
+            app: None,
         }
     }
 

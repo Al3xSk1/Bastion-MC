@@ -1561,6 +1561,7 @@ fn unbroken_states() -> Vec<(&'static str, App)> {
         store: long.clone(),
         client_id_configured: true,
         device_flow: false,
+        app: None,
     };
     let base = || {
         let mut app = App::boot(PathBuf::from("/nonexistent/bastion-mc"), label.clone()).0;
