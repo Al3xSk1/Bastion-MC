@@ -6,7 +6,9 @@ Status: design, 2026-11-14. Not built.
 
 The user's words: "a custom arch install script that makes arch atomic and only run this
 isolated af, using a custom window manager, isolating everything"; "it's a script you run
-with `archinstall --script`"; "the image based system". Decided with the user:
+with `archinstall --script`"; "the image based system"; later (2026-11-15): "I'm fine ditching
+archinstall --script in exchange for something like an ArchTitus install script" and "we need
+Bedrock support natively, one-click install, for the OS". Decided with the user:
 
 - **Image-based and atomic**: the operating system is a signed, read-only image; an update
   is a whole new image, never a change in place; a failed update falls back to the previous
@@ -24,6 +26,9 @@ with `archinstall --script`"; "the image based system". Decided with the user:
   machine for the clips the in-game phone saves.
 - **Remote play through Sunshine** (to Moonlight clients), installed natively and **disabled
   by default**, so that the owner can remote in when they switch it on.
+- **An ArchTitus-style installer** (a bash script in the repository, run from the official
+  Arch ISO) instead of an `archinstall --script` module.
+- **Bedrock natively, with a one-click install** from the front end.
 - **Everything is set up in the front end**: what bastion-mc's terminal commands do today
   (signing in, servers, mod profiles and their signing, the phone services' logins) gets pages
   in the front end, because the machine has no terminal.
@@ -42,9 +47,9 @@ exist on a machine whose only compositor is ours to configure.
 
 ## Goals
 
-1. **G1 Install**: from the official Arch ISO, `archinstall --script bastion_os` installs the
-   system on a whole disk, after the usual archinstall choices and one unmistakable
-   confirmation that the disk is erased.
+1. **G1 Install**: from the official Arch ISO, the repository's installer
+   (`packaging/os/install.sh`, ArchTitus-style: clone, run, answer a few menus) installs the
+   system on a whole disk, after one unmistakable confirmation that the disk is erased.
 2. **G2 Atomic, verified OS**: a signed unified kernel image (UKI) and a dm-verity-protected
    `/usr` in two slots (A/B); updates write the spare slot; boot counting falls back to the
    previous slot when a new one does not reach a working session.
@@ -78,8 +83,6 @@ exist on a machine whose only compositor is ours to configure.
 ## Non-goals (first version)
 
 - NVIDIA's proprietary driver (its kernel modules would have to be signed for Secure Boot).
-- Bedrock (mcpelauncher is built from the AUR, and its build downloads curl without a
-  checksum); it can be added later as an optional part of the image.
 - Dual boot, installing onto a partition, or keeping another OS on the disk.
 - More than one account; a general desktop; a web browser outside the phone's sandboxed one;
   remote management.
@@ -97,14 +100,11 @@ exist on a machine whose only compositor is ours to configure.
 
 ## Constraints
 
-- **archinstall** loads `--script` only as a module of its own `archinstall/scripts/` package
-  (`importlib.import_module(f"archinstall.scripts.{script}")`, then `module.main(handler)`),
-  so bastion ships the script plus a bootstrap that downloads it with a detached signature,
-  verifies it, copies it into that package, and runs `archinstall --script bastion_os`. The
-  script API changes between archinstall releases (current master: `async def main(
-  arch_config_handler)`, `DiskLayoutConfigurationMenu`, `FilesystemHandler`, `Installer`,
-  `tui.run`); the script targets the archinstall of the current ISO and refuses any other
-  version with a sentence that says so.
+- **The installer** is a bash script in the repository, ArchTitus-style: from the official
+  Arch ISO, `pacman -Sy git`, clone `https://github.com/Al3xSk1/Bastion-MC` (GitHub over
+  HTTPS is the trust anchor the owner chose), `packaging/os/install.sh`. Its menus use
+  `whiptail` (installed into the live environment with pacman if the ISO lacks it). It
+  depends on nothing of archinstall, whose script API changes between releases.
 - **Kernel**: Arch's `linux`, not `linux-hardened` — bastion's sandbox (bubblewrap) needs
   unprivileged user namespaces, which `linux-hardened` turns off by default. Landlock ABI 9
   or newer (kernel 7.0+) for the launcher's self-confinement.
@@ -133,21 +133,20 @@ exist on a machine whose only compositor is ours to configure.
 3. **The window manager** — (A) gamescope as the session (**chosen** by the user: purpose-built
    for games, already part of bastion, quickest to a solid result); (B) a compositor of our
    own in Rust (deferred: full control, but a large security-critical component).
-4. **How the installer is built inside archinstall** — (A) archinstall's interface for the
-   disk and the settings, then mkosi builds the image on the target disk and
-   `systemd-repart` lays out the partitions (**my call**: the image tools do what archinstall's
-   `Installer`, which installs a mutable system with `pacstrap`, cannot); (B) archinstall's
-   `Installer` into partitions, converted to an image afterwards (rejected: two systems'
-   worth of work, and the conversion is where mistakes would hide).
+4. **The installer** — (A) an `archinstall --script` module (the first choice; replaced:
+   archinstall's script API changes between releases, and the image tools do the real work
+   anyway); (B) an ArchTitus-style bash installer in the repository whose menus collect the
+   choices and whose steps run mkosi and `systemd-repart` (**chosen** by the owner,
+   2026-11-15).
 
 ## The design
 
-### Install (the archinstall script)
+### Install (`packaging/os/install.sh`)
 
 1. **Checks**, each refusing with the reason: booted by UEFI on x86_64; the archinstall
    version; network; Secure Boot in setup mode (otherwise: how to reset the firmware's keys);
    a TPM2 (required: a machine without one is refused).
-2. **Choices** through archinstall's interface: the target disk (whole disk; the confirmation
+2. **Choices** through the installer's menus: the target disk (whole disk; the confirmation
    names its model and size), keyboard layout, time zone, locale, host name, the player
    account's name, Wi-Fi (if any) — nothing else.
 3. **Disk**: GPT with the Discoverable Partitions types: an ESP of 1 GiB; `usr-A`,
@@ -220,6 +219,24 @@ the launcher (`bastion-mc --events …`), never by the front end itself:
   (Sending clips), the Java sign-in's persistence (below), updates, shut down and restart.
 - My call: in the first version nothing comes onto the machine except mods from the verified
   catalog (no worlds, resource packs or skins from outside); clips go out through LocalSend.
+
+### Bedrock, installed with one click
+
+- **In the image**: `mcpelauncher-client` and `mcpelauncher-ui`, built from source by the
+  image recipe with every source pinned by checksum — including the curl tarball that the
+  upstream build downloads without one — never from the AUR at build time. bastion-mc's
+  Bedrock support (the fifth round: the sandboxed client, the network profile, the sign-in
+  bridge) is used as it is.
+- **One click**: the front end's "Install Bedrock" starts `mcpelauncher-ui` in a sandbox of
+  its own (a display of its own through bastion's nested compositor, its own directory on the
+  encrypted partition for the Google sign-in, network only to the hosts Google's sign-in and
+  Play delivery need). The player signs in to Google there — Minecraft must be bought on
+  Google Play; the guide recommends a dedicated Google account — and picks a version. When the
+  download ends, bastion imports it (`bedrock import`), shows the licence substitution once
+  with a plain explanation and the switch to accept it, and creates the Bedrock instance.
+  Updating the game is the same button.
+- The Google credential never reaches the game's sandbox or the launcher; it lives only in
+  the UI's own sandboxed directory, and "Remove Google sign-in" deletes it.
 
 ### The Java sign-in's token
 
