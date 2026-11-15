@@ -7,8 +7,9 @@ the day one of them is hostile. It starts the game in a stacked sandbox, lets it
 network only through an allowlisting relay of its own, keeps the account's access token
 out of the game, checks every game file against Mojang's published hashes and every mod in
 `mods/` against a manifest you signed, and confines itself before it reads anything the
-game sends. No built-in OAuth client ID, no telemetry, no update check. It talks to
-Microsoft, Xbox Live and Mojang directly, with *your* Azure application. Its documents say
+game sends. No telemetry, no update check. It signs in through bastion-mc's own Microsoft
+application once Mojang has approved it (until then, and whenever you prefer, through *your
+own* Azure application) and talks to Microsoft, Xbox Live and Mojang directly. Its documents say
 what is defended, how each claim was tested, and what is not defended.
 
 Fabric instances also get the launcher's own companion mod (Minecraft 1.20.1 to 26.3; ten
@@ -1351,9 +1352,21 @@ character yourself. THREAT_MODEL §4.8 has every row, and §5 says it once more.
 
 ## Accounts
 
-### Your own OAuth application
+### Signing in: bastion-mc's app or your own
 
-There is no shared client ID, by design. Once:
+A sign-in goes to one Microsoft application: **your own**, when `[auth] client_id` names one,
+or else **bastion-mc's app**, a public client registered for the project. bastion-mc's app is
+not in this build yet: it is built in once Mojang has approved it for the Minecraft API.
+`bastion-mc status`, `bastion-mc doctor` and the front end's Accounts page say which
+application is in use. Neither application's owner ever receives your tokens: they go from
+Microsoft to this machine only.
+
+Reasons to use your own: Microsoft or Mojang can block a shared application, and all its
+users with it (yours is unaffected); the sign-in page then names the application you
+registered; you control it. Changing from one application to the other means signing in
+again: a refresh token belongs to the application it was issued to.
+
+Your own application, once:
 
 1. Azure portal → *Microsoft Entra ID* → *App registrations* → *New registration*.
    Supported account types: **Personal Microsoft accounts only**. Redirect URI: platform
@@ -1371,6 +1384,9 @@ There is no shared client ID, by design. Once:
    account, no token).
 
 `bastion-mc config example` prints a fully commented configuration file.
+
+For the project's owner, the same steps register bastion-mc's app; once Mojang has approved
+it, its client ID goes into `PUBLIC_CLIENT_ID` in `src/auth/client.rs`.
 
 ### Signing in and playing
 

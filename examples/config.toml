@@ -2,8 +2,9 @@
 # Every value shown is the default unless marked otherwise. Unknown keys are errors.
 
 [auth]
-# REQUIRED for signing in. The Application (client) ID of YOUR OWN Azure app registration.
-# There is no built-in ID. See README.md, "Your own OAuth application".
+# The Application (client) ID of YOUR OWN Azure app registration. Unset: bastion-mc's own
+# public app, once a build carries it (this one does not yet). See README.md, "Signing in:
+# bastion-mc's app or your own".
 # client_id = "00000000-0000-0000-0000-000000000000"
 flow = "pkce"              # "pkce" (browser + loopback redirect) | "device" (code on another device)
 token_store = "keyutils"   # "keyutils" (kernel keyring, RAM only) | "age" | "none"

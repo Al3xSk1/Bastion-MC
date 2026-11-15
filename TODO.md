@@ -489,6 +489,11 @@ libFuzzer targets themselves.
       nothing was installed with pacman, so desktop-file-utils' hook was read, not run on it.
 
 ## Blocked on you (hardware, accounts, identity)
+- [ ] **Register bastion-mc's public Microsoft app**: an Azure app registration (personal
+      Microsoft accounts only, public client flows on, redirect `http://localhost`), then
+      Mojang's approval for the Minecraft API (<https://aka.ms/AppRegInfo>). Send the client
+      ID: it goes into `PUBLIC_CLIENT_ID` (`src/auth/client.rs`). Until then the public method
+      says it is not in this build, and signing in needs your own application.
 - [ ] **Live Microsoft → Xbox → Minecraft sign-in.** Needs your Azure client ID and
       Mojang's approval of it. First things to run then: `bastion-mc login`,
       `launch <id> --join <server>` in filtered mode.
@@ -570,6 +575,17 @@ libFuzzer targets themselves.
       needs root; not exercised.
 - [ ] **Minecraft help-centre wording in the runbook**: their site needs a browser; only
       the request-form address was checked to exist. Read it once and adjust phase 3.
+
+## Done since the fifth round
+
+- **Public sign-in** (`docs/superpowers/specs/2026-11-14-public-signin-design.md`, plan in
+  `docs/superpowers/plans/2026-11-14-public-signin.md`): a sign-in goes to your own
+  application when `[auth] client_id` is set, else to bastion-mc's public one
+  (`auth::client`, `PUBLIC_CLIENT_ID` — empty until it is approved); `status`, `doctor`, the
+  login line and the front end's Accounts page say which; the event protocol's account carries
+  it (`app`, backward compatible); Mojang's "Invalid app registration" names whose application
+  it was. Tests: `auth::client::tests`, the public-app error in `auth::tests`,
+  `events::status_says_which_app_a_sign_in_goes_to`, the Accounts page's view test.
 
 ## Done in the fifth round
 

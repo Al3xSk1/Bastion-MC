@@ -119,8 +119,8 @@ systemctl --user restart pipewire-pulse</code></pre>
 </section>
 
 <section class="section" id="oauth">
-<h2>Your own sign-in application</h2>
-<p>There is no shared OAuth client ID, by design. bastion-mc has no central anything: no built-in client ID, no telemetry, no update check. The launcher talks to Microsoft, Xbox Live and Mojang directly, with an Azure application that is yours. You register it once.</p>
+<h2>Signing in: bastion-mc's app or your own</h2>
+<p>A sign-in goes to your own Azure application when you name one, or else to bastion-mc's own public application. That one is not in this build yet: it is built in once Mojang has approved it. There is no telemetry and no update check either way, and neither application's owner ever receives your tokens. To use your own, register it once:</p>
 <ol class="steps">
 <li>
 <p>In the Azure portal, go to <em>Microsoft Entra ID</em>, then <em>App registrations</em>, then <em>New registration</em>. Supported account types: <strong>Personal Microsoft accounts only</strong>. Redirect URI: platform <strong>Public client/native (mobile &amp; desktop)</strong>, value <code>http://localhost</code>.</p>
@@ -141,8 +141,9 @@ client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"</code></pre>
 <div class="callout warning">
 <p>The sign-in has been tested against scripted replies only. It has not yet been run against the live Microsoft, Xbox and Mojang services.</p>
 </div>
-{{REQUIRE README.md "There is no shared client ID, by design."}}
-{{REQUIRE README.md "No built-in OAuth client ID, no telemetry, no update check."}}
+{{REQUIRE README.md "A sign-in goes to one Microsoft application: your own, when [auth] client_id names one, or else bastion-mc's app, a public client registered for the project. bastion-mc's app is not in this build yet: it is built in once Mojang has approved it for the Minecraft API."}}
+{{REQUIRE README.md "Neither application's owner ever receives your tokens: they go from Microsoft to this machine only."}}
+{{REQUIRE README.md "No telemetry, no update check."}}
 {{REQUIRE README.md "This can take days."}}
 {{REQUIRE docs/THREAT_MODEL.md "the chain is tested against scripted replies only"}}
 {{REQUIRE README.md "not yet run against the live services"}}
