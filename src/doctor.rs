@@ -559,9 +559,9 @@ pub async fn run(paths: &Paths, cfg: &Config, hardening: &Hardening) -> i32 {
         ),
         Err(e) => r.fail("profile signing keys", e.to_string()),
     }
-    match &cfg.auth.client_id {
-        Some(_) => r.ok("OAuth client", "auth.client_id is set (your own Azure application)"),
-        None => r.info("OAuth client", "auth.client_id not set — required for signing in; there is no built-in ID"),
+    match crate::auth::client::effective(&cfg.auth) {
+        Some(client) => r.ok("OAuth client", crate::auth::client::describe(Some(client))),
+        None => r.info("OAuth client", crate::auth::client::describe(None)),
     }
     age_store(&mut r, cfg);
 

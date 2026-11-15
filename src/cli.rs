@@ -262,9 +262,12 @@ fn account_summary(paths: &Paths, cfg: &Config, account: &str) -> events::Accoun
         signed_in,
         player: identity::recall(paths, account).filter(|_| signed_in).map(|i| i.player),
         store,
-        client_id_configured: cfg.auth.client_id.is_some(),
+        client_id_configured: auth::client::effective(&cfg.auth).is_some(),
         device_flow: cfg.auth.flow == AuthFlow::Device,
-        app: None,
+        app: auth::client::effective(&cfg.auth).map(|client| match client.kind {
+            auth::client::ClientKind::Own => bastion_mc_proto::SignInApp::Own,
+            auth::client::ClientKind::Public => bastion_mc_proto::SignInApp::Public,
+        }),
     }
 }
 
@@ -366,9 +369,7 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
                     (false, _) => println!("account {account}: not signed in"),
                 }
                 println!("refresh token store: {}", summary.store);
-                if !summary.client_id_configured {
-                    println!("auth.client_id is not set: only `launch --demo` works until it is");
-                }
+                println!("Microsoft sign-in: {}", auth::client::describe(auth::client::effective(&cfg.auth)));
                 if instances.is_empty() {
                     println!("no instances yet (create one with `bastion-mc instance new`)");
                 }
@@ -906,24 +907,21 @@ fn dispatch(args: &mut Args, command: &str, reporter: &Reporter, hardening: Hard
 }
 
 async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, reporter: &Reporter) -> Result<()> {
-    let client_id = cfg.auth.client_id.as_deref().ok_or_else(|| {
-        Error::Config(format!(
-            "auth.client_id is not set in {}. This launcher has no built-in client ID; register your own Azure \
-             application (README, \"Your own OAuth application\").",
-            paths.config_file().display()
-        ))
-    })?;
+    let client = auth::client::effective(&cfg.auth)
+        .ok_or_else(|| Error::Config(auth::client::none_message(&paths.config_file())))?;
+    reporter.status(format!("Signing in through {}.", auth::client::describe(Some(client))));
+    if client.kind == auth::client::ClientKind::Public {
+        reporter.status("To use your own Azure application instead, set auth.client_id.");
+    }
     let store = TokenStore::open(&cfg.auth, paths)?;
     let http = launch::http_client(cfg)?;
-    let tokens = msa::interactive_login(&http, client_id, flow, reporter).await?;
+    let tokens = msa::interactive_login(&http, client.id, flow, reporter).await?;
     let refresh = tokens.refresh_token.ok_or_else(|| {
         Error::Auth("Microsoft returned no refresh token; the app must be allowed the `offline_access` scope".into())
     })?;
     // Walk the whole chain now, so problems (Xbox profile, Mojang app approval, ownership)
     // surface at login rather than at the first launch.
-    let session =
-        auth::session_from_msa(&http, tokens.access_token, cfg.auth.allow_game_pass, auth::client::ClientKind::Own)
-            .await?;
+    let session = auth::session_from_msa(&http, tokens.access_token, cfg.auth.allow_game_pass, client.kind).await?;
     store.save(account, &refresh)?;
     let _ = auth::activity::record(paths, account, "sign-in", "");
     // A sign-in pins the profile the first time. A profile that differs from an existing
@@ -951,16 +949,12 @@ async fn open_session(
     http: &crate::net::http::HttpClient,
     account: &str,
 ) -> Result<auth::Session> {
-    let client_id = cfg
-        .auth
-        .client_id
-        .as_deref()
-        .ok_or_else(|| Error::Config("auth.client_id is not set; sign in first (`bastion-mc login`)".into()))?;
+    let client = auth::client::effective(&cfg.auth)
+        .ok_or_else(|| Error::Config(auth::client::none_message(&paths.config_file())))?;
     let store = TokenStore::open(&cfg.auth, paths)?;
     let refresh = store
         .load(account)?
         .ok_or_else(|| Error::Auth(format!("not signed in (account {account:?}). Run `bastion-mc login` first.")))?;
-    let client = auth::client::Client { id: client_id, kind: auth::client::ClientKind::Own };
     let (session, next) = auth::authenticate(http, client, &refresh, cfg.auth.allow_game_pass).await?;
     drop(refresh);
     store.save(account, &next)?;

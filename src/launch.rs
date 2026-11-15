@@ -476,12 +476,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
                 .to_string(),
         });
     }
-    if !demo && !opts.burner && cfg.auth.client_id.is_none() {
-        return Err(Error::Config(
-            "auth.client_id is not set. This launcher ships no client ID: register your own Azure application \
-             and put its ID in config.toml (see README), or use --demo to test the sandbox without an account."
-                .into(),
-        ));
+    if !demo && !opts.burner && auth::client::effective(&cfg.auth).is_none() {
+        return Err(Error::Config(auth::client::none_message(&paths.config_file())));
     }
 
     // What the desktop will be asked for (display, audio, GPU) is decided here, long before
@@ -858,12 +854,11 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         None
     } else {
         reporter.phase(Phase::Authenticating);
-        let client_id = cfg.auth.client_id.as_deref().expect("checked above");
+        let client = auth::client::effective(&cfg.auth).expect("checked above");
         let store = TokenStore::open(&cfg.auth, paths)?;
         let refresh = store.load(&opts.account)?.ok_or_else(|| {
             Error::Auth(format!("not signed in (account {:?}). Run `bastion-mc login` first.", opts.account))
         })?;
-        let client = auth::client::Client { id: client_id, kind: auth::client::ClientKind::Own };
         let (session, next_refresh) = auth::authenticate(&http, client, &refresh, cfg.auth.allow_game_pass).await?;
         drop(refresh);
         store.save(&opts.account, &next_refresh)?;

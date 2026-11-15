@@ -134,6 +134,18 @@ fn status_reports_account_and_instances_without_touching_a_token() {
 }
 
 #[test]
+fn status_says_which_app_a_sign_in_goes_to() {
+    let sandbox = Sandbox::new("which-app");
+    sandbox.write_config("[auth]\nclient_id = \"00000000-0000-4000-8000-000000000000\"\n");
+    let (events, code) = sandbox.run(&["status"]);
+    assert_eq!(code, 0, "{events:?}");
+    let account =
+        events.iter().find_map(|e| if let Event::Account(a) = e { Some(a) } else { None }).expect("an account");
+    assert!(account.client_id_configured);
+    assert_eq!(account.app, Some(bastion_mc_proto::SignInApp::Own), "your own client ID is your own app");
+}
+
+#[test]
 fn failures_are_events_with_the_exit_status_and_nothing_else_on_stdout() {
     let sandbox = Sandbox::new("errors");
     // Unknown instance: a usage error (2), reported after the launch had begun.
@@ -240,6 +252,9 @@ fn a_pending_sign_in_is_abandoned_on_stop_and_when_the_front_end_disappears() {
         let mut child = sandbox.command(&["login"]).stdin(Stdio::piped()).spawn().unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         assert_eq!(next_event(&mut lines), hello());
+        // First the launcher says which application the sign-in goes to.
+        let Event::Status { text } = next_event(&mut lines) else { panic!("no line naming the application") };
+        assert!(text.starts_with("Signing in through your own app"), "{text}");
         let Event::BrowserLogin { url, timeout_secs } = next_event(&mut lines) else { panic!("no sign-in prompt") };
         assert!(url.starts_with("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?"), "{url}");
         assert!(url.contains("code_challenge_method=S256") && url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A"));
