@@ -28,6 +28,7 @@
 
 pub mod activity;
 pub mod canary;
+pub mod client;
 pub mod identity;
 pub mod minecraft;
 pub mod msa;
@@ -97,26 +98,32 @@ pub(crate) fn clean(text: &str) -> String {
 /// (Microsoft rotates it on use).
 pub async fn authenticate(
     api: &impl Api,
-    client_id: &str,
+    client: client::Client<'_>,
     refresh_token: &Secret,
     allow_game_pass: bool,
 ) -> Result<(Session, Secret)> {
-    let msa = msa::refresh(api, client_id, refresh_token).await?;
+    let msa = msa::refresh(api, client.id, refresh_token).await?;
     let next_refresh = match msa.refresh_token {
         Some(t) => t,
         None => refresh_token.try_clone()?,
     };
-    let session = session_from_msa(api, msa.access_token, allow_game_pass).await?;
+    let session = session_from_msa(api, msa.access_token, allow_game_pass, client.kind).await?;
     Ok((session, next_refresh))
 }
 
-/// Microsoft access token → Xbox Live → XSTS → Minecraft → entitlement → profile.
-pub async fn session_from_msa(api: &impl Api, msa_access: Secret, allow_game_pass: bool) -> Result<Session> {
+/// Microsoft access token → Xbox Live → XSTS → Minecraft → entitlement → profile. `kind` is
+/// whose application the token was issued to, for the message when Mojang refuses it.
+pub async fn session_from_msa(
+    api: &impl Api,
+    msa_access: Secret,
+    allow_game_pass: bool,
+    kind: client::ClientKind,
+) -> Result<Session> {
     let xbl = xbox::user_token(api, &msa_access).await?;
     drop(msa_access); // wiped
     let xsts = xbox::xsts_token(api, &xbl).await?;
     drop(xbl);
-    let access_token = minecraft::login_with_xbox(api, &xsts).await?;
+    let access_token = minecraft::login_with_xbox(api, &xsts, kind).await?;
     drop(xsts);
     let license = minecraft::check_entitlement(api, &access_token, allow_game_pass).await?;
     let profile = minecraft::profile(api, &access_token).await?;
@@ -171,6 +178,11 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use super::client::{Client, ClientKind};
+
+    /// The client of most tests: an own application.
+    const OWN: Client<'static> = Client { id: "01234567-89ab-cdef-0123-456789abcdef", kind: ClientKind::Own };
+
     use super::{testing::Scripted, *};
 
     const MSA_OK: &str = r#"{"token_type":"Bearer","expires_in":3600,"access_token":"MSA-ACCESS","refresh_token":"MSA-REFRESH-ROTATED"}"#;
@@ -197,8 +209,7 @@ mod tests {
     async fn full_chain_passes_each_token_to_exactly_the_next_step() {
         let api = happy();
         let refresh = Secret::from_slice(b"OLD-REFRESH").unwrap();
-        let (session, next) =
-            authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.unwrap();
+        let (session, next) = authenticate(&api, OWN, &refresh, false).await.unwrap();
         assert_eq!(session.access_token.expose(), b"MC-ACCESS-TOKEN");
         assert_eq!(session.profile_name, "Notch");
         assert_eq!(session.profile_id, "069a79f444e94726a5befca90e38aaf5");
@@ -238,7 +249,7 @@ mod tests {
         let mut api = happy();
         api.replies[0].2 = r#"{"access_token":"MSA-ACCESS","expires_in":3600}"#.into();
         let refresh = Secret::from_slice(b"OLD-REFRESH").unwrap();
-        let (_, next) = authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.unwrap();
+        let (_, next) = authenticate(&api, OWN, &refresh, false).await.unwrap();
         assert_eq!(next.expose(), b"OLD-REFRESH");
     }
 
@@ -268,7 +279,7 @@ mod tests {
             api.replies[step].1 = status;
             api.replies[step].2 = body.to_string();
             let refresh = Secret::from_slice(b"R").unwrap();
-            let err = authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.unwrap_err();
+            let err = authenticate(&api, OWN, &refresh, false).await.unwrap_err();
             assert!(matches!(err, Error::Auth(_)), "step {step}: {err}");
             assert!(err.to_string().contains(expect), "step {step}: {err}");
             assert_eq!(api.requests().len(), step + 1, "step {step}: the chain must stop at the failing call");
@@ -276,12 +287,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unapproved_public_app_is_named_as_bastion_mcs_not_yours() {
+        let mut api = happy();
+        api.replies[3].1 = 403;
+        api.replies[3].2 = r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#.to_string();
+        let refresh = Secret::from_slice(b"R").unwrap();
+        let public = Client { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", kind: ClientKind::Public };
+        let err = authenticate(&api, public, &refresh, false).await.unwrap_err().to_string();
+        assert!(err.contains("bastion-mc's application"), "{err}");
+        assert!(!err.contains("your Azure application"), "{err}");
+    }
+
+    #[tokio::test]
     async fn game_pass_is_opt_in() {
         let mut api = happy();
         api.replies[4].2 = r#"{"items":[],"signature":"s","keyId":"1"}"#.into();
         let refresh = Secret::from_slice(b"R").unwrap();
-        assert!(authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.is_err());
-        let (s, _) = authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, true).await.unwrap();
+        assert!(authenticate(&api, OWN, &refresh, false).await.is_err());
+        let (s, _) = authenticate(&api, OWN, &refresh, true).await.unwrap();
         assert_eq!(s.license, minecraft::License::Unlisted);
     }
 
@@ -291,7 +314,7 @@ mod tests {
         let mut api = happy();
         api.replies[1].2 = r#"{"Token":"XBL\",\"injected\":\"x","DisplayClaims":{"xui":[{"uhs":"1"}]}}"#.into();
         let refresh = Secret::from_slice(b"R").unwrap();
-        assert!(authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.is_err());
+        assert!(authenticate(&api, OWN, &refresh, false).await.is_err());
         // A profile name is later a program argument and a log line.
         for bad in [
             r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"--demo"}"#,
@@ -300,10 +323,7 @@ mod tests {
         ] {
             let mut api = happy();
             api.replies[5].2 = bad.to_string();
-            assert!(
-                authenticate(&api, "01234567-89ab-cdef-0123-456789abcdef", &refresh, false).await.is_err(),
-                "{bad}"
-            );
+            assert!(authenticate(&api, OWN, &refresh, false).await.is_err(), "{bad}");
         }
     }
 }

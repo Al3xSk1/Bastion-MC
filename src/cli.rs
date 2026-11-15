@@ -920,7 +920,9 @@ async fn login(paths: &Paths, cfg: &Config, flow: AuthFlow, account: &str, repor
     })?;
     // Walk the whole chain now, so problems (Xbox profile, Mojang app approval, ownership)
     // surface at login rather than at the first launch.
-    let session = auth::session_from_msa(&http, tokens.access_token, cfg.auth.allow_game_pass).await?;
+    let session =
+        auth::session_from_msa(&http, tokens.access_token, cfg.auth.allow_game_pass, auth::client::ClientKind::Own)
+            .await?;
     store.save(account, &refresh)?;
     let _ = auth::activity::record(paths, account, "sign-in", "");
     // A sign-in pins the profile the first time. A profile that differs from an existing
@@ -957,7 +959,8 @@ async fn open_session(
     let refresh = store
         .load(account)?
         .ok_or_else(|| Error::Auth(format!("not signed in (account {account:?}). Run `bastion-mc login` first.")))?;
-    let (session, next) = auth::authenticate(http, client_id, &refresh, cfg.auth.allow_game_pass).await?;
+    let client = auth::client::Client { id: client_id, kind: auth::client::ClientKind::Own };
+    let (session, next) = auth::authenticate(http, client, &refresh, cfg.auth.allow_game_pass).await?;
     drop(refresh);
     store.save(account, &next)?;
     Ok(session)

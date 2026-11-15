@@ -221,7 +221,8 @@ impl Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
-    /// Application (client) ID of YOUR OWN Azure app registration. There is no built-in ID.
+    /// Application (client) ID of YOUR OWN Azure app registration. Unset: bastion-mc's public
+    /// application, when the build has one (`auth::client`).
     pub client_id: Option<String>,
     pub flow: AuthFlow,
     pub token_store: TokenStore,
@@ -314,7 +315,7 @@ impl Default for AgeConfig {
     }
 }
 
-fn validate_client_id(id: &str) -> Result<()> {
+pub(crate) fn validate_client_id(id: &str) -> Result<()> {
     let b = id.as_bytes();
     let shape_ok = b.len() == 36
         && b.iter().enumerate().all(|(i, c)| match i {
@@ -925,7 +926,10 @@ mod tests {
         assert!(c.sandbox.tripwire);
         assert!(!c.java.allow_serialization);
         assert_eq!(c.java.matching, JavaMatch::Exact);
-        assert!(c.auth.client_id.is_none(), "there must be no built-in client id");
+        assert!(
+            c.auth.client_id.is_none(),
+            "the default configuration names no client ID; the public one is auth::client::PUBLIC_CLIENT_ID"
+        );
         assert!(c.downloads.verify_assets_on_launch);
         assert_eq!(c.sandbox.cgroup, CgroupMode::Auto);
         assert_eq!(c.launcher.confine, ConfineMode::Auto);

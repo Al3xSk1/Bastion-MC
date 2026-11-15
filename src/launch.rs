@@ -863,7 +863,8 @@ pub async fn launch(paths: &Paths, cfg: &Config, opts: &LaunchOptions, reporter:
         let refresh = store.load(&opts.account)?.ok_or_else(|| {
             Error::Auth(format!("not signed in (account {:?}). Run `bastion-mc login` first.", opts.account))
         })?;
-        let (session, next_refresh) = auth::authenticate(&http, client_id, &refresh, cfg.auth.allow_game_pass).await?;
+        let client = auth::client::Client { id: client_id, kind: auth::client::ClientKind::Own };
+        let (session, next_refresh) = auth::authenticate(&http, client, &refresh, cfg.auth.allow_game_pass).await?;
         drop(refresh);
         store.save(&opts.account, &next_refresh)?;
         // From here on no refresh token is in this process's memory. The stored one is still

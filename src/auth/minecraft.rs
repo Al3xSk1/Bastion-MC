@@ -159,7 +159,7 @@ fn bearer(token: &Secret) -> Result<Headers> {
     Ok(vec![sensitive_header("authorization", &value)?, header("accept", "application/json")?])
 }
 
-pub async fn login_with_xbox(api: &impl Api, xsts: &XboxToken) -> Result<Secret> {
+pub async fn login_with_xbox(api: &impl Api, xsts: &XboxToken, kind: super::client::ClientKind) -> Result<Secret> {
     let mut body = Vec::with_capacity(xsts.token.len() + 96);
     body.extend_from_slice(br#"{"identityToken":"XBL3.0 x="#);
     body.extend_from_slice(xsts.user_hash.as_bytes());
@@ -173,13 +173,9 @@ pub async fn login_with_xbox(api: &impl Api, xsts: &XboxToken) -> Result<Secret>
         let detail =
             serde_json::from_slice::<ServiceError>(reply.body.expose()).ok().and_then(|e| e.error).unwrap_or_default();
         if detail.contains("Invalid app registration") {
-            // The single most common failure with a self-provisioned client ID.
-            return Err(Error::Auth(
-                "Minecraft services refused your Azure application (\"Invalid app registration\"). New client IDs \
-                 must be approved by Mojang before they may call the Minecraft API: see https://aka.ms/AppRegInfo \
-                 and submit the review form linked there. Nothing in this launcher can bypass that."
-                    .into(),
-            ));
+            // The single most common failure with a newly registered client ID; whose it is
+            // decides what the user can do about it.
+            return Err(Error::Auth(super::client::not_approved_message(kind)));
         }
         return Err(Error::Auth(format!("Minecraft login failed: HTTP {} {}", reply.status, clean(&detail))));
     }
