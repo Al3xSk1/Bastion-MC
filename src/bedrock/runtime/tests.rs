@@ -355,11 +355,21 @@ fn the_production_policy_refuses_a_program_the_user_owns() {
     let message = refused(discover(&configured(&copy)));
     assert!(message.contains("/tmp is writable by group or others"), "{message}");
     fs::remove_dir_all(&dir).unwrap();
-    // Under the home directory (this clone is): refused for that, before anything is opened.
-    let home_copy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/r5-store-client-test/mcpelauncher-client");
-    let message = refused(discover(&configured(&home_copy)));
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    if home.as_os_str().len() > 1 && home_copy.starts_with(&home) {
+    // Under the home directory: refused for that, before anything is opened — checked only
+    // where this checkout lies under a home directory (the two the discovery itself reads:
+    // `$HOME` and the account's passwd entry). A checkout elsewhere, such as CI's under `/__w/`,
+    // would only show that a path which does not exist is refused as not existing.
+    let home_copy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/bedrock-home-test/mcpelauncher-client");
+    let homes: Vec<PathBuf> = [
+        std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()),
+        nix::unistd::User::from_uid(nix::unistd::getuid()).ok().flatten().map(|u| u.dir),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|home| home.as_os_str().len() > 1)
+    .collect();
+    if homes.iter().any(|home| home_copy.starts_with(home)) {
+        let message = refused(discover(&configured(&home_copy)));
         assert!(message.contains("under your home directory"), "{message}");
     }
 }
