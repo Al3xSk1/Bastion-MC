@@ -26,7 +26,7 @@ The index's Global Constraints apply. In addition:
 2. **Orphans after a failure.** QEMU and swtpm run in their own process group and are killed on drop and on panic. Pinned by Task 3 `dropping_a_vm_kills_qemu_and_swtpm`.
 3. **Socket paths over the UNIX limit when `target/` is deep.** Pinned by Task 3 `socket_paths_stay_under_the_unix_limit`.
 4. **A partial or swapped ISO download.** The BLAKE2b sum and the signature both refuse it; a partial file is deleted, never resumed. Pinned by Task 1 `fetch_iso_refuses_a_file_whose_checksum_does_not_match` and `fetch_iso_refuses_a_bad_signature`.
-5. **Several VM tests at once exhausting memory.** VM tests take a shared lock in `target/vm/.lock`, so by default one VM runs at a time (`BASTION_OS_VMS=N` raises it). Pinned by Task 3 `vm_tests_take_the_shared_lock`.
+5. **Several VM tests at once exhausting memory, including VM tests run from other clones on the same machine.** VM tests take a machine-wide lock, `/run/user/<uid>/bastion-vm.lock` (flock), so by default one VM runs on the machine at a time (`BASTION_OS_VMS=N` raises it). Pinned by Task 3 `vm_tests_take_the_shared_lock`.
 
 ---
 
@@ -131,7 +131,7 @@ The index's Global Constraints apply. In addition:
   - `expect_times_out_with_the_tail_of_the_output`: the error text holds the last 40 lines.
   - `socket_paths_stay_under_the_unix_limit`: with a 200-character `CARGO_TARGET_DIR`, every socket path is under 100 bytes.
   - `dropping_a_vm_kills_qemu_and_swtpm`: the child is `sleep 600` standing in for qemu; after drop, the process group is gone.
-  - `vm_tests_take_the_shared_lock`: two guards with `BASTION_OS_VMS=1`; the second waits until the first drops.
+  - `vm_tests_take_the_shared_lock`: two guards with `BASTION_OS_VMS=1` (on a lock path the test chooses); the second waits until the first drops. In production the lock is `/run/user/<uid>/bastion-vm.lock`, shared by every clone on the machine.
 - [ ] **Step 2: Run them; expect failure.** Run `cargo test -p vmtest`. Expected: FAIL (the crate is empty).
 - [ ] **Step 3: Implement the crate.**
   - Serial: a UNIX socket chardev. `run` writes `cmd; printf '\n__VMTEST_%d_%s__\n' $? <nonce>` and reads up to the marker.
