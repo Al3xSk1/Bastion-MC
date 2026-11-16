@@ -4,6 +4,7 @@
 
 **Goal:**
 - Clips leave the machine through LocalSend, send-only, during a time-limited opening. Sending works from the front end, and from the in-game phone while a game runs.
+- A screenshot manager (owner's request, 2026-11-16) lists, shows, deletes and sends each instance's screenshots, from the in-game phone and from the front end. Screenshots are sent through the same LocalSend sender.
 - Bedrock installs with one click: mcpelauncher is built into the image from pinned sources; mcpelauncher-ui runs sandboxed for the Google sign-in and download; bastion imports the version, asks once about the licence substitution, and creates the instance.
 
 **Architecture:**
@@ -305,7 +306,53 @@ The index's Global Constraints apply. In addition:
 - [ ] **Step 4: Run them; expect them to pass.** Run the same command, and the Adwaita-only run. Expected: PASS.
 - [ ] **Step 5: Commit.** `front end: Install Bedrock in one flow, with the licence question asked once`
 
-### Task 9: The notes
+### Task 9: The screenshot manager
+
+**Files:**
+- Create:
+  - `src/screenshots.rs`
+  - `crates/proto/src/screenshots.rs`
+  - `java/companion/src/bastion/companion/phone/ScreenshotsApp.java`
+  - `gui/src/view/screenshots.rs`
+- Modify:
+  - `src/cli.rs` and `src/phone/dispatch.rs` (the phone's `screenshots` verbs);
+  - `Cargo.toml` (`png`, for decoding and encoding, if `cargo deny` accepts it; the decoder has size limits);
+  - the phone's app list;
+  - the front end's app, backend and view mod.
+- Test: unit tests; tests/events.rs; the companion's existing test path (docs/notes/companion-mod.md §4); `gui/src/view/tests.rs`
+
+**Interfaces:**
+- Consumes: Tasks 1–3 (the sender, the opening, Decision 6's allowances); F2's `Answerable { receiver | pin }`.
+- Produces:
+  - **The commands:**
+    - `screenshots list [--instance ID]` emits `Event::Screenshots(Vec<Screenshot>)`. Each `Screenshot` has `instance`, `name`, `taken`, `width`, `height`, `bytes`, and `thumbnail: Option<String>` (a PNG path in the launcher's cache).
+    - `screenshots delete <instance> <name>`.
+    - `screenshots send <instance> <name>…`, which follows the same flow as `clips send`.
+  - **The phone app:** browse, view, delete, send. The phone's `screenshots send` verb uses the same flow as the clips verb.
+  - **The front end:** a Screenshots page with thumbnails grouped by instance, a large view, delete (asks first), and send.
+  - **Rules:** screenshots are written by the game, so they are untrusted.
+    - Only regular `.png` files directly inside an instance's `screenshots/` folder are listed. Names must match `^[A-Za-z0-9 _.,()-]{1,128}\.png$`, and files are opened with `O_NOFOLLOW`.
+    - Decoding has limits: at most 64 MiB, and 16384 pixels on each side.
+    - A screenshot is decoded and encoded again before it is shown in the front end or sent, so that only its pixels leave the machine, never the game's bytes or its text chunks.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `only_regular_png_files_from_the_screenshots_folder_are_listed`
+  - `a_malformed_or_oversized_png_is_refused_before_it_is_shown_or_sent`
+  - `a_screenshot_is_re_encoded_so_only_its_pixels_are_sent`
+  - `deleting_a_screenshot_needs_its_exact_name_and_refuses_links`
+  - `screenshots_send_uses_the_same_localsend_flow_as_clips`
+  - `screenshot_events_round_trip`
+  - companion: `the_screenshots_app_lists_views_deletes_and_sends`
+  - view tests, at the four sizes:
+    - `the_screenshots_page_shows_thumbnails_by_instance`
+    - `deleting_a_screenshot_asks_first`
+    - `sending_screenshots_walks_through_the_receiver_choice`
+- [ ] **Step 2: Run them; expect failure.** Run `cargo test --lib screenshots && cargo test --test events screenshots_ && cargo test -p bastion-mc-gui --lib screenshots`. Expected: FAIL.
+- [ ] **Step 3: Implement.** If the confined launcher cannot read an instance's `screenshots/` folder during a game, add a read-only Landlock rule for that one folder. Comment it with a pointer to Decision 6, and test that it is absent elsewhere.
+- [ ] **Step 4: Run them; expect them to pass.** Run the same command, and the Adwaita-only run. Expected: PASS.
+- [ ] **Step 5: Commit.** `screenshots: a manager in the phone and the front end, re-encoded before anything leaves the machine`
+
+### Task 10: The notes
 
 **Files:**
 - Create: `docs/notes/os-p5.md`

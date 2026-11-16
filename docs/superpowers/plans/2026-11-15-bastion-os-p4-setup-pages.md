@@ -6,7 +6,8 @@
 - which Microsoft app sign-ins go to, and whether the Java sign-in survives a restart;
 - the server allowlist, and joining a server;
 - mod profiles from the verified catalog, signed with a key the launcher keeps;
-- the phone services' sign-ins (Spotify, Discord, the Realms TOTP set-up).
+- the phone services' sign-ins (Spotify, Discord, the Realms TOTP set-up);
+- a config manager: every setting of `config.toml` and of each instance's `instance.toml`, from a Configuration page and the `config` commands (index Decision 13).
 
 **Architecture:**
 - **The launcher** gains `--events` support for the set-up commands that are terminal-only today (cli.rs:343-350 lists what is allowed). It also gains `server` and `token-store` commands, built on F2's config writer and P2's token-store unit.
@@ -31,7 +32,7 @@ The index's Global Constraints apply. In addition:
 2. **Switching where the Java sign-in is kept while a game runs.** Pinned by Task 1 `the_token_store_cannot_switch_while_a_game_runs`.
 3. **The launcher's own signing key lost** (a data directory restored without it). Pinned by Task 3 `a_profile_signed_by_a_key_that_is_gone_says_how_to_re_sign`.
 4. **The Spotify developer app registered with a different redirect address.** Pinned by Task 4 `a_spotify_redirect_error_names_the_address_to_register`.
-5. **A second sign-in window while one is open.** Pinned by Task 4 `a_second_sign_in_window_is_refused_while_one_is_open`.
+5. **A config key the schema does not describe,** for example a field added to the config structs later. The schema test fails until the key is described. Pinned by Task 5 `the_schema_covers_every_key_of_the_config`.
 
 ---
 
@@ -201,13 +202,128 @@ The index's Global Constraints apply. In addition:
 - [ ] **Step 4: Run them; expect them to pass.** Run the same command, then `cargo deny check`. Expected: PASS.
 - [ ] **Step 5: Commit.** `phone services: Spotify, Discord and the Realms TOTP set-up from the front end, in sign-in windows`
 
-### Task 5: The notes
+### Task 5: The config schema and a `config` command for every key
+
+**Files:**
+- Create: `src/config_schema.rs`
+- Modify:
+  - `src/config_edit.rs` (F2's writer, generalised from its fixed `Setting` list to any schema key with a typed value; F2's variants become shorthands);
+  - `src/cli.rs`: `config list [--changed]`, `config get`, `config set <key> <value> [--confirm]`, `config unset`, `config check`, all with `--events`; HELP;
+  - `crates/proto/src/setup.rs` (`ConfigView`, `KeyView`, `Event::Config`).
+- Test: unit tests in `src/config_schema.rs` and `src/config_edit.rs`; tests/events.rs
+
+**Interfaces:**
+- Consumes: F2's `config_edit::apply`, the existing parser, and `EXAMPLE_CONFIG` (`examples/config.toml`).
+- Produces:
+  - **`pub struct KeyInfo`** with fields:
+    - `path: &'static str` (dotted, for example `sandbox.allow_x11`)
+    - `kind: Kind` (`Bool`, `Int { min, max }`, `Str`, `Choice(&'static [&'static str])`, `List(Box<Kind>)`, `Table`)
+    - `default: &'static str` (as TOML text)
+    - `doc: &'static str` (one sentence)
+    - `lowers_protection: Option<&'static str>` (what it lowers, in one sentence)
+    - `os: OsRule` (`Editable`, `Fixed(&'static str)` with the reason, or `Command(&'static str)` naming the command that owns the key)
+  - **`pub fn schema() -> &'static [KeyInfo]`.**
+  - **`proto::setup::ConfigView`** with fields:
+    - `file: String`
+    - `keys: Vec<KeyView>`, each with `path`, `kind`, `value` (TOML text), `default`, `changed: bool`, `doc`, `lowers_protection: Option<String>`, `fixed_reason: Option<String>`, `command: Option<String>`
+
+    and `Event::Config(ConfigView)`.
+  - **Rules:**
+    - `set` of a `lowers_protection` key without `--confirm` ends with an `Error` that quotes what it lowers.
+    - On Bastion OS, a `Fixed` key is refused with its reason.
+    - A `Command` key names its command.
+    - Every value goes through the real parser before the file is replaced.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `the_schema_covers_every_key_of_the_config`: every key of `EXAMPLE_CONFIG` is in the schema. So is every key of `Config::default()` serialised to TOML, and nothing else.
+  - `every_schema_default_is_the_structs_default`.
+  - `setting_any_key_round_trips_through_the_parser`: for each key, a valid non-default value is written, read back and parsed.
+  - `a_protection_lowering_key_needs_confirmation`.
+  - `every_protection_lowering_key_says_what_it_lowers`.
+  - `on_bastion_os_keys_the_os_fixes_are_read_only_with_the_reason`.
+  - `unset_returns_a_key_to_its_default_and_keeps_comments`.
+  - `config_check_reports_the_parsers_message_and_line`.
+  - `config_list_changed_shows_only_keys_that_differ_from_their_default`.
+  - In tests/events.rs: `config_list_over_events_emits_the_whole_view`.
+- [ ] **Step 2: Run them; expect failure.** Run `cargo test --lib config_schema && cargo test --lib config_edit && cargo test --test events config_list`. Expected: FAIL.
+- [ ] **Step 3: Implement the schema by hand from `src/config.rs` and `examples/config.toml`.**
+  - Classify protection-lowering keys from the code and docs/THREAT_MODEL.md. At least these:
+    - `sandbox.allow_x11`, `sandbox.allow_pulse_module_loading`, `sandbox.extra_syscalls`, `sandbox.exec_allow`, `sandbox.extra_rw_dirs`, `sandbox.seccomp`
+    - `launcher.confine`
+    - `java.allow_serialization`
+    - `tls.builtin_pins`, `tls.pins`
+    - `network.mode`
+    - `downloads.extra_hosts`
+    - `bedrock.seccomp`, `bedrock.extra_syscalls`
+
+    List the final set in the notes.
+  - The OS-fixed keys follow F2's display rule, plus `launcher.confine`.
+- [ ] **Step 4: Run them; expect them to pass.** Run the same command. Expected: PASS.
+- [ ] **Step 5: Commit.** `config: a schema of every setting, and config list, get, set, unset and check for all of them`
+
+### Task 6: The Configuration page
+
+**Files:**
+- Create: `gui/src/view/config.rs`
+- Modify: `gui/src/app.rs`, `gui/src/backend.rs`, `gui/src/view/mod.rs`
+- Test: `gui/src/view/tests.rs`
+
+**Interfaces:**
+- Consumes: Task 5.
+- Produces the Configuration page:
+  - sections in the config file's order, and a search box;
+  - each key with a control for its kind (switch, number, choice, text, list), its current value, its default and its sentence;
+  - a "changed" mark and "Reset to default";
+  - protection-lowering settings: a confirmation that says what they lower before the change is sent with `--confirm`;
+  - read-only keys with their reason; keys owned by a command, linked to that command's page;
+  - "Check the file" (`config check`), and the file's path.
+
+- [ ] **Step 1: Write the failing view tests:**
+  - `the_configuration_page_groups_keys_by_section_and_finds_them_by_search`
+  - `a_changed_key_is_marked_and_can_be_reset`
+  - `turning_on_a_protection_lowering_setting_asks_first_and_says_what_it_lowers`
+  - `keys_fixed_by_bastion_os_are_read_only_with_the_reason`
+  - `an_invalid_value_shows_the_parsers_message`
+  - each at the four sizes
+- [ ] **Step 2: Run them; expect failure.** Run `cargo test -p bastion-mc-gui --lib config`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them; expect them to pass.** Run the same command, and the Adwaita-only run. Expected: PASS.
+- [ ] **Step 5: Commit.** `front end: the Configuration page — every setting, with its explanation, its default and a warning where it lowers protection`
+
+### Task 7: Instance settings
+
+**Files:**
+- Modify:
+  - `src/config_schema.rs` (`instance_schema()` for `instance.toml`, from `InstanceConfig` at src/config.rs:855);
+  - `src/config_edit.rs` (the same writer for `instance.toml`);
+  - `src/cli.rs`: `instance config <id> list|get|set|unset`;
+  - `gui/src/view/instances.rs` (a Settings panel per instance).
+- Test: unit tests; `gui/src/view/tests.rs`
+
+**Interfaces:**
+- Produces:
+  - `instance config <id> …`, with the same rules as Task 5, validated by the instance parser.
+  - `Event::Config` with `file` set to the instance file.
+  - The Instances page's Settings panel: edit and reset, with the same confirmation rule.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `instance_settings_round_trip_through_the_instance_parser`
+  - `an_instance_setting_that_lowers_protection_needs_confirmation`
+  - `the_instance_schema_covers_every_key_of_instance_toml`
+  - view test: `the_instance_settings_panel_edits_and_resets_a_key`
+- [ ] **Step 2: Run them; expect failure.** Run `cargo test --lib config_schema::instance && cargo test -p bastion-mc-gui --lib instance_settings`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them; expect them to pass.** Run the same command. Expected: PASS.
+- [ ] **Step 5: Commit.** `config: instance settings from the command line and the Instances page`
+
+### Task 8: The notes
 
 **Files:**
 - Create: `docs/notes/os-p4.md`
 
 - [ ] **Step 1: Write the notes.**
   - The new commands and events, with their final signatures.
+  - The schema's protection-lowering and OS-fixed lists.
   - How the catalog rule finds the catalog.
   - The Spotify and Discord host lists.
   - Every `Ruling:` this package made.

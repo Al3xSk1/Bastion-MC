@@ -3,13 +3,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > This file holds what every package shares: the constraints, the decisions, the contract, the order and the integration. Each package has its own plan file (table below); an implementer reads this file, then their package's file, then the package plans their package consumes.
 
-**Goal:** Build Bastion OS as designed. That means an ArchTitus-style installer that puts a signed, verified, A/B-updated image on a whole disk; a gamescope session whose only client is bastion-mc's front end; and front-end pages for everything bastion-mc's terminal commands do today.
+**Goal:** Build Bastion OS as designed. That means an ArchTitus-style installer that puts a signed, verified, A/B-updated image on a whole disk; a gamescope session whose only client is bastion-mc's front end; and front-end pages for everything bastion-mc's terminal commands do today. The owner added two things on 2026-11-16: a config manager for every launcher setting, and four new phone apps (a minecraft.wiki app, waypoints, a clock, and a screenshot manager).
 
 **Architecture:** Seven work packages in three waves.
 - **Wave 0** lays two foundations in parallel:
   - a QEMU + OVMF + swtpm test harness;
   - the launcher pieces every later page needs: OS detection, config writes, a display of its own, and sign-in windows.
-- **Wave 1** runs five packages in parallel against the contract below: the image and installer, the system services, and three groups of front-end pages with their launcher commands.
+- **Wave 1** runs six packages in parallel against the contract below: the image and installer, the system services, three groups of front-end pages with their launcher commands, and new phone apps.
 - **Wave 2** merges everything, runs the whole flow in VMs, and writes the documents.
 
 **Tech Stack:** bash + whiptail (installer); mkosi 27.1 and systemd 262 (systemd-repart, ukify, systemd-cryptenroll, systemd-sysupdate, systemd-boot); nftables, polkit, NetworkManager, gamescope 3.17, PipeWire, Sunshine, age 1.3 + age-plugin-tpm 1.0; Rust for the launcher, the front end (iced 0.14) and a new root helper; QEMU + OVMF + swtpm for verification.
@@ -25,8 +25,9 @@
 | P1 Image and installer | `2026-11-15-bastion-os-p1-image-and-installer.md` | 1 | `packaging/os/{mkosi,repart,secureboot,install}/`, `packaging/os/{install.sh,build-image.sh,sources.toml,player-config.toml}`, `tests/os_recipe.rs`, `tests/os_install.rs` |
 | P2 System services | `2026-11-15-bastion-os-p2-system-services.md` | 1 | `crates/os/` (the root helper `bastion-os`), the units, polkit rule, firewall, session and Sunshine files under `packaging/os/mkosi/mkosi.extra/`, `tests/os_services.rs` |
 | P3 System pages | `2026-11-15-bastion-os-p3-system-pages.md` | 1 | the launcher's `os` and `network` commands, `crates/proto/src/os.rs`, the front end's System, Network and Remote play pages |
-| P4 Setup pages | `2026-11-15-bastion-os-p4-setup-pages.md` | 1 | the launcher's `server`, `token-store`, profile/key, phone-login commands with `--events`, the front end's Settings, Servers, Mods and Phone pages |
-| P5 Clips and Bedrock | `2026-11-15-bastion-os-p5-clips-and-bedrock.md` | 1 | `src/localsend/`, the launcher's `clips` and Bedrock set-up commands, `crates/proto/src/{clips,bedrock_setup}.rs`, the recipe fragment that builds mcpelauncher, the front end's Sending clips and Install Bedrock flows |
+| P4 Setup pages | `2026-11-15-bastion-os-p4-setup-pages.md` | 1 | the launcher's `server`, `token-store`, profile/key, phone-login commands with `--events`, the front end's Settings, Servers, Mods and Phone pages; the config manager (`src/config_schema.rs`, `config list|get|set|unset|check` for every key, `instance config`, the Configuration page) |
+| P5 Clips and Bedrock | `2026-11-15-bastion-os-p5-clips-and-bedrock.md` | 1 | `src/localsend/`, the launcher's `clips` and Bedrock set-up commands, `crates/proto/src/{clips,bedrock_setup}.rs`, the recipe fragment that builds mcpelauncher, the front end's Sending clips and Install Bedrock flows; the screenshot manager (the phone app and the front-end page) |
+| P6 Phone apps | `2026-11-16-bastion-os-p6-phone-apps.md` | 1 | the phone apps Wiki (minecraft.wiki), Waypoints and Clock (`java/companion/src/bastion/companion/phone/`), their launcher handlers in `src/phone/`, `tests/phone_apps.rs` |
 
 Each package works in its own clone under `target/agents/` (the owner's standing preference), on a branch named after the package. Each ends with a report that gives:
 - the head commit and the test counts;
@@ -35,7 +36,7 @@ Each package works in its own clone under `target/agents/` (the owner's standing
 
 The spec's `tests/os/` becomes Cargo integration-test files: `tests/os_harness.rs`, `tests/os_recipe.rs`, `tests/os_install.rs` and `tests/os_services.rs`. Their fixtures and support files go under `tests/os/`.
 
-Packages write their user-facing text into `docs/notes/os-<package>.md` (for example `docs/notes/os-p3.md`). Only the Wave 2 documents pass touches README.md, docs/THREAT_MODEL.md, docs/OS.md and the website, so that five packages do not fight over the same paragraphs or the website's REQUIRE ties.
+Packages write their user-facing text into `docs/notes/os-<package>.md` (for example `docs/notes/os-p3.md`). Only the Wave 2 documents pass touches README.md, docs/THREAT_MODEL.md, docs/OS.md and the website, so that six packages do not fight over the same paragraphs or the website's REQUIRE ties.
 
 ## Global Constraints
 
@@ -152,6 +153,21 @@ Each decision rules on something the spec left open, or settles a conflict found
     - `test` is `minimal` plus a root shell on `ttyS0` and a way to run a command as the player inside the active session. Those hooks exist only in `test`, and a static test proves it.
     - The owner's machine always gets `full`.
 12. **The player's bastion-mc config is written at install** from `packaging/os/player-config.toml` (C1). That makes the age store, the TPM identity, clips and PipeWire audio the defaults on the OS.
+13. **The config manager covers bastion-mc's own files: `config.toml` and each instance's `instance.toml`.**
+    - Every key is described in one schema in the launcher: its type, default, allowed values, a one-sentence explanation, whether it lowers protection, and whether Bastion OS fixes it. A test fails when the schema and the config structs disagree.
+    - Writes go only through the launcher's writer: comments are kept, the real parser validates the result, and the replace is atomic.
+    - A setting that lowers protection needs an explicit confirmation that names what it lowers.
+    - On Bastion OS, keys the OS fixes (the game's display, for example) are read-only, with the reason shown.
+    - Keys that belong to a command (`auth.token_store` belongs to `token-store`, `network.servers` to `server`) point to that command.
+    - The game's own files (`options.txt`, mod configs) are not in the first version: the game writes them, so they are untrusted input.
+    - Cost if wrong: a later version adds game files, behind the same untrusted-input rules.
+14. **Phone apps hold no secrets and reach the network only through the launcher.**
+    - The owner chose four apps on 2026-11-16:
+      - a minecraft.wiki app, Waypoints and a Clock (P6);
+      - a screenshot manager (P5), both in the phone and in the front end, because it sends through P5's LocalSend sender.
+    - Anything an app shows from the network comes from a launcher service, as Spotify's and Realms' do.
+    - Data the game sends to the launcher is untrusted: lengths are limited and every value is validated.
+    - Cost if wrong: an app that needs more is dropped from the first version and recorded.
 
 ## The contract
 
@@ -308,6 +324,16 @@ enabled = true
 - `bedrock remove-google-sign-in`.
 - `bedrock signin-window <url>`: Bastion OS only; emits `Event::BedrockSignInDone { address }`. The front end hands the address to the running game with `answer signin`.
 
+**Config manager (P4)**
+- `config list [--changed]`: emits `Event::Config(ConfigView)`.
+- `config get <key>`.
+- `config set <key> <value> [--confirm]`: covers every key in the schema. F2's narrower `config set` becomes a special case of it.
+- `config unset <key>`: the key returns to its default, and the file's comments are kept.
+- `config check`: the parser's message and line, or `ok`.
+- `instance config <id> list|get|set|unset …`.
+
+**Phone apps (P5, P6)** add verbs to the phone's channel, not launcher commands. Each plan names its verbs.
+
 **Rules for every new command**
 - On a system that is not Bastion OS, a command that needs the OS ends with `Event::Error` and the message `this needs Bastion OS`.
 - Secrets never appear in argv. They come over the control pipe.
@@ -318,6 +344,7 @@ enabled = true
 - Each package puts its types in its own module file and adds its variants to `Event` in `lib.rs`. Wave 2 resolves the adjacent-line conflicts.
 - F2 extends the answer kinds (`Answerable` and the control-pipe parser) by `wifi`, `pin` and `receiver` up front, so that P3 and P5 do not both edit them.
 - F2 adds `Event::SignInWindow { purpose: String, open: bool }` and `Event::Settings(Settings)` (in `setup.rs`).
+- P4 adds `Event::Config(ConfigView)` (in `setup.rs`) for the config manager.
 
 ### C4 — Foundation interfaces (F2)
 
@@ -355,13 +382,13 @@ F1 records the final API in `docs/notes/os-vm-harness.md`. In outline:
 ## Order
 
 1. **Wave 0:** F1 and F2 in parallel, from `main`. Then one merge step (`target/agents/os-base`). The two touch disjoint files. The step runs fmt, clippy, the workspace tests and F1's smoke VM test.
-2. **Wave 1:** P1–P5 in parallel, each from `os-base`. VM tests that need an installed Bastion OS are written and run in P1. In P2 and P5, those tests are written against C5 and the installed image, and run in Wave 2. Their ISO-only VM tests run in the package.
+2. **Wave 1:** P1–P6 in parallel, each from `os-base`. VM tests that need an installed Bastion OS are written and run in P1. In P2 and P5, those tests are written against C5 and the installed image, and run in Wave 2. Their ISO-only VM tests run in the package.
 3. **Wave 2:** one integration agent in `target/agents/os-int`, then the documents pass (tasks below).
 4. **Then:** a fresh whole-branch review on the most capable model, one fix pass, and the replay onto `main` (the owner pushes).
 
 ## Wave 2: integration and documents
 
-### Task W2.1: Merge in order P2, P1, P3, P4, P5
+### Task W2.1: Merge in order P2, P1, P3, P4, P5, P6
 
 - [ ] Merge in that order, resolving `Event` variants, workspace members, `sources.toml` and `mkosi.extra/` conflicts by keeping both sides.
 - [ ] After each merge, run `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. Expected: 0 failed.
@@ -401,6 +428,7 @@ F1 records the final API in `docs/notes/os-vm-harness.md`. In outline:
 - [ ] README: Status rows; the new commands; the test table rows (`BASTION_OS_TESTS`); the counts.
 - [ ] TODO: the owner-only checks below, under "Blocked on you".
 - [ ] The website: an OS page with REQUIRE ties.
+- [ ] The config manager and the phone apps: README sections, mentions in docs/OS.md, and the website's phone page.
 - [ ] The site check passes, and so does the GUI suite with only Adwaita fonts.
 - [ ] Commit.
 
